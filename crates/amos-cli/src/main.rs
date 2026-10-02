@@ -4,7 +4,9 @@
 //! amos-cli list prog.AMOS                 list a program as text
 //! amos-cli build prog.AMOS [opts]         make a standalone app (see build.rs)
 //! amos-cli edit [prog] [--keys K] [--png F] drive the editor (see edit.rs)
+//! amos-cli compile prog [-o out.wasm]     compile to WebAssembly (see compile.rs)
 //! amos-cli run prog.AMOS|prog.txt [opts]  run headless
+//!     --compiled      run the program compiled to wasm (wasmtime)
 //!     --frames N      number of 1/50 s frames to run (default 150)
 //!     --png FILE      save the final display as a PNG
 //!     --keys TEXT     type TEXT (\n = Return) during the run
@@ -14,6 +16,7 @@
 //! ```
 
 mod build;
+mod compile;
 mod edit;
 
 use std::path::{Path, PathBuf};
@@ -29,10 +32,11 @@ fn main() -> ExitCode {
     let result = match args.first().map(String::as_str) {
         Some("list") if args.len() >= 2 => list(Path::new(&args[1])),
         Some("run") if args.len() >= 2 => run(&args[1..]),
+        Some("compile") if args.len() >= 2 => compile::compile(&args[1..]),
         Some("edit") => edit::edit(&args[1..]),
         Some("build") if args.len() >= 2 => build::build(&args[1..]),
         _ => {
-            eprintln!("usage: amos-cli list FILE | run FILE [--frames N] [--png FILE] [--keys TEXT]");
+            eprintln!("usage: amos-cli list FILE | compile FILE [-o OUT.wasm] | run FILE [--compiled] [--frames N] [--png FILE] [--keys TEXT]");
             return ExitCode::from(2);
         }
     };
@@ -62,7 +66,10 @@ fn list(path: &Path) -> Result<(), String> {
 }
 
 fn run(args: &[String]) -> Result<(), String> {
-    let path = PathBuf::from(&args[0]);
+    // `--compiled` may come anywhere (`run --compiled FILE`).
+    let compiled = args.iter().any(|a| a == "--compiled");
+    let args: Vec<String> = args.iter().filter(|a| *a != "--compiled").cloned().collect();
+    let path = PathBuf::from(args.first().ok_or("no program")?);
     let mut frames = 150;
     let mut png_path = None;
     let mut keys = String::new();
@@ -85,7 +92,10 @@ fn run(args: &[String]) -> Result<(), String> {
     let mut m = Machine::new();
     let base = dir.or_else(|| path.parent().map(Path::to_path_buf)).unwrap_or_else(|| PathBuf::from("."));
     m.hw.files.set_native_root(&base);
-    if let Err(e) = m.run_program(&prg) {
+    let mut program = None;
+    if compiled {
+        program = Some(compile::start(&mut m, &prg)?);
+    } else if let Err(e) = m.run_program(&prg) {
         return Err(format!("test error: {} at {}", amos_core::errors::test_message(e.code), e.pos));
     }
     let mut keys = keys.chars();
@@ -101,7 +111,10 @@ fn run(args: &[String]) -> Result<(), String> {
             // Return is character 13 on the Amiga.
             m.input(InputEvent::Char(if c == '\n' { '\r' } else { c }));
         }
-        m.vbl();
+        match program.as_mut() {
+            Some(p) => p.vbl(&mut m),
+            None => m.vbl(),
+        }
         for line in m.hw.log.drain(..) {
             println!("{line}");
         }

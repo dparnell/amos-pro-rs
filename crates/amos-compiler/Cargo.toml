@@ -1,0 +1,13 @@
+[package]
+name = "amos-compiler"
+description = "AMOS Professional to WebAssembly compiler"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+amos-core = { version = "0.1.0", path = "../amos-core" }
+wasm-encoder = "0.260.0"
+
+[dev-dependencies]
+wasmparser = "0.260.0"

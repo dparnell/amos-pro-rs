@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/amos-core", "crates/amos-app", "crates/amos-cli", "crates/amos-build"]
+members = ["crates/amos-core", "crates/amos-app", "crates/amos-cli", "crates/amos-build", "crates/amos-compiler", "crates/amos-wasmhost"]
 
 [workspace.package]
 version = "0.1.0"
