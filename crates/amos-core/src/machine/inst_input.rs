@@ -69,7 +69,8 @@ impl Hardware {
                 let s = self.screens.get(n.max(0) as usize).ok_or(Exc::Error(errors::SCREEN_NOT_OPENED))?;
                 let (x, y) = (s.display_x, s.display_y);
                 let w = s.display_w as i32;
-                let h = if s.lace { s.display_h as i32 / 2 } else { s.display_h as i32 };
+                // display_h is in raster lines (already halved for laced screens).
+                let h = s.display_h as i32;
                 self.input.limit_mouse(Some((x, y, x + w - 1, y + h - 1)));
             }
             LIMIT_MOUSE_3 => {

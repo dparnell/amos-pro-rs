@@ -319,5 +319,7 @@ impl Hardware {
     /// Called when banks were loaded or erased (sprite bank, samples...).
     pub(crate) fn on_banks_changed(&mut self) {
         self.sound_bank_check();
+        // Sprite/icon masks are made lazily from the bank images.
+        self.sprites.masks = Default::default();
     }
 }

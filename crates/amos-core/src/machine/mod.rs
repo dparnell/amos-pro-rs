@@ -63,6 +63,8 @@ pub struct Hardware {
     /// Program to start after the current one stopped (`Run "file"`).
     pub pending_run: Option<Vec<u8>>,
     pub menus: crate::menus::Menus,
+    /// Blocks, scroll zones, font list (shared by all screens).
+    pub draw: crate::gfx::blocks::DrawGlobals,
     /// Last key checked against menu shortcuts.
     pub menu_key_serial: u64,
 }
@@ -88,6 +90,7 @@ impl Hardware {
             input_separators: (10, -1),
             pending_run: None,
             menus: Default::default(),
+            draw: Default::default(),
             menu_key_serial: 0,
         };
         hw.reset();
@@ -97,6 +100,7 @@ impl Hardware {
     /// `Default`: state at the start of a program (default screen open).
     pub fn reset(&mut self) {
         self.screen_reset();
+        self.draw_reset();
         self.sprites_reset();
         self.sound_reset();
     }
