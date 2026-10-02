@@ -1,0 +1,9 @@
+[package]
+name = "amos-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+amos-core = { version = "0.1.0", path = "../amos-core" }
+png = "0.18.1"

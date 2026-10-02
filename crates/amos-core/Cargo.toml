@@ -1,0 +1,9 @@
+[package]
+name = "amos-core"
+description = "Platform independent AMOS Professional runtime: file formats, interpreter, screens, sound"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+log = "0.4.34"

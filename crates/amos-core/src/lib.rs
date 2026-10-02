@@ -1,0 +1,22 @@
+//! Platform independent AMOS Professional runtime.
+
+pub mod audio;
+pub mod banks;
+pub mod detok;
+pub mod display;
+pub mod error;
+pub mod errors;
+pub mod ffp;
+pub mod files;
+pub mod gfx;
+pub mod input;
+pub mod interp;
+pub mod machine;
+pub mod number;
+pub mod program;
+pub mod tokenise;
+pub mod tokens;
+
+pub use error::{AmosError, Result};
+pub use machine::Machine;
+pub use program::Program;
