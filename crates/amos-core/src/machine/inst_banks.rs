@@ -317,5 +317,7 @@ impl Hardware {
     }
 
     /// Called when banks were loaded or erased (sprite bank, samples...).
-    pub(crate) fn on_banks_changed(&mut self) {}
+    pub(crate) fn on_banks_changed(&mut self) {
+        self.sound_bank_check();
+    }
 }
