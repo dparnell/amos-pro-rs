@@ -45,7 +45,7 @@ impl App {
     fn new(proxy: EventLoopProxy<UserEvent>) -> Self {
         Self {
             proxy,
-            machine: Machine::new(),
+            machine: new_machine(),
             window: None,
             renderer: None,
             audio: None,
@@ -78,6 +78,9 @@ impl App {
         while self.vbl_accumulator >= 1.0 {
             self.vbl_accumulator -= 1.0;
             self.machine.vbl();
+            for line in self.machine.hw.log.drain(..) {
+                log::info!("{line}");
+            }
         }
     }
 
@@ -110,6 +113,8 @@ impl ApplicationHandler<UserEvent> for App {
             attributes = attributes.with_canvas(web::find_canvas()).with_append(true).with_focusable(true);
         }
         let window = Arc::new(event_loop.create_window(attributes).expect("failed to create window"));
+        // AMOS draws its own mouse pointer (hardware sprite 0).
+        window.set_cursor_visible(false);
         self.window = Some(window.clone());
 
         let proxy = self.proxy.clone();
@@ -199,6 +204,55 @@ impl ApplicationHandler<UserEvent> for App {
     }
 }
 
+/// Creates the machine and, on native builds, starts the program given on
+/// the command line (its folder becomes the current AMOS directory).
+fn new_machine() -> Machine {
+    #[allow(unused_mut)]
+    let mut m = Machine::new();
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Some(arg) = std::env::args().nth(1) {
+        let path = std::path::PathBuf::from(&arg);
+        let dir = path.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| ".".into());
+        m.hw.files.set_native_root(&dir);
+        match std::fs::read(&path) {
+            Ok(data) => {
+                let prg = if data.starts_with(b"AMOS") {
+                    amos_core::Program::load(&data).map_err(|e| e.to_string())
+                } else {
+                    amos_core::tokenise::tokenise_program(&data).map_err(|(l, e)| format!("line {l}: {e:?}"))
+                };
+                match prg {
+                    Ok(prg) => {
+                        if let Err(e) = m.run_program(&prg) {
+                            log::error!("{}", amos_core::errors::test_message(e.code));
+                        }
+                    }
+                    Err(e) => log::error!("{arg}: {e}"),
+                }
+            }
+            Err(e) => log::error!("{arg}: {e}"),
+        }
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        for (path, data) in web::take_files() {
+            m.hw.files.add_distribution_file(&path, &data);
+        }
+        let _ = m.hw.files.set_current_dir("AMOSPro:");
+        if let Some(path) = web::run_path() {
+            match m.hw.files.read(&path).ok().and_then(|d| amos_core::Program::load(&d).ok()) {
+                Some(prg) => {
+                    if let Err(e) = m.run_program(&prg) {
+                        log::error!("{}", amos_core::errors::test_message(e.code));
+                    }
+                }
+                None => log::error!("cannot load {path}"),
+            }
+        }
+    }
+    m
+}
+
 /// Start AMOS Professional (native entry point; on the web see [`web::start`]).
 pub fn run() {
     #[cfg(not(target_arch = "wasm32"))]
@@ -233,10 +287,35 @@ mod web {
             .ok()
     }
 
-    #[wasm_bindgen(start)]
-    pub fn start() {
+    use std::cell::RefCell;
+
+    thread_local! {
+        static FILES: RefCell<Vec<(String, Vec<u8>)>> = const { RefCell::new(Vec::new()) };
+        static RUN: RefCell<Option<String>> = const { RefCell::new(None) };
+    }
+
+    /// Adds a file of the AMOS distribution (path relative to the AMOS
+    /// folder) before `start` is called.
+    #[wasm_bindgen]
+    pub fn add_file(path: String, data: Vec<u8>) {
+        FILES.with(|f| f.borrow_mut().push((path, data)));
+    }
+
+    pub(super) fn take_files() -> Vec<(String, Vec<u8>)> {
+        FILES.with(|f| std::mem::take(&mut *f.borrow_mut()))
+    }
+
+    pub(super) fn run_path() -> Option<String> {
+        RUN.with(|r| r.borrow().clone())
+    }
+
+    /// Starts AMOS; `run` is an AMOS path of a program to run
+    /// (e.g. "AMOSPro_Examples:Examples/H-1/Help_16.AMOS").
+    #[wasm_bindgen]
+    pub fn start(run: Option<String>) {
         console_error_panic_hook::set_once();
         let _ = console_log::init_with_level(log::Level::Info);
+        RUN.with(|r| *r.borrow_mut() = run);
         super::run();
     }
 }

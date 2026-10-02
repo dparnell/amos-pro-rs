@@ -5,15 +5,40 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>AMOS Professional</title>
   <style>
-    html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
-    canvas#amos { display: block; width: 100vw; height: 100vh; outline: none; }
+    html, body { margin: 0; height: 100%; background: #000; overflow: hidden; font-family: sans-serif; }
+    canvas#amos { display: block; width: 100vw; height: calc(100vh - 32px); outline: none; }
+    #bar { height: 32px; display: flex; gap: 8px; align-items: center; padding: 0 8px; background: #223; color: #ccd; }
+    #bar select { max-width: 60vw; }
   </style>
 </head>
 <body>
+  <div id="bar">
+    <label for="prog">Program:</label>
+    <select id="prog"><option value="">(loading…)</option></select>
+    <span id="status"></span>
+  </div>
   <canvas id="amos" tabindex="0"></canvas>
   <script type="module">
-    import init from "./pkg/amos_app.js";
+    import init, { add_file, start } from "./pkg/amos_app.js";
+    const status = document.getElementById("status");
     await init();
+    const files = await (await fetch("amos-files/manifest.json")).json();
+    let done = 0;
+    await Promise.all(files.map(async (f) => {
+      const data = new Uint8Array(await (await fetch("amos-files/" + encodeURI(f))).arrayBuffer());
+      add_file(f, data);
+      status.textContent = `Loading ${++done}/${files.length}`;
+    }));
+    status.textContent = "";
+    const select = document.getElementById("prog");
+    select.innerHTML = '<option value="">Choose a program…</option>' + files
+      .filter((f) => f.toLowerCase().endsWith(".amos"))
+      .map((f) => `<option value="${f}">${f}</option>`).join("");
+    const params = new URLSearchParams(location.search);
+    const run = params.get("run");
+    if (run) select.value = run;
+    select.onchange = () => { location.search = "?run=" + encodeURIComponent(select.value); };
+    start(run ? "AMOSPro:" + run : undefined);
     document.getElementById("amos").focus();
   </script>
 </body>

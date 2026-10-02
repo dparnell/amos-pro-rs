@@ -158,6 +158,19 @@ impl Machine {
         if self.interp.running {
             self.state = self.interp.run(&mut self.hw, self.instructions_per_frame);
             if let RunState::Stopped(info) = &self.state {
+                if let Some(path) = self.hw.pending_run.take() {
+                    // Run "file": chain to another program.
+                    match self.hw.files_read_all(&path).ok().and_then(|d| Program::load(&d).ok()) {
+                        Some(prg) => {
+                            if let Err(e) = self.run_program(&prg) {
+                                self.hw.log.push(crate::errors::test_message(e.code).to_string());
+                            }
+                            return;
+                        }
+                        None => self.hw.log.push(crate::errors::message(81).to_string()),
+                    }
+                    return;
+                }
                 let msg = crate::machine::dispatch::describe_stop(&self.interp, info);
                 self.hw.log.push(msg);
             }

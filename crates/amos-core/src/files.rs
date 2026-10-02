@@ -452,6 +452,35 @@ impl FileSystem {
         Ok(out)
     }
 
+    /// Adds a file of the AMOS distribution (path relative to the `AMOS`
+    /// folder, e.g. "Examples/Examples/H-1/Help_1.AMOS") to in-memory
+    /// volumes: "AMOSPro:" and the matching "AMOSPro_Examples:"... volume.
+    /// Used where there is no host file system (web).
+    pub fn add_distribution_file(&mut self, rel: &str, data: &[u8]) {
+        let rel = rel.trim_start_matches('/');
+        let volumes = [
+            ("APSystem", "AMOSPro_System"),
+            ("Accessories", "AMOSPro_Accessories"),
+            ("Tutorial", "AMOSPro_Tutorial"),
+            ("Examples", "AMOSPro_Examples"),
+            ("Productivity1", "AMOSPro_Productivity1"),
+            ("Productivity2", "AMOSPro_Productivity2"),
+            ("Compiler", "AMOSPro_Compiler"),
+        ];
+        let mut targets = vec![("AMOSPro".to_string(), rel.to_string())];
+        if let Some((first, rest)) = rel.split_once('/')
+            && let Some((_, vol)) = volumes.iter().find(|(d, _)| d.eq_ignore_ascii_case(first))
+        {
+            targets.push((vol.to_string(), rest.to_string()));
+        }
+        for (vol, path) in targets {
+            if self.volume_index(&vol).is_none() {
+                self.mount_memory(&vol, &[]);
+            }
+            let _ = self.write(&format!("{vol}:{path}"), data);
+        }
+    }
+
     /// Changes the current directory (`Dir$=`).
     pub fn set_current_dir(&mut self, path: &str) -> FsResult<()> {
         let (v, comps) = self.resolve(path)?;
