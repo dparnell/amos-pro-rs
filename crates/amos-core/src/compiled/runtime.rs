@@ -299,6 +299,8 @@ impl Runtime {
         st_i32(mem, layout::SCOPE, it.scope as i32);
         st_i32(mem, layout::ATT, (it.vbl_pending || self.gc_wanted) as i32);
         st_i32(mem, layout::DEPTH, fs.len() as i32);
+        st_i32(mem, layout::CTL_LEN, it.ctl.len() as i32);
+        st_i32(mem, layout::STACK_LIMIT, it.stack_limit as i32);
         st_i32(mem, layout::PARAM_E, it.param_e);
         st_f64(mem, layout::PARAM_F, it.param_f);
         st_i32(mem, layout::FIX_FLG, it.fix.fix_flg() as i32);
@@ -547,6 +549,24 @@ impl Runtime {
         let (it, _) = env.parts();
         Self::settle(it, mem);
         it.pc = self.instrs.get(point as usize).map_or(self.end_pos, |i| i.pos);
+    }
+
+    /// Pushes the Gosubs done by the module (`layout::PEND_COUNT`) on the
+    /// interpreter's control stack, oldest first. The hosts call it before
+    /// every import, so the runtime always sees the complete control stack.
+    pub fn flush(&mut self, env: &mut dyn Env, mem: &mut [u8]) {
+        let n = ld_i32(mem, layout::PEND_COUNT);
+        if n <= 0 {
+            return;
+        }
+        let (it, _) = env.parts();
+        for k in 0..n as u32 {
+            let ret = ld_i32(mem, self.layout.pending + k * layout::PEND_ENTRY) as usize;
+            // The module checked the room (entries are at most 42 bytes).
+            let _ = it.push_ctl(Ctl::Gosub { ret });
+        }
+        st_i32(mem, layout::PEND_COUNT, 0);
+        st_i32(mem, layout::CTL_LEN, it.ctl.len() as i32);
     }
 
     /// Does the pop of a While entry a `Wend` of the module left for its

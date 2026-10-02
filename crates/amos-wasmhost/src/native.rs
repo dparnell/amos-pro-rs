@@ -28,6 +28,8 @@ fn with<R>(c: &mut Caller<'_, Ctx>, f: impl FnOnce(&mut Runtime, &mut dyn Env, &
         // the module only calls imports during that call.
         let env = unsafe { ctx.env.expect("machine").as_mut() };
         let len = data.len();
+        // Gosubs done by the module go to the interpreter's stack first.
+        ctx.rt.flush(env, data);
         let r = f(&mut ctx.rt, env, data);
         (r, ctx.rt.reserve_bytes(len))
     };

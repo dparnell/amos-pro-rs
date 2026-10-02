@@ -500,3 +500,46 @@ fn number_text_functions() {
         "A=Val(\"3\")+Val(\"2.5\") : B#=Val(\"1e3\")/Val(\"$10\") : Print A;B#;Val(\"7\")*Val(\"7\");Str$(Val(\"4.5\"));Str$(Val(\"4\"))",
     );
 }
+
+#[test]
+fn gosub_and_return() {
+    let progs = [
+        // Recursive Gosub down to Out of stack space (error 13, same depth).
+        "N=0\nGosub R\nEnd\nR: Inc N : Print N; : Gosub R : Return",
+        "N=0\nGosub R\nPrint \"back\";N\nEnd\nR: Inc N : If N<40 Then Gosub R\nReturn",
+        // Return drops the loops opened inside the Gosub.
+        "For I=1 To 3 : Gosub L : Print I; : Next : End\nL: For J=1 To 5 : If J=2 Then Return\nNext J : Return",
+        "For I=1 To 3\nGosub L\nNext I\nPrint \"ok\";I\nEnd\nL: Repeat : K=K+1 : If K mod 2=0 Then Return\nUntil K>100 : Return",
+        "I=0\nWhile I<3 : Inc I : Gosub L : Wend : Print I;C\nEnd\nL: Do : Inc C : If C mod 3=0 Then Return\nLoop",
+        // Return without Gosub (error 1), also inside a procedure.
+        "Return",
+        "Gosub L : Print \"x\" : End\nL: P : Return\nProcedure P\nReturn\nEnd Proc",
+        "P\nProcedure P\nGosub Q : Print \"q\" : End Proc\nQ: Print \"in\"; : Return\nEnd Proc",
+        // Pop (error 2 without Gosub).
+        "Gosub L : Print \"not here\" : End\nL: Pop : Print \"popped\" : End",
+        "Pop",
+        "For I=1 To 3 : Gosub L : Next : End\nL: Pop : Goto M\nM: Print \"m\";I : End",
+        // Every Gosub while a Gosub is running, and test points in Return.
+        "C=0\nEvery 1 Gosub E\nFor I=1 To 3000 : Gosub S : Next\nEvery Off\nPrint C>0;T\nEnd\nS: T=T+1 : Return\nE: Inc C : Every On : Return",
+        // Errors inside a Gosub, handled; Resume / Resume Next.
+        "On Error Goto H\nFor I=1 To 4 : Gosub S : Print R; : Next\nEnd\nS: R=10/(I-2) : Return\nH: R=-1 : Resume Next",
+        "On Error Goto H\nN=0\nGosub S : Print \"after\";N\nEnd\nS: Inc N : A=1/(N-1) : Return\nH: N=3 : Resume",
+        "Trap Gosub S\nPrint Errtrap\nEnd\nS: Print 1/0 : Return",
+        // On..Gosub, computed Gosub, nested in procedures.
+        "For I=1 To 3 : On I Gosub A,B,C : Next : End\nA: Print \"a\"; : Gosub B : Return\nB: Print \"b\"; : Return\nC: Print \"c\"; : Return",
+        "For I=1 To 3 : Gosub \"L\"+Chr$(48+I) : Next : End\nL1: Print 1; : Return\nL2: Print 2; : Return\nL3: Print 3; : Return",
+        "P[3]\nProcedure P[N]\nGosub L\nIf N>0 Then P[N-1]\nPrint N;\nEnd Proc\nL: Print \"g\";N; : Return\nEnd Proc",
+        "P\nProcedure P\nFor I=1 To 3 : Gosub L : Next\nEnd Proc\nL: Print I; : If I=2 Then Pop Proc\nReturn\nEnd Proc",
+        // Gosub out of a loop, Goto back in, and a yield inside.
+        "For I=1 To 3\nGosub W\nNext\nPrint \"done\"\nEnd\nW: Wait Vbl : Print I; : Return",
+        "Gosub A : Print \"end\" : End\nA: Gosub B : Return\nB: For K=1 To 2 : Gosub C : Next : Return\nC: Print K; : Return",
+    ];
+    for p in progs {
+        same(p);
+        // (With a few instructions per frame an Every handler never ends.)
+        let budgets: &[usize] = if p.contains("Every") { &[40, 97] } else { &[1, 2, 3, 5, 9] };
+        for &budget in budgets {
+            same_budget(p, budget);
+        }
+    }
+}

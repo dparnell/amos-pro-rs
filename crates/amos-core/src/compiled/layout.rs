@@ -83,6 +83,19 @@ pub const STR_END: u32 = 140;
 /// refreshed by the runtime after every operation.
 pub const FIX_FLG: u32 = 144;
 pub const EXP_FLG: u32 = 148;
+/// Gosubs done by the module and not yet pushed on the interpreter's
+/// control stack (see `Runtime::flush`): their number, then the number of
+/// entries of `Interp::ctl` and `Interp::stack_limit` (mirrors, for the
+/// module's room check: an entry takes at most `CTL_MAX_ENTRY` bytes).
+pub const PEND_COUNT: u32 = 152;
+pub const CTL_LEN: u32 = 156;
+pub const STACK_LIMIT: u32 = 160;
+pub const CTL_MAX_ENTRY: i32 = 42;
+/// A pending Gosub: return position, return point, then the control stack
+/// mirror words it hid (`MIRROR_WORDS`, restored by its Return).
+pub const PEND_ENTRY: u32 = 44;
+pub const MIRROR_WORDS: [u32; 9] =
+    [TOP_KIND, FOR_ADDR, FOR_STEP, FOR_LIMIT, FOR_BODY, LOOP_LO, LOOP_HI, TOP_START, TOP_START_POINT];
 /// Scratch buffers of the number formatting helpers (128 bytes each).
 pub const SCR_A: u32 = 192;
 pub const SCR_B: u32 = 320;
@@ -100,6 +113,8 @@ pub struct Layout {
     /// Table of string constants: address of each once created (0 before).
     pub consts: u32,
     pub n_consts: u32,
+    /// Pending Gosubs (`PEND_ENTRY` bytes each).
+    pub pending: u32,
     pub locals: u32,
     pub frame_size: u32,
     pub max_frames: u32,
@@ -116,16 +131,29 @@ impl Layout {
         let max_params = c.procs.iter().map(|p| p.params.len() as u32).max().unwrap_or(0).max(1);
         let n_consts = crate::compiled::structure::string_constants(c).len() as u32;
         let consts = (args + max_params * 8).next_multiple_of(16);
-        let locals = (consts + n_consts * 4).next_multiple_of(16);
+        let stack_limit = ((c.stack_size + 1) * 42).saturating_sub(64) as u32;
+        let pending = (consts + n_consts * 4).next_multiple_of(16);
+        let locals = (pending + (stack_limit / 12 + 2) * PEND_ENTRY).next_multiple_of(16);
         let max_locals = c.procs.iter().map(|p| p.locals.len() as u32).max().unwrap_or(0).max(1);
         let frame_size = max_locals * 8;
         // The control stack limit of the interpreter (`Interp::start`)
         // bounds the number of procedure frames (42 bytes each).
-        let stack_limit = ((c.stack_size + 1) * 42).saturating_sub(64) as u32;
         let max_frames = stack_limit / 42 + 2;
         let size = locals + frame_size * max_frames;
         let pages = size.div_ceil(PAGE).max(1);
-        Layout { globals: GLOBALS, n_globals, args, consts, n_consts, locals, frame_size, max_frames, size, pages }
+        Layout {
+            globals: GLOBALS,
+            n_globals,
+            args,
+            consts,
+            n_consts,
+            pending,
+            locals,
+            frame_size,
+            max_frames,
+            size,
+            pages,
+        }
     }
 
     /// Start of the frame of procedure depth `depth` (globals for 0).

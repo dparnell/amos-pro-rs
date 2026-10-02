@@ -39,6 +39,8 @@ fn with<R>(ctx: &Shared, f: impl FnOnce(&mut Runtime, &mut dyn Env, &mut [u8]) -
     // only during that call.
     let mem = unsafe { std::slice::from_raw_parts_mut(*mem, *len) };
     let env = unsafe { &mut *env.expect("imports are only called during run") };
+    // Gosubs done by the module go to the interpreter's stack first.
+    rt.flush(env, mem);
     f(rt, env, mem)
 }
 

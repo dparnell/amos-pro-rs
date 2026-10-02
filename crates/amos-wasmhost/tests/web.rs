@@ -90,6 +90,8 @@ async fn compiled(src: &str, budget: usize) -> (String, StopReasonOrError, usize
 }
 
 const PROGRAMS: &[&str] = &[
+    "N=0\nGosub R\nEnd\nR: Inc N : Print N; : Gosub R : Return",
+    "For I=1 To 3 : Gosub L : Print I; : Next\nOn Error Goto H\nGosub S\nPrint T\nEnd\nL: For J=1 To 5 : If J=2 Then Return\nNext J : Return\nS: T=1/0 : Return\nH: T=7 : Resume Next",
     "For F=-17 To 17 : Fix F : Print Str$(3.14159);Str$(-0.00012345);Str$(1E+20) : Next : Fix 16\nFor I=1 To 200 : X#=I*1.37-150 : Print Str$(X#*X#/97);Val(Str$(X#)); : Next\nPrint Val(\"$FF\");Val(\"%101\");Val(\"1 2.5e 2\");Val(\"x\");Hex$(-1,4);Bin$(5);Repeat$(\"a\",2)",
     "Set Double Precision\nFor F=-17 To 17 : Fix F : Print Str$(3.14159);Str$(-0.00012345);Str$(1E+20) : Next : Fix 16\nFor I=1 To 200 : X#=I*1.37-150 : Print Str$(X#*X#/97);Val(Str$(X#)); : Next\nPrint Val(\"12345.678e-2\");Val(\"1e40\");Val(\"-0.0\")",
     "For I=1 To 300000\nA$=Str$(I)+\"-\"+Upper$(\"abc\")+Space$(I mod 50)\nNext\nPrint A$",

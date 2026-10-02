@@ -1431,6 +1431,86 @@ impl<'a> Gen<'a> {
         self.release_place(p);
     }
 
+    /// Gosub label `idx` returning to `ret`. Fast path (no host call) when
+    /// nothing is pending at the test point, the label is in the current
+    /// scope and the control stack surely has room: the Gosub becomes a
+    /// pending entry in memory, pushed on the interpreter's stack before the
+    /// next import (`Runtime::flush`). Always leaves.
+    fn gosub(&mut self, idx: u16, ret: usize) -> Result<(), CompileError> {
+        let scope = self.scope;
+        let target = self.prg.scopes.get(scope).and_then(|s| s.labels.get(idx as usize)).map(|l| l.target);
+        let mut expected = None;
+        if let Some(target) = target {
+            let (pt, rpt) = (self.point_of(target)?, self.point_of(ret)?);
+            self.hdr(layout::ATT);
+            self.w(W::I32Eqz);
+            self.hdr(layout::SCOPE);
+            self.i32c(scope as i32);
+            self.w(W::I32Eq);
+            self.w(W::I32And);
+            // (CTL_LEN + PEND_COUNT + 1) * 42 <= STACK_LIMIT
+            self.hdr(layout::CTL_LEN);
+            self.hdr(layout::PEND_COUNT);
+            self.w(W::I32Add);
+            self.i32c(1);
+            self.w(W::I32Add);
+            self.i32c(layout::CTL_MAX_ENTRY);
+            self.w(W::I32Mul);
+            self.hdr(layout::STACK_LIMIT);
+            self.w(W::I32LeS);
+            self.w(W::I32And);
+            self.if_(BlockType::Empty);
+            {
+                let e = self.tmp(ValType::I32);
+                self.get(L_BASE);
+                self.hdr(layout::PEND_COUNT);
+                self.i32c(layout::PEND_ENTRY as i32);
+                self.w(W::I32Mul);
+                self.w(W::I32Add);
+                self.i32c(self.layout.pending as i32);
+                self.w(W::I32Add);
+                self.set(e);
+                self.get(e);
+                self.i32c(ret as i32);
+                self.w(W::I32Store(mem32(0)));
+                self.get(e);
+                self.i32c(rpt as i32);
+                self.w(W::I32Store(mem32(4)));
+                for (k, &w) in layout::MIRROR_WORDS.iter().enumerate() {
+                    self.get(e);
+                    self.hdr(w);
+                    self.w(W::I32Store(mem32(8 + k as u32 * 4)));
+                }
+                self.release(e, ValType::I32);
+                self.get(L_BASE);
+                self.hdr(layout::PEND_COUNT);
+                self.i32c(1);
+                self.w(W::I32Add);
+                self.w(W::I32Store(mem32(layout::PEND_COUNT)));
+                // The mirror of a Gosub on top of the stack.
+                for (w, v) in [
+                    (layout::TOP_KIND, layout::TOP_OTHER),
+                    (layout::FOR_ADDR, 0),
+                    (layout::LOOP_LO, 0),
+                    (layout::LOOP_HI, i32::MAX),
+                ] {
+                    self.get(L_BASE);
+                    self.i32c(v);
+                    self.w(W::I32Store(mem32(w)));
+                }
+                self.jump_point(pt);
+            }
+            self.end();
+            expected = Some(pt);
+        }
+        self.i32c(self.pos as i32);
+        self.i32c(idx as i32);
+        self.i32c(ret as i32);
+        self.call(Imp::GosubLabel);
+        self.status_jump_expect(expected);
+        Ok(())
+    }
+
     /// Pushes 1 if `target` is in the range of the top loop (no loop to
     /// drop by `after_jump`).
     fn in_loop_range(&mut self, target: usize) {
@@ -1777,20 +1857,7 @@ impl<'a> Gen<'a> {
                 }
             }
             Stmt::Goto(idx) => self.goto_label(k, *idx)?,
-            Stmt::Gosub { label, ret } => {
-                self.i32c(pos);
-                self.i32c(*label as i32);
-                self.i32c(*ret as i32);
-                self.call(Imp::GosubLabel);
-                let pt = self
-                    .prg
-                    .scopes
-                    .get(self.scope)
-                    .and_then(|s| s.labels.get(*label as usize))
-                    .map(|l| l.target)
-                    .and_then(|t| self.point_of(t).ok());
-                self.status_jump_expect(pt);
-            }
+            Stmt::Gosub { label, ret } => self.gosub(*label, *ret)?,
             Stmt::On { n, kind, targets, after } => {
                 // `Interp::exec_on`: out of range continues after the list;
                 // otherwise a test point, then the jump.
@@ -1806,13 +1873,7 @@ impl<'a> Gen<'a> {
                     self.if_(BlockType::Empty);
                     match *kind {
                         tk::GOTO => self.goto_label(k, t)?,
-                        tk::GOSUB => {
-                            self.i32c(pos);
-                            self.i32c(t as i32);
-                            self.i32c(*after as i32);
-                            self.call(Imp::GosubLabel);
-                            self.status_jump();
-                        }
+                        tk::GOSUB => self.gosub(t, *after)?,
                         _ => {
                             self.test_point();
                             self.i32c(pos);
@@ -1862,6 +1923,43 @@ impl<'a> Gen<'a> {
                 }
             }
             Stmt::Return => {
+                // Fast path: nothing at the test point, and the Gosub was
+                // done by the module (pending): pop it, restore the mirror.
+                self.hdr(layout::ATT);
+                self.w(W::I32Eqz);
+                self.hdr(layout::PEND_COUNT);
+                self.i32c(0);
+                self.w(W::I32GtS);
+                self.w(W::I32And);
+                self.if_(BlockType::Empty);
+                {
+                    let e = self.tmp(ValType::I32);
+                    self.get(L_BASE);
+                    self.hdr(layout::PEND_COUNT);
+                    self.i32c(1);
+                    self.w(W::I32Sub);
+                    self.w(W::LocalTee(e));
+                    self.w(W::I32Store(mem32(layout::PEND_COUNT)));
+                    self.get(L_BASE);
+                    self.get(e);
+                    self.i32c(layout::PEND_ENTRY as i32);
+                    self.w(W::I32Mul);
+                    self.w(W::I32Add);
+                    self.i32c(self.layout.pending as i32);
+                    self.w(W::I32Add);
+                    self.set(e);
+                    for (k, &w) in layout::MIRROR_WORDS.iter().enumerate() {
+                        self.get(L_BASE);
+                        self.get(e);
+                        self.w(W::I32Load(mem32(8 + k as u32 * 4)));
+                        self.w(W::I32Store(mem32(w)));
+                    }
+                    self.get(e);
+                    self.w(W::I32Load(mem32(4)));
+                    self.release(e, ValType::I32);
+                    self.status_jump();
+                }
+                self.end();
                 self.i32c(pos);
                 self.call(Imp::Return);
                 self.status_jump();
