@@ -96,6 +96,7 @@ impl Host for Hardware {
     fn test_point(&mut self, it: &mut Interp) -> R<()> {
         self.sprites_test_point(it)?;
         self.screen_test_point(it)?;
+        self.dialogs_test_point(it)?;
         self.menus_test_point(it)
     }
 

@@ -95,7 +95,8 @@ fn run(args: &[String]) -> Result<(), String> {
         if frame % 5 == 4
             && let Some(c) = keys.next()
         {
-            m.input(InputEvent::Char(c));
+            // Return is character 13 on the Amiga.
+            m.input(InputEvent::Char(if c == '\n' { '\r' } else { c }));
         }
         m.vbl();
         for line in m.hw.log.drain(..) {

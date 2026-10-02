@@ -11,6 +11,7 @@ pub mod ffp;
 pub mod files;
 pub mod gfx;
 pub mod input;
+pub mod interface;
 pub mod interp;
 pub mod machine;
 pub mod menus;

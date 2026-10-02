@@ -77,6 +77,8 @@ pub struct Hardware {
     pub menu_session: Option<Box<inst_menus::MenuSession>>,
     /// User copper list state (Copper Off mode).
     pub copper: crate::gfx::copper::Copper,
+    /// Interface dialogs, resource bank, file selector.
+    pub dialogs: crate::interface::DialogState,
 }
 
 impl Hardware {
@@ -106,6 +108,7 @@ impl Hardware {
             menu_key_serial: 0,
             menu_session: None,
             copper: Default::default(),
+            dialogs: Default::default(),
         };
         hw.reset();
         hw
@@ -121,6 +124,7 @@ impl Hardware {
         self.menus = Default::default();
         self.menu_session = None;
         self.copper = Default::default();
+        self.dialogs_reset();
     }
 
     /// Work done at each vertical blank (the VBL interrupt).
@@ -174,9 +178,6 @@ impl Machine {
         Ok(())
     }
 
-    pub fn input(&mut self, event: InputEvent) {
-        self.hw.input_event(event);
-    }
     /// Runs a direct mode line (tokenised) in the context of the last
     /// program run, keeping its screens and banks (`Esc_R`, +Edit.s).
     pub fn run_direct(&mut self, line: &[u8]) -> Result<(), crate::interp::verify::TestError> {
@@ -185,6 +186,9 @@ impl Machine {
         Ok(())
     }
 
+    pub fn input(&mut self, event: InputEvent) {
+        self.hw.input_event(event);
+    }
 
     /// Advances the machine by one vertical blank (1/50 s): interrupt work,
     /// then the program runs until it waits or its time slice is used.
