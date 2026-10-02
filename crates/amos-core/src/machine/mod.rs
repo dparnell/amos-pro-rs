@@ -63,6 +63,10 @@ pub struct Hardware {
     /// Program to start after the current one stopped (`Run "file"`).
     pub pending_run: Option<Vec<u8>>,
     pub menus: crate::menus::Menus,
+    /// `Command Line$`: text passed by the program that ran this one.
+    pub command_line: Vec<u8>,
+    /// Request On/Off/Wb setting (1, 0, 2).
+    pub system_requests: u8,
     /// Blocks, scroll zones, font list (shared by all screens).
     pub draw: crate::gfx::blocks::DrawGlobals,
     /// Last key checked against menu shortcuts.
@@ -91,6 +95,8 @@ impl Hardware {
             pending_run: None,
             menus: Default::default(),
             draw: Default::default(),
+            command_line: Vec::new(),
+            system_requests: 1,
             menu_key_serial: 0,
         };
         hw.reset();
