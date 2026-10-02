@@ -27,6 +27,24 @@ In the editor: F1 runs, F2 tests, Esc enters Direct mode, the right mouse
 button opens the menus. The Amiga key is Command (macOS) or the Windows key.
 Joystick port 1 is emulated with the cursor keys and Ctrl/Alt for fire.
 
+### Building standalone applications
+
+The original compiler produced 68000 code; here "compiling" builds a
+self-contained application that runs the program with the AMOS runtime:
+
+```sh
+cargo build --release -p amos-app -p amos-cli && ./scripts/build-web.sh
+target/release/amos-cli build path/to/Game.AMOS --out build
+```
+
+This writes `build/Game.app` (macOS; a single executable on Linux and
+Windows) and `build/Game-web/` (copy it to any web server). By default the
+files of the program's folder are bundled too, so pictures and data the
+program loads are available (`--no-files` bundles the program only,
+`--include DIR` another folder). Bundled files appear in the `Bundle:`
+volume, which is the current directory. The `Compile` instruction of the
+Compiler extension builds applications the same way.
+
 ### Console version
 
 `amos-console` runs programs with `Print`/`Input` on the terminal:
@@ -77,4 +95,5 @@ python3 tools/coverage.py                                # keywords not implemen
 * Amiga-only features (machine code procedures, `Doscall`/`Execall`, devices,
   ARexx, serial/parallel ports, MED) report errors instead of working.
 * The editor has optional syntax highlighting (Config menu, "Syntax Colours").
-* The compiler (which produced 68000 code) is not ported.
+* The compiler does not produce 68000 code: it builds standalone native and
+  web applications instead (see above).
