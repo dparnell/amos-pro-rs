@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
 """Runs every example program headlessly and reports why each one stopped."""
-import collections, concurrent.futures, glob, os, re, subprocess, sys
+import collections, concurrent.futures, glob, os, re, shutil, subprocess, sys, tempfile
 root = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 cli = os.path.join(root, "target", "main", "release", "amos-cli")
 frames = sys.argv[1] if len(sys.argv) > 1 else "150"
-files = [f for f in glob.glob(os.path.join(root, "AMOS-Professional-365", "AMOS", "**", "*"), recursive=True)
+# Programs may write files (high scores...): run them on a copy of the
+# distribution so the original sources are never modified.
+work = tempfile.mkdtemp(prefix="amos-sweep-")
+shutil.copytree(os.path.join(root, "AMOS-Professional-365", "AMOS"), os.path.join(work, "AMOS"))
+files = [f for f in glob.glob(os.path.join(work, "AMOS", "**", "*"), recursive=True)
          if f.lower().endswith(".amos")]
 
 def run(f):
@@ -29,4 +33,5 @@ for r, n in c.most_common():
     print("%4d  %s" % (n, r[:90]))
 if "-v" in sys.argv:
     for f, r in sorted(results):
-        print(r[:60].ljust(60), os.path.relpath(f, root))
+        print(r[:60].ljust(60), os.path.relpath(f, work))
+shutil.rmtree(work, ignore_errors=True)
