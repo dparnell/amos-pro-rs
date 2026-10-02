@@ -95,9 +95,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "amos-build"
+version = "0.1.0"
+dependencies = [
+ "amos-core",
+]
+
+[[package]]
 name = "amos-cli"
 version = "0.1.0"
 dependencies = [
+ "amos-build",
  "amos-core",
  "png",
 ]

@@ -2,6 +2,7 @@
 //!
 //! ```text
 //! amos-cli list prog.AMOS                 list a program as text
+//! amos-cli build prog.AMOS [opts]         make a standalone app (see build.rs)
 //! amos-cli edit [prog] [--keys K] [--png F] drive the editor (see edit.rs)
 //! amos-cli run prog.AMOS|prog.txt [opts]  run headless
 //!     --frames N      number of 1/50 s frames to run (default 150)
@@ -12,6 +13,7 @@
 //!                     with buttons B (bit 0 left, 1 right); repeatable
 //! ```
 
+mod build;
 mod edit;
 
 use std::path::{Path, PathBuf};
@@ -28,6 +30,7 @@ fn main() -> ExitCode {
         Some("list") if args.len() >= 2 => list(Path::new(&args[1])),
         Some("run") if args.len() >= 2 => run(&args[1..]),
         Some("edit") => edit::edit(&args[1..]),
+        Some("build") if args.len() >= 2 => build::build(&args[1..]),
         _ => {
             eprintln!("usage: amos-cli list FILE | run FILE [--frames N] [--png FILE] [--keys TEXT]");
             return ExitCode::from(2);

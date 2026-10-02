@@ -34,8 +34,11 @@ enum UserEvent {
 struct App {
     proxy: EventLoopProxy<UserEvent>,
     machine: Machine,
-    /// The AMOS Professional editor; it runs the programs.
+    /// The AMOS Professional editor; it runs the programs. `None` for a
+    /// standalone application built from a bundle.
     editor: Option<Editor>,
+    /// Window title (the program name for standalone applications).
+    title: String,
     window: Option<Arc<Window>>,
     renderer: Option<Renderer>,
     audio: Option<AudioOutput>,
@@ -46,11 +49,18 @@ struct App {
 
 impl App {
     fn new(proxy: EventLoopProxy<UserEvent>) -> Self {
-        let (machine, editor) = new_machine();
+        let (machine, editor, title) = match standalone_machine() {
+            Some((m, title)) => (m, None, title),
+            None => {
+                let (m, e) = new_machine();
+                (m, e, "AMOS Professional".to_string())
+            }
+        };
         Self {
             proxy,
             machine,
             editor,
+            title,
             window: None,
             renderer: None,
             audio: None,
@@ -113,7 +123,7 @@ impl ApplicationHandler<UserEvent> for App {
         }
         #[allow(unused_mut)]
         let mut attributes = Window::default_attributes()
-            .with_title("AMOS Professional")
+            .with_title(self.title.clone())
             .with_inner_size(winit::dpi::LogicalSize::new(DISPLAY_WIDTH as f64 * 1.5, DISPLAY_HEIGHT as f64 * 1.5));
         #[cfg(target_arch = "wasm32")]
         {
@@ -167,6 +177,12 @@ impl ApplicationHandler<UserEvent> for App {
                     event_loop.exit();
                     return;
                 }
+                // A standalone application closes when its program ends.
+                #[cfg(not(target_arch = "wasm32"))]
+                if self.editor.is_none() && matches!(self.machine.state, amos_core::interp::RunState::Stopped(_)) {
+                    event_loop.exit();
+                    return;
+                }
                 if let Some(r) = &mut self.renderer {
                     r.render(&self.machine.frame());
                 }
@@ -214,6 +230,33 @@ impl ApplicationHandler<UserEvent> for App {
             _ => {}
         }
     }
+}
+
+/// A standalone application: a program bundle appended to the executable
+/// (native) or given by the page (web). Runs it without the editor.
+fn standalone_machine() -> Option<(Machine, String)> {
+    #[cfg(not(target_arch = "wasm32"))]
+    let bundle = {
+        let exe = std::env::current_exe().ok()?;
+        // Appended to the executable, or in the resources of a macOS .app.
+        amos_core::bundle::Bundle::from_executable_file(&exe).or_else(|| {
+            let res = exe.parent()?.parent()?.join("Resources").join("app.amospak");
+            amos_core::bundle::Bundle::from_bytes(&std::fs::read(res).ok()?)
+        })?
+    };
+    #[cfg(target_arch = "wasm32")]
+    let bundle = web::take_bundle()?;
+    let mut m = Machine::new();
+    match bundle.install(&mut m.hw.files) {
+        Ok(prg) => {
+            if let Err(e) = m.run_program(&prg) {
+                log::error!("{}", amos_core::errors::test_message(e.code));
+            }
+        }
+        Err(e) => log::error!("cannot start the bundled program: {e}"),
+    }
+    let title = bundle.main.rsplit('/').next().unwrap_or("AMOS").trim_end_matches(".AMOS").to_string();
+    Some((m, title))
 }
 
 /// Creates the machine and the editor (`+B.s:47-79`): the editor starts
@@ -329,6 +372,23 @@ mod web {
     thread_local! {
         static FILES: RefCell<Vec<(String, Vec<u8>)>> = const { RefCell::new(Vec::new()) };
         static RUN: RefCell<Option<String>> = const { RefCell::new(None) };
+        static BUNDLE: RefCell<Option<amos_core::bundle::Bundle>> = const { RefCell::new(None) };
+    }
+
+    pub(super) fn take_bundle() -> Option<amos_core::bundle::Bundle> {
+        BUNDLE.with(|b| b.borrow_mut().take())
+    }
+
+    /// Starts a standalone application from a program bundle (the
+    /// `app.amospak` file written by `amos-cli build`).
+    #[wasm_bindgen]
+    pub fn start_bundle(data: Vec<u8>) -> Result<(), JsValue> {
+        console_error_panic_hook::set_once();
+        let _ = console_log::init_with_level(log::Level::Info);
+        let bundle = amos_core::bundle::Bundle::from_bytes(&data).ok_or_else(|| JsValue::from_str("not an AMOS bundle"))?;
+        BUNDLE.with(|b| *b.borrow_mut() = Some(bundle));
+        super::run();
+        Ok(())
     }
 
     /// Adds a file of the AMOS distribution (path relative to the AMOS

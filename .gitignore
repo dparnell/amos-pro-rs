@@ -1,5 +1,6 @@
 /target
 /web/pkg
 /web/amos-files
+/build
 __pycache__/
 *.pyc

@@ -2,6 +2,7 @@
 
 pub mod audio;
 pub mod banks;
+pub mod bundle;
 pub mod detok;
 pub mod display;
 pub mod editor;
