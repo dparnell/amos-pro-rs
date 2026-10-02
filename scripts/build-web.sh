@@ -8,7 +8,7 @@ PROFILE=${PROFILE:-release}
 DIR=$PROFILE; [ "$PROFILE" = dev ] && DIR=debug
 cargo build -p amos-app --lib --target wasm32-unknown-unknown --profile "$PROFILE"
 wasm-bindgen --target web --no-typescript --out-dir web/pkg \
-  "target/wasm32-unknown-unknown/$DIR/amos_app.wasm"
+  "${CARGO_TARGET_DIR:-target}/wasm32-unknown-unknown/$DIR/amos_app.wasm"
 rm -rf web/amos-files
 mkdir -p web/amos-files
 (cd AMOS-Professional-365/AMOS && find . -type f ! -name '*.info' | sed 's|^\./||' | sort) > web/amos-files/list.txt
