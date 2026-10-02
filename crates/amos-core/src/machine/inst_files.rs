@@ -259,11 +259,6 @@ impl Hardware {
                 Value::Int(if self.files.volume_names().iter().any(|v| v.eq_ignore_ascii_case(vol)) { -1 } else { 0 })
             }
             DFREE => Value::Int(512 * 1024),
-            FSEL_S | FSEL_S_2 | FSEL_S_3 | FSEL_S_4 => {
-                it.func_args(self, kw)?;
-                // The file selector needs the requester UI: behave as Cancel.
-                Value::Str(empty_str())
-            }
             _ => return Ok(None),
         };
         Ok(Some(v))

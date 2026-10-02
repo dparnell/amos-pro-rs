@@ -12,6 +12,8 @@
 mod dispatch;
 pub mod frame;
 pub mod inst_banks;
+pub mod inst_copper;
+pub mod inst_dialogs;
 pub mod inst_draw;
 pub mod inst_files;
 pub mod inst_input;

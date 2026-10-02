@@ -38,6 +38,8 @@ impl Host for Hardware {
             || self.banks_instruction(it, kw)?
             || self.files_instruction(it, kw)?
             || self.menus_instruction(it, kw)?
+            || self.dialogs_instruction(it, kw)?
+            || self.copper_instruction(it, kw)?
             || self.system_instruction(it, kw)?
         {
             return Ok(());
@@ -68,6 +70,12 @@ impl Host for Hardware {
             return Ok(v);
         }
         if let Some(v) = self.files_function(it, kw)? {
+            return Ok(v);
+        }
+        if let Some(v) = self.dialogs_function(it, kw)? {
+            return Ok(v);
+        }
+        if let Some(v) = self.copper_function(it, kw)? {
             return Ok(v);
         }
         if let Some(v) = self.menus_function(it, kw)? {
