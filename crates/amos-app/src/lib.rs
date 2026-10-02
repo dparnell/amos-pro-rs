@@ -8,6 +8,7 @@ mod renderer;
 use std::sync::Arc;
 
 use amos_core::Machine;
+use amos_core::editor::Editor;
 use amos_core::display::{DISPLAY_HEIGHT, DISPLAY_WIDTH};
 use amos_core::input::{InputEvent, MouseButton};
 use amos_core::machine::VBL_HZ;
@@ -33,6 +34,8 @@ enum UserEvent {
 struct App {
     proxy: EventLoopProxy<UserEvent>,
     machine: Machine,
+    /// The AMOS Professional editor; it runs the programs.
+    editor: Option<Editor>,
     window: Option<Arc<Window>>,
     renderer: Option<Renderer>,
     audio: Option<AudioOutput>,
@@ -43,9 +46,11 @@ struct App {
 
 impl App {
     fn new(proxy: EventLoopProxy<UserEvent>) -> Self {
+        let (machine, editor) = new_machine();
         Self {
             proxy,
-            machine: new_machine(),
+            machine,
+            editor,
             window: None,
             renderer: None,
             audio: None,
@@ -77,7 +82,10 @@ impl App {
         self.vbl_accumulator += elapsed * VBL_HZ;
         while self.vbl_accumulator >= 1.0 {
             self.vbl_accumulator -= 1.0;
-            self.machine.vbl();
+            match &mut self.editor {
+                Some(ed) => ed.vbl(&mut self.machine),
+                None => self.machine.vbl(),
+            }
             for line in self.machine.hw.log.drain(..) {
                 log::info!("{line}");
             }
@@ -155,6 +163,10 @@ impl ApplicationHandler<UserEvent> for App {
             }
             WindowEvent::RedrawRequested => {
                 self.advance();
+                if self.editor.as_ref().is_some_and(|e| e.quit_requested) {
+                    event_loop.exit();
+                    return;
+                }
                 if let Some(r) = &mut self.renderer {
                     r.render(&self.machine.frame());
                 }
@@ -204,34 +216,42 @@ impl ApplicationHandler<UserEvent> for App {
     }
 }
 
-/// Creates the machine and, on native builds, starts the program given on
-/// the command line (its folder becomes the current AMOS directory).
-fn new_machine() -> Machine {
+/// Creates the machine and the editor (`+B.s:47-79`): the editor starts
+/// with the program given on the command line (native) or by the page
+/// (web), which is run at once; without a program the editor shows an
+/// empty one.
+fn new_machine() -> (Machine, Option<Editor>) {
     #[allow(unused_mut)]
     let mut m = Machine::new();
     #[cfg(not(target_arch = "wasm32"))]
-    if let Some(arg) = std::env::args().nth(1) {
-        let path = std::path::PathBuf::from(&arg);
-        let dir = path.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| ".".into());
+    {
+        let arg = std::env::args().nth(1).map(std::path::PathBuf::from);
+        // The program's folder (or the current one) is the current AMOS
+        // directory; the AMOS distribution is searched from there, then from
+        // the executable's folder.
+        let dir = arg
+            .as_ref()
+            .and_then(|p| p.parent().map(|p| p.to_path_buf()))
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or_else(|| ".".into());
         m.hw.files.set_native_root(&dir);
-        match std::fs::read(&path) {
-            Ok(data) => {
-                let prg = if data.starts_with(b"AMOS") {
-                    amos_core::Program::load(&data).map_err(|e| e.to_string())
-                } else {
-                    amos_core::tokenise::tokenise_program(&data).map_err(|(l, e)| format!("line {l}: {e:?}"))
-                };
-                match prg {
-                    Ok(prg) => {
-                        if let Err(e) = m.run_program(&prg) {
-                            log::error!("{}", amos_core::errors::test_message(e.code));
-                        }
-                    }
-                    Err(e) => log::error!("{arg}: {e}"),
+        if !m.hw.files.volume_names().iter().any(|v| v.eq_ignore_ascii_case("AMOSPro_System"))
+            && let Some(root) = find_distribution_from_exe()
+        {
+            m.hw.files.mount_amos_distribution(&root);
+        }
+        let mut ed = Editor::new(&mut m);
+        if let Some(path) = arg {
+            let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+            match ed.load(&mut m, &format!("Work:{name}")) {
+                Ok(()) => ed.run(&mut m),
+                Err(e) => {
+                    log::error!("{}: {e}", path.display());
+                    ed.alert(e);
                 }
             }
-            Err(e) => log::error!("{arg}: {e}"),
         }
+        (m, Some(ed))
     }
     #[cfg(target_arch = "wasm32")]
     {
@@ -239,18 +259,35 @@ fn new_machine() -> Machine {
             m.hw.files.add_distribution_file(&path, &data);
         }
         let _ = m.hw.files.set_current_dir("AMOSPro:");
+        let mut ed = Editor::new(&mut m);
         if let Some(path) = web::run_path() {
-            match m.hw.files.read(&path).ok().and_then(|d| amos_core::Program::load(&d).ok()) {
-                Some(prg) => {
-                    if let Err(e) = m.run_program(&prg) {
-                        log::error!("{}", amos_core::errors::test_message(e.code));
-                    }
+            match ed.load(&mut m, &path) {
+                Ok(()) => ed.run(&mut m),
+                Err(e) => {
+                    log::error!("cannot load {path}: {e}");
+                    ed.alert(e);
                 }
-                None => log::error!("cannot load {path}"),
             }
         }
+        (m, Some(ed))
     }
-    m
+}
+
+/// The AMOS distribution folder near the executable (for an installed
+/// build started from elsewhere).
+#[cfg(not(target_arch = "wasm32"))]
+fn find_distribution_from_exe() -> Option<std::path::PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let mut d = exe.parent();
+    while let Some(p) = d {
+        for cand in [p.join("AMOS-Professional-365").join("AMOS"), p.join("AMOS")] {
+            if cand.join("APSystem").is_dir() {
+                return Some(cand);
+            }
+        }
+        d = p.parent();
+    }
+    None
 }
 
 /// Start AMOS Professional (native entry point; on the web see [`web::start`]).

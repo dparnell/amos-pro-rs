@@ -4,6 +4,7 @@ pub mod audio;
 pub mod banks;
 pub mod detok;
 pub mod display;
+pub mod editor;
 pub mod error;
 pub mod errors;
 pub mod ffp;

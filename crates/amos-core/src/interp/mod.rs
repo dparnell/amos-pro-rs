@@ -10,6 +10,7 @@
 //! `impl Interp` blocks: control flow (`flow.rs`), core statements and
 //! functions (`stmt.rs`, `expr.rs`), and the subsystems.
 
+pub mod direct;
 pub mod expr;
 pub mod flow;
 pub mod params;

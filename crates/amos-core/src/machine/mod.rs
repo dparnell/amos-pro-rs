@@ -177,6 +177,14 @@ impl Machine {
     pub fn input(&mut self, event: InputEvent) {
         self.hw.input_event(event);
     }
+    /// Runs a direct mode line (tokenised) in the context of the last
+    /// program run, keeping its screens and banks (`Esc_R`, +Edit.s).
+    pub fn run_direct(&mut self, line: &[u8]) -> Result<(), crate::interp::verify::TestError> {
+        self.interp.run_direct(line)?;
+        self.state = RunState::Running;
+        Ok(())
+    }
+
 
     /// Advances the machine by one vertical blank (1/50 s): interrupt work,
     /// then the program runs until it waits or its time slice is used.
