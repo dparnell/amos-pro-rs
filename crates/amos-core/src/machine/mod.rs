@@ -67,6 +67,8 @@ pub struct Hardware {
     pub menus: crate::menus::Menus,
     /// Variables given an address with Varptr / Array.
     pub var_maps: Vec<inst_banks::VarMap>,
+    /// Remaining entries of Dev First$ / Dev Next$.
+    pub dev_listing: Vec<String>,
     /// `Command Line$`: text passed by the program that ran this one.
     pub command_line: Vec<u8>,
     /// Request On/Off/Wb setting (1, 0, 2).
@@ -107,6 +109,7 @@ impl Hardware {
             draw: Default::default(),
             command_line: Vec::new(),
             var_maps: Vec::new(),
+            dev_listing: Vec::new(),
             system_requests: 1,
             menu_key_serial: 0,
             menu_session: None,

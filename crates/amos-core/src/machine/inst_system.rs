@@ -27,6 +27,12 @@ impl Hardware {
                 };
                 return Ok(true);
             }
+            // IOPorts extension: serial, parallel and printer devices do not
+            // exist on modern hosts; opening one fails like a missing device.
+            6 => {
+                it.inst_args(self, kw)?;
+                return crate::interp::err(142);
+            }
             0 => {}
             _ => return Ok(false),
         }
@@ -38,6 +44,31 @@ impl Hardware {
             COMMAND_LINE_S if reserved => {
                 it.expect(OP_EQ)?;
                 self.command_line = it.eval_str(self)?.to_vec();
+            }
+            // Amiga devices and libraries are not available.
+            DEV_OPEN | LIB_OPEN => {
+                it.inst_args(self, kw)?;
+                return crate::interp::err(142);
+            }
+            DEV_CLOSE | DEV_CLOSE_2 | LIB_CLOSE | LIB_CLOSE_2 => {
+                it.inst_args(self, kw)?;
+            }
+            DEV_DO | DEV_SEND | DEV_ABORT => {
+                it.inst_args(self, kw)?;
+                return crate::interp::err(141);
+            }
+            // ARexx: there is no ARexx on modern systems.
+            AREXX_OPEN => {
+                it.inst_args(self, kw)?;
+                return crate::interp::err(194);
+            }
+            AREXX_CLOSE | AREXX_WAIT | AREXX_ANSWER | AREXX_ANSWER_2 => {
+                it.inst_args(self, kw)?;
+                return crate::interp::err(196);
+            }
+            LPRINT => {
+                // No printer: the text is discarded.
+                it.print_text(self)?;
             }
             EXEC => {
                 it.inst_args(self, kw)?;
@@ -53,6 +84,10 @@ impl Hardware {
             it.func_args(self, kw)?;
             return Ok(Some(Value::Int(0)));
         }
+        if kw.slot == 6 {
+            it.func_args(self, kw)?;
+            return crate::interp::err(141);
+        }
         if kw.slot != 0 {
             return Ok(None);
         }
@@ -67,6 +102,29 @@ impl Hardware {
             PRG_FIRST_S | PRG_NEXT_S => {
                 it.func_args(self, kw)?;
                 Value::Str(empty_str())
+            }
+            AREXX_EXIST => {
+                it.func_args(self, kw)?;
+                Value::Int(0)
+            }
+            AREXX | AREXX_S => {
+                it.func_args(self, kw)?;
+                return crate::interp::err(196);
+            }
+            DEV_CHECK | DEV_BASE | LIB_BASE | LIB_CALL => {
+                it.func_args(self, kw)?;
+                return crate::interp::err(141);
+            }
+            // Devices: the mounted volumes.
+            DEV_FIRST_S => {
+                it.func_args(self, kw)?;
+                self.dev_listing = self.files.volume_names();
+                self.dev_listing.reverse();
+                Value::Str(self.dev_listing.pop().map(|v| astr(format!("{v}:").as_bytes())).unwrap_or_else(empty_str))
+            }
+            DEV_NEXT_S => {
+                it.func_args(self, kw)?;
+                Value::Str(self.dev_listing.pop().map(|v| astr(format!("{v}:").as_bytes())).unwrap_or_else(empty_str))
             }
             DISC_INFO_S => {
                 let p = it.func_args(self, kw)?.str(0);
