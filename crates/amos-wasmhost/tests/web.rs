@@ -1,0 +1,128 @@
+//! The web backend, run by `wasm-bindgen-test-runner` (node):
+//! `CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER=wasm-bindgen-test-runner
+//! cargo test -p amos-wasmhost --target wasm32-unknown-unknown --test web`.
+//! Programs are compiled, instantiated with `WebAssembly.instantiate` and
+//! must behave as with the interpreter (also running in wasm).
+
+#![cfg(target_arch = "wasm32")]
+
+use amos_core::compiled::Env;
+use amos_core::interp::stmt::InputState;
+use amos_core::interp::value::Value;
+use amos_core::interp::{Exc, Host, Interp, R, RunState, StopReasonOrError};
+use amos_core::tokens::Keyword;
+use amos_wasmhost::CompiledProgram;
+use wasm_bindgen_test::*;
+
+#[derive(Default)]
+struct TextHost {
+    out: Vec<u8>,
+}
+
+impl Host for TextHost {
+    fn instruction(&mut self, it: &mut Interp, kw: Keyword) -> R<()> {
+        let _ = it.inst_args(self, kw)?;
+        Ok(())
+    }
+    fn function(&mut self, _: &mut Interp, _: Keyword) -> R<Value> {
+        Err(Exc::Message("no functions".into()))
+    }
+    fn reserved_assign(&mut self, _: &mut Interp, _: Keyword) -> R<()> {
+        Ok(())
+    }
+    fn test_point(&mut self, _: &mut Interp) -> R<()> {
+        Ok(())
+    }
+    fn take_break(&mut self) -> bool {
+        false
+    }
+    fn print(&mut self, _: &mut Interp, text: &[u8]) -> R<()> {
+        self.out.extend_from_slice(text);
+        Ok(())
+    }
+    fn read_line(&mut self, _: &mut Interp, _: &mut InputState) -> R<Option<Vec<u8>>> {
+        Ok(Some(b"7".to_vec()))
+    }
+}
+
+struct M {
+    it: Interp,
+    host: TextHost,
+}
+
+impl Env for M {
+    fn parts(&mut self) -> (&mut Interp, &mut dyn Host) {
+        (&mut self.it, &mut self.host)
+    }
+}
+
+fn machine(src: &str) -> M {
+    let prg = amos_core::tokenise::tokenise_program(src.as_bytes()).unwrap();
+    let mut it = Interp::new();
+    it.load(&prg).unwrap();
+    M { it, host: TextHost::default() }
+}
+
+/// (output, end, frames)
+fn interpreted(src: &str, budget: usize) -> (String, StopReasonOrError, usize) {
+    let mut m = machine(src);
+    for f in 0..1_000_000 {
+        m.it.vbl();
+        if let RunState::Stopped(i) = m.it.run(&mut m.host, budget) {
+            return (String::from_utf8_lossy(&m.host.out).into_owned(), i.reason, f);
+        }
+    }
+    panic!("did not end: {src}")
+}
+
+async fn compiled(src: &str, budget: usize) -> (String, StopReasonOrError, usize) {
+    let mut m = machine(src);
+    let prg = amos_core::tokenise::tokenise_program(src.as_bytes()).unwrap();
+    let wasm = amos_compiler::compile(&prg).unwrap();
+    let mut cp = CompiledProgram::new_async(&wasm, m.it.prg.clone().unwrap()).await.unwrap();
+    for f in 0..1_000_000 {
+        m.it.vbl();
+        if let RunState::Stopped(i) = cp.run(&mut m, budget) {
+            return (String::from_utf8_lossy(&m.host.out).into_owned(), i.reason, f);
+        }
+    }
+    panic!("did not end: {src}")
+}
+
+const PROGRAMS: &[&str] = &[
+    "For I=1 To 3 : Print I; : Next I",
+    "A$=\"Hello\" : Print Left$(A$,2);Right$(A$,2);Mid$(A$,2,3);Len(A$);Str$(1.5)",
+    "FIB[12]\nPrint Param\nProcedure FIB[N]\nIf N<2 Then Pop Proc[N]\nFIB[N-1] : A=Param\nFIB[N-2]\nEnd Proc[A+Param]",
+    "Dim A(3,3)\nFor I=0 To 3 : For J=0 To 3 : A(I,J)=I*J : Next : Next\nPrint A(3,3);A(2,1)",
+    "X#=1 : For I=1 To 30 : X#=X#*1.1 : Next : Print X#",
+    "Set Double Precision\nX#=1 : For I=1 To 30 : X#=X#*1.1 : Next : Print X#",
+    "On Error Goto H\nA=1/0\nPrint \"after\";E\nEnd\nH: E=Errn : Resume Next",
+    "C=0\nEvery 2 Gosub E\nFor I=1 To 10 : Wait Vbl : Next\nEvery Off\nPrint C>2\nEnd\nE: Inc C : Every On : Return",
+    "Read A,B$ : Print A;B$\nData 5,\"z\"\nInput N : Print N*2",
+    "Gosub L : Print \"b\" : End\nL: Print \"a\" : Return",
+    "A=Val(\"2.5\")*2 : Print A;Val(\"3\")+1",
+    "N=0\nFor I=1 To 20000\nA$=Str$(I)+\"-\"\nIf Len(A$)>2 Then Inc N\nNext\nPrint N",
+];
+
+#[wasm_bindgen_test]
+async fn web_host_matches_interpreter() {
+    for p in PROGRAMS {
+        // (With 3 instructions per frame an Every handler never ends.)
+        let budgets: &[usize] = if p.contains("Every") { &[100_000, 50] } else { &[100_000, 3] };
+        for &budget in budgets {
+            let a = interpreted(p, budget);
+            let b = compiled(p, budget).await;
+            assert_eq!(a, b, "budget {budget}: {p}");
+        }
+    }
+}
+
+#[wasm_bindgen_test]
+async fn bad_modules_are_refused() {
+    let m = machine("Print 1");
+    let other = amos_core::tokenise::tokenise_program(b"Print 2").unwrap();
+    let wasm = amos_compiler::compile(&other).unwrap();
+    // Compiled from another program: the hash does not match.
+    assert!(CompiledProgram::new_async(&wasm, m.it.prg.clone().unwrap()).await.is_err());
+    assert!(CompiledProgram::new_async(b"not wasm", m.it.prg.clone().unwrap()).await.is_err());
+}

@@ -1,5 +1,6 @@
 //! Compiled programs on a full `Machine`: displays and state must match the
 //! interpreter frame by frame.
+#![cfg(not(target_arch = "wasm32"))]
 
 mod common;
 
@@ -53,4 +54,25 @@ fn every_and_procedures() {
         "Every 5 Proc TICK\nFor I=1 To 50 : Wait Vbl : Next\nProcedure TICK\nShared N\nInc N : Locate 0,0 : Print N\nEvery On\nEnd Proc",
         60,
     );
+}
+
+#[test]
+fn modules_of_other_programs_are_refused() {
+    // The application falls back to the interpreter when this fails.
+    let prg = tokenise_program(b"Print 1").unwrap();
+    let other = amos_compiler::compile(&tokenise_program(b"Print 2").unwrap()).unwrap();
+    let mut m = Machine::new();
+    assert!(CompiledProgram::start(&mut m, &prg, &other).is_err());
+    assert!(CompiledProgram::start(&mut m, &prg, b"not wasm").is_err());
+    // A bundle carries the module and still runs interpreted without it.
+    let mut b = amos_core::bundle::Bundle {
+        files: vec![("p.txt".into(), b"Print 1".to_vec())],
+        main: "p.txt".into(),
+        module: None,
+    };
+    let plain = b.clone();
+    b.module = Some(amos_compiler::compile(&prg).unwrap());
+    let back = amos_core::bundle::Bundle::from_bytes(&b.to_bytes()).unwrap();
+    assert!(CompiledProgram::start(&mut m, &back.program().unwrap(), back.module.as_ref().unwrap()).is_ok());
+    assert_eq!(amos_core::bundle::Bundle::from_bytes(&plain.to_bytes()).unwrap().module, None);
 }

@@ -1,5 +1,6 @@
 //! Differential tests: every program runs interpreted and compiled, and the
 //! outputs and the way it ends must be identical.
+#![cfg(not(target_arch = "wasm32"))]
 
 mod common;
 

@@ -11,6 +11,8 @@
 //!                          app next to this tool)
 //!     --web-runtime DIR    folder with amos_app.js and amos_app_bg.wasm
 //!                          (default: web/pkg of the source tree)
+//!     --interpreted        do not compile the program to WebAssembly (the
+//!                          application interprets it)
 //! ```
 
 use std::path::{Path, PathBuf};
@@ -25,6 +27,7 @@ pub fn build(args: &[String]) -> Result<(), String> {
     let mut include: Option<PathBuf> = program.parent().map(Path::to_path_buf).filter(|p| !p.as_os_str().is_empty());
     let mut runtime = None;
     let mut web_runtime = None;
+    let mut compile = true;
     let mut i = 1;
     while i < args.len() {
         let v = || args.get(i + 1).cloned().ok_or(format!("{} needs a value", args[i]));
@@ -44,6 +47,7 @@ pub fn build(args: &[String]) -> Result<(), String> {
                 i += 1;
             }
             "--no-files" => include = None,
+            "--interpreted" => compile = false,
             "--runtime" => {
                 runtime = Some(PathBuf::from(v()?));
                 i += 1;
@@ -60,7 +64,7 @@ pub fn build(args: &[String]) -> Result<(), String> {
         web = true;
         native = true;
     }
-    let bundle = Bundle::from_directory(&program, include.as_deref()).map_err(|e| e.to_string())?;
+    let mut bundle = Bundle::from_directory(&program, include.as_deref()).map_err(|e| e.to_string())?;
     // The program must load and pass the test before it is shipped.
     let prg = super::load(&program)?;
     amos_core::interp::verify::Verifier::verify(&prg.source, prg.math_flags)
@@ -70,6 +74,12 @@ pub fn build(args: &[String]) -> Result<(), String> {
     });
     std::fs::create_dir_all(&out).map_err(|e| e.to_string())?;
     println!("Bundled {} files ({} KB)", bundle.files.len(), bundle.data_size().div_ceil(1024));
+    if compile {
+        match amos_build::compile_bundle(&mut bundle) {
+            Ok(msg) => println!("Program {msg}"),
+            Err(e) => println!("warning: the program could not be compiled ({e}); it will be interpreted"),
+        }
+    }
 
     if native {
         let rt = runtime.map_or_else(default_runtime, Ok)?;

@@ -45,8 +45,11 @@ pub const FOR_BODY: u32 = 48;
 /// loop of the current routine, or everything.
 pub const LOOP_LO: u32 = 52;
 pub const LOOP_HI: u32 = 56;
+/// Indices of an array element (8 `i32`), written by the module before
+/// calling `host.aref`.
+pub const IDX: u32 = 64;
 /// Start of the global variables.
-pub const GLOBALS: u32 = 64;
+pub const GLOBALS: u32 = 128;
 
 pub const PAGE: u32 = 65536;
 

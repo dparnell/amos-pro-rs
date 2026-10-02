@@ -1,10 +1,31 @@
 //! Builds standalone applications from AMOS programs (the replacement for
 //! the 68000 compiler): the program and its files are bundled with the
-//! AMOS runtime as a native application and/or a web application.
+//! AMOS runtime as a native application and/or a web application. The
+//! program is compiled to WebAssembly (`amos-compiler`) and the module is
+//! stored in the bundle; the runtime interprets the program when the
+//! bundle has no module (or one it cannot use).
 
 use std::path::{Path, PathBuf};
 
 use amos_core::bundle::{Bundle, WEB_INDEX_HTML};
+
+/// Compiles the bundle's main program and stores the module in the bundle.
+/// Returns a short description (instructions, how many are left to the
+/// interpreter, size). On error the bundle is left without a module, so
+/// the application interprets the program.
+pub fn compile_bundle(bundle: &mut Bundle) -> Result<String, String> {
+    bundle.module = None;
+    let prg = bundle.program().map_err(|e| format!("cannot load {}: {e}", bundle.main))?;
+    let o = amos_compiler::compile_full(&prg).map_err(|e| e.to_string())?;
+    let msg = format!(
+        "compiled {} instructions ({} run by the interpreter), {} KB of WebAssembly",
+        o.instructions,
+        o.interpreted.len(),
+        o.wasm.len().div_ceil(1024)
+    );
+    bundle.module = Some(o.wasm);
+    Ok(msg)
+}
 
 /// Native application: on macOS an `.app` bundle (the runtime keeps its
 /// code signature, the program goes in `Contents/Resources`), elsewhere a
@@ -98,4 +119,20 @@ fn make_executable(p: &Path) -> Result<(), String> {
 #[cfg(not(unix))]
 fn make_executable(_: &Path) -> Result<(), String> {
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bundles_are_compiled() {
+        let mut b = Bundle { files: vec![("p.txt".into(), b"For I=1 To 3 : Print I : Next".to_vec())], main: "p.txt".into(), module: None };
+        let msg = compile_bundle(&mut b).unwrap();
+        assert!(msg.contains("0 run by the interpreter"), "{msg}");
+        assert!(b.module.as_ref().is_some_and(|m| m.starts_with(b"\0asm")));
+        let mut bad = Bundle { files: vec![("p.txt".into(), b"A=\"x\"".to_vec())], main: "p.txt".into(), module: None };
+        assert!(compile_bundle(&mut bad).is_err());
+        assert!(bad.module.is_none());
+    }
 }

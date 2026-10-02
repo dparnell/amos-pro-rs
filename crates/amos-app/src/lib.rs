@@ -39,6 +39,9 @@ struct App {
     editor: Option<Editor>,
     /// Window title (the program name for standalone applications).
     title: String,
+    /// The program of a standalone application compiled to WebAssembly
+    /// (run instead of the interpreter when the bundle carries a module).
+    compiled: Option<amos_wasmhost::CompiledProgram>,
     window: Option<Arc<Window>>,
     renderer: Option<Renderer>,
     audio: Option<AudioOutput>,
@@ -49,11 +52,11 @@ struct App {
 
 impl App {
     fn new(proxy: EventLoopProxy<UserEvent>) -> Self {
-        let (machine, editor, title) = match standalone_machine() {
-            Some((m, title)) => (m, None, title),
+        let (machine, editor, title, compiled) = match standalone_machine() {
+            Some((m, title, compiled)) => (m, None, title, compiled),
             None => {
                 let (m, e) = new_machine();
-                (m, e, "AMOS Professional".to_string())
+                (m, e, "AMOS Professional".to_string(), None)
             }
         };
         Self {
@@ -61,6 +64,7 @@ impl App {
             machine,
             editor,
             title,
+            compiled,
             window: None,
             renderer: None,
             audio: None,
@@ -92,9 +96,10 @@ impl App {
         self.vbl_accumulator += elapsed * VBL_HZ;
         while self.vbl_accumulator >= 1.0 {
             self.vbl_accumulator -= 1.0;
-            match &mut self.editor {
-                Some(ed) => ed.vbl(&mut self.machine),
-                None => self.machine.vbl(),
+            match (&mut self.editor, &mut self.compiled) {
+                (Some(ed), _) => ed.vbl(&mut self.machine),
+                (None, Some(cp)) => cp.vbl(&mut self.machine),
+                (None, None) => self.machine.vbl(),
             }
             for line in self.machine.hw.log.drain(..) {
                 log::info!("{line}");
@@ -248,7 +253,13 @@ impl ApplicationHandler<UserEvent> for App {
 
 #[cfg(not(target_arch = "wasm32"))]
 fn build_app(fs: &amos_core::files::FileSystem, req: &amos_core::machine::BuildRequest) -> Result<String, String> {
-    let bundle = amos_core::bundle::Bundle::from_vfs(fs, &req.program, req.with_files).map_err(|e| format!("{e:?}"))?;
+    let mut bundle =
+        amos_core::bundle::Bundle::from_vfs(fs, &req.program, req.with_files).map_err(|e| format!("{e:?}"))?;
+    // Compiled to WebAssembly when possible; interpreted otherwise.
+    match amos_build::compile_bundle(&mut bundle) {
+        Ok(msg) => log::info!("{}: {msg}", req.name),
+        Err(e) => log::warn!("{}: not compiled ({e}), the program will be interpreted", req.name),
+    }
     let out = fs.host_path(&req.out).ok_or("the output directory must be on a disc of this computer")?;
     let mut made = Vec::new();
     if req.native {
@@ -271,8 +282,10 @@ fn build_app(_fs: &amos_core::files::FileSystem, _req: &amos_core::machine::Buil
 }
 
 /// A standalone application: a program bundle appended to the executable
-/// (native) or given by the page (web). Runs it without the editor.
-fn standalone_machine() -> Option<(Machine, String)> {
+/// (native) or given by the page (web). Runs it without the editor: its
+/// compiled module when it has one the runtime accepts (same interface
+/// version, compiled from this program), the interpreter otherwise.
+fn standalone_machine() -> Option<(Machine, String, Option<amos_wasmhost::CompiledProgram>)> {
     #[cfg(not(target_arch = "wasm32"))]
     let bundle = {
         let exe = std::env::current_exe().ok()?;
@@ -283,7 +296,7 @@ fn standalone_machine() -> Option<(Machine, String)> {
         })?
     };
     #[cfg(target_arch = "wasm32")]
-    let bundle = web::take_bundle()?;
+    let (bundle, mut compiled) = web::take_bundle()?;
     let mut m = Machine::new();
     match bundle.install(&mut m.hw.files) {
         Ok(prg) => {
@@ -293,8 +306,30 @@ fn standalone_machine() -> Option<(Machine, String)> {
         }
         Err(e) => log::error!("cannot start the bundled program: {e}"),
     }
+    // Native: instantiate the module now (wasmtime); web: it was
+    // instantiated asynchronously before the application started.
+    #[cfg(not(target_arch = "wasm32"))]
+    let compiled = match (&bundle.module, &m.interp.prg) {
+        (Some(wasm), Some(prg)) if m.interp.running => {
+            match amos_wasmhost::CompiledProgram::new(wasm, prg.clone()) {
+                Ok(cp) => {
+                    log::info!("Running the compiled program");
+                    Some(cp)
+                }
+                Err(e) => {
+                    log::warn!("Compiled program not usable ({e}): interpreting");
+                    None
+                }
+            }
+        }
+        _ => None,
+    };
+    #[cfg(target_arch = "wasm32")]
+    if !m.interp.running {
+        compiled = None;
+    }
     let title = bundle.main.rsplit('/').next().unwrap_or("AMOS").trim_end_matches(".AMOS").to_string();
-    Some((m, title))
+    Some((m, title, compiled))
 }
 
 /// Creates the machine and the editor (`+B.s:47-79`): the editor starts
@@ -407,26 +442,77 @@ mod web {
 
     use std::cell::RefCell;
 
+    type Compiled = Option<amos_wasmhost::CompiledProgram>;
+
     thread_local! {
         static FILES: RefCell<Vec<(String, Vec<u8>)>> = const { RefCell::new(Vec::new()) };
         static RUN: RefCell<Option<String>> = const { RefCell::new(None) };
-        static BUNDLE: RefCell<Option<amos_core::bundle::Bundle>> = const { RefCell::new(None) };
+        static BUNDLE: RefCell<Option<(amos_core::bundle::Bundle, Compiled)>> = const { RefCell::new(None) };
     }
 
-    pub(super) fn take_bundle() -> Option<amos_core::bundle::Bundle> {
+    pub(super) fn take_bundle() -> Option<(amos_core::bundle::Bundle, Compiled)> {
         BUNDLE.with(|b| b.borrow_mut().take())
     }
 
+    /// Instantiates the compiled module of a bundle (asynchronously, as
+    /// browsers require for large modules); `None` if it has none or it
+    /// cannot be used (the program is then interpreted).
+    async fn instantiate(bundle: &amos_core::bundle::Bundle) -> Compiled {
+        let wasm = bundle.module.as_ref()?;
+        let prg = bundle.program().ok()?;
+        let compiled = amos_core::interp::verify::Verifier::verify(&prg.source, prg.math_flags).ok()?;
+        match amos_wasmhost::CompiledProgram::new_async(wasm, std::rc::Rc::new(compiled)).await {
+            Ok(cp) => {
+                log::info!("Running the compiled program");
+                Some(cp)
+            }
+            Err(e) => {
+                log::warn!("Compiled program not usable ({e}): interpreting");
+                None
+            }
+        }
+    }
+
     /// Starts a standalone application from a program bundle (the
-    /// `app.amospak` file written by `amos-cli build`).
+    /// `app.amospak` file written by `amos-cli build`). Returns a promise
+    /// resolved once the application started.
     #[wasm_bindgen]
-    pub fn start_bundle(data: Vec<u8>) -> Result<(), JsValue> {
+    pub async fn start_bundle(data: Vec<u8>) -> Result<(), JsValue> {
         console_error_panic_hook::set_once();
         let _ = console_log::init_with_level(log::Level::Info);
         let bundle = amos_core::bundle::Bundle::from_bytes(&data).ok_or_else(|| JsValue::from_str("not an AMOS bundle"))?;
-        BUNDLE.with(|b| *b.borrow_mut() = Some(bundle));
+        let compiled = instantiate(&bundle).await;
+        BUNDLE.with(|b| *b.borrow_mut() = Some((bundle, compiled)));
         super::run();
         Ok(())
+    }
+
+    /// Runs a bundle for `frames` frames without a window (compiled when
+    /// `compiled` and the bundle has a usable module) and returns a report:
+    /// how it ran, the final state, the log and a checksum of the display.
+    /// Lets tests check the web runtime with node, where there is no window.
+    #[wasm_bindgen]
+    pub async fn headless_report(data: Vec<u8>, frames: u32, compiled: bool) -> Result<String, JsValue> {
+        let bundle = amos_core::bundle::Bundle::from_bytes(&data).ok_or_else(|| JsValue::from_str("not an AMOS bundle"))?;
+        let mut cp = if compiled { instantiate(&bundle).await } else { None };
+        let mut m = amos_core::Machine::new();
+        let prg = bundle.install(&mut m.hw.files).map_err(|e| JsValue::from_str(&e.to_string()))?;
+        m.run_program(&prg).map_err(|e| JsValue::from_str(amos_core::errors::test_message(e.code)))?;
+        let mode = if cp.is_some() { "compiled" } else { "interpreted" };
+        let mut log = Vec::new();
+        for _ in 0..frames {
+            match &mut cp {
+                Some(cp) => cp.vbl(&mut m),
+                None => m.vbl(),
+            }
+            log.append(&mut m.hw.log);
+            if !m.interp.running {
+                break;
+            }
+        }
+        let rgba = amos_core::display::render_rgba(&m.frame());
+        let sum = rgba.iter().fold(0u64, |h, &b| (h ^ b as u64).wrapping_mul(0x100000001b3));
+        Ok(format!("{mode}\nstate {:?}\ndisplay {sum:016x}\nlog {log:?}", m.state))
     }
 
     /// Adds a file of the AMOS distribution (path relative to the AMOS

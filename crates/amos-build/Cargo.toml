@@ -5,4 +5,5 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+amos-compiler = { version = "0.1.0", path = "../amos-compiler" }
 amos-core = { version = "0.1.0", path = "../amos-core" }

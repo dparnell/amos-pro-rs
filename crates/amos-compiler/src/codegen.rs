@@ -87,7 +87,7 @@ imports! {
     PrintS = "host" "print_s" (i);
     PrintTab = "host" "print_tab" ();
     PrintEnd = "host" "print_end" (i i) -> i;
-    Aref = "host" "aref" (i i i i i i i i i i) -> i;
+    Aref = "host" "aref" (i i) -> i;
     AgetI = "host" "aget_i" (i i) -> i;
     AgetF = "host" "aget_f" (i i) -> f;
     AgetS = "host" "aget_s" (i i) -> i;
@@ -354,18 +354,29 @@ impl<'a> Gen<'a> {
     /// Evaluates the indices of an element of array `slot`; returns the
     /// local holding its flat index.
     fn aref(&mut self, slot: u16, idx: &[Expr]) -> u32 {
-        self.i32c(slot as i32);
-        self.i32c(idx.len() as i32);
+        // Indices are evaluated in order (an index can itself use an array:
+        // keep them in locals until all are known); the first 8 go to the
+        // IDX area, the interpreter evaluates and ignores the others.
+        let mut temps = Vec::new();
         for (i, e) in idx.iter().enumerate() {
             self.expr(e);
             self.as_int(e.ty);
-            if i >= 8 {
+            if i < 8 {
+                let t = self.tmp(ValType::I32);
+                self.set(t);
+                temps.push(t);
+            } else {
                 self.w(W::Drop);
             }
         }
-        for _ in idx.len()..8 {
-            self.i32c(0);
+        for (i, t) in temps.into_iter().enumerate() {
+            self.get(L_BASE);
+            self.get(t);
+            self.w(W::I32Store(mem32(layout::IDX + i as u32 * 4)));
+            self.release(t, ValType::I32);
         }
+        self.i32c(slot as i32);
+        self.i32c(idx.len() as i32);
         self.call(Imp::Aref);
         let t = self.tmp(ValType::I32);
         self.set(t);

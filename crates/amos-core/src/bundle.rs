@@ -7,10 +7,17 @@
 //!
 //! Layout: `MAGIC`, `u32` file count, then for each file `u16` path length,
 //! path (UTF-8, '/' separated), `u32` data length, data; then `u16` length
-//! and path of the main program. When appended to an executable, the
-//! payload is followed by a trailer: `u64` payload offset and `MAGIC`.
+//! and path of the main program; optionally the program compiled to
+//! WebAssembly (`docs/COMPILER.md`): `WASM_TAG`, `u32` length, module.
+//! Readers ignore what follows the main program path, so older runtimes
+//! still read bundles with a module (and interpret the program). When
+//! appended to an executable, the payload is followed by a trailer: `u64`
+//! payload offset and `MAGIC`.
 
 pub const MAGIC: &[u8; 8] = b"AMOSPAK1";
+
+/// Tag of the compiled module section.
+pub const WASM_TAG: &[u8; 4] = b"WASM";
 
 /// Name of the volume holding the bundled files.
 pub const VOLUME: &str = "Bundle";
@@ -21,6 +28,9 @@ pub struct Bundle {
     pub files: Vec<(String, Vec<u8>)>,
     /// Path of the program to run.
     pub main: String,
+    /// The main program compiled to WebAssembly (`amos-compiler`), run
+    /// instead of interpreting the program when the runtime supports it.
+    pub module: Option<Vec<u8>>,
 }
 
 impl Bundle {
@@ -35,6 +45,11 @@ impl Bundle {
         }
         out.extend_from_slice(&(self.main.len() as u16).to_be_bytes());
         out.extend_from_slice(self.main.as_bytes());
+        if let Some(m) = &self.module {
+            out.extend_from_slice(WASM_TAG);
+            out.extend_from_slice(&(m.len() as u32).to_be_bytes());
+            out.extend_from_slice(m);
+        }
         out
     }
 
@@ -58,7 +73,12 @@ impl Bundle {
         }
         let n = u16::from_be_bytes(take(2)?.try_into().ok()?) as usize;
         let main = String::from_utf8(take(n)?.to_vec()).ok()?;
-        Some(Bundle { files, main })
+        let mut module = None;
+        if take(4).is_some_and(|t| t == WASM_TAG) {
+            let len = u32::from_be_bytes(take(4)?.try_into().ok()?) as usize;
+            module = Some(take(len)?.to_vec());
+        }
+        Some(Bundle { files, main, module })
     }
 
     /// Appends the bundle to an executable image.
@@ -150,7 +170,7 @@ impl Bundle {
         // The program itself is always at the root of the bundle.
         files.retain(|(p, _)| *p != main_name);
         files.insert(0, (main_name.clone(), std::fs::read(program)?));
-        Ok(Bundle { files, main: main_name })
+        Ok(Bundle { files, main: main_name, module: None })
     }
 
     /// Builds a bundle from an AMOS path, optionally with all the files of
@@ -163,7 +183,17 @@ impl Bundle {
         let mut files = if with_dir { fs.read_tree(dir)? } else { Vec::new() };
         files.retain(|(p, _)| *p != main);
         files.insert(0, (main.clone(), fs.read(&full)?));
-        Ok(Bundle { files, main })
+        Ok(Bundle { files, main, module: None })
+    }
+
+    /// The main program (not installed).
+    pub fn program(&self) -> crate::Result<crate::Program> {
+        let data = &self.files.iter().find(|(p, _)| *p == self.main).ok_or(crate::AmosError::BadFormat)?.1;
+        if data.starts_with(b"AMOS") {
+            crate::Program::load(data)
+        } else {
+            crate::tokenise::tokenise_program(data).map_err(|_| crate::AmosError::BadFormat)
+        }
     }
 
     /// Total size of the bundled data.
@@ -194,7 +224,7 @@ impl Bundle {
 }
 
 /// Page of a standalone web application: loads `app.amospak` and starts
-/// it with the runtime (`amos_app.js` / `amos_app_bg.wasm`). `{TITLE}` is
+/// it (its compiled module when it has one) with the runtime (`amos_app.js` / `amos_app_bg.wasm`). `{TITLE}` is
 /// replaced by the program name.
 pub const WEB_INDEX_HTML: &str = r#"<!doctype html>
 <html lang="en">
@@ -216,9 +246,14 @@ pub const WEB_INDEX_HTML: &str = r#"<!doctype html>
     const status = document.getElementById("status");
     await init();
     const data = new Uint8Array(await (await fetch("app.amospak")).arrayBuffer());
-    status.remove();
-    start_bundle(data);
-    document.getElementById("amos").focus();
+    try {
+      // Instantiates the compiled program (if the bundle has one), then starts.
+      await start_bundle(data);
+      status.remove();
+      document.getElementById("amos").focus();
+    } catch (e) {
+      status.textContent = "Cannot start: " + e;
+    }
   </script>
 </body>
 </html>
@@ -233,6 +268,7 @@ mod tests {
         let b = Bundle {
             files: vec![("game.AMOS".into(), b"AMOS Pro101v\0\0\0\0\0\0\0\0".to_vec()), ("data/x.iff".into(), vec![1, 2, 3])],
             main: "game.AMOS".into(),
+            module: None,
         };
         assert_eq!(Bundle::from_bytes(&b.to_bytes()).unwrap(), b);
         let exe = b.append_to_executable(b"\x7fELF fake executable");
@@ -242,5 +278,20 @@ mod tests {
         let prg = b.install(&mut fs).unwrap();
         assert!(prg.source.is_empty());
         assert_eq!(fs.read("data/x.iff").unwrap(), vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn compiled_module_section() {
+        let mut b = Bundle { files: vec![("p.txt".into(), b"Print 1".to_vec())], main: "p.txt".into(), module: None };
+        let old = b.to_bytes();
+        b.module = Some(b"\0asm\x01\0\0\0".to_vec());
+        let new = b.to_bytes();
+        assert_eq!(Bundle::from_bytes(&new).unwrap(), b);
+        // Old bundles have no module; the section only follows the old data.
+        assert_eq!(Bundle::from_bytes(&old).unwrap().module, None);
+        assert!(new.starts_with(&old));
+        let exe = b.append_to_executable(b"exe");
+        assert_eq!(Bundle::from_executable(&exe).unwrap(), b);
+        assert!(b.program().is_ok());
     }
 }

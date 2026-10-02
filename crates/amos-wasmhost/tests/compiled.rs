@@ -1,4 +1,5 @@
 //! More differential tests: compiled and interpreted runs must agree.
+#![cfg(not(target_arch = "wasm32"))]
 
 mod common;
 
@@ -189,6 +190,8 @@ fn arrays_more() {
     run(p);
     let p = "Dim A(3)\nA(1)=5 : Inc A(1) : Add A(1),10 : Print A(1)";
     assert_eq!(run(p), " 16\n");
+    let p = "Dim A(3,3),B(3)\nB(2)=3 : A(1,B(2))=7 : A(B(1),B(B(2)-1))=8\nPrint A(1,3);A(0,3);A(1,B(2))";
+    assert_eq!(run(p), " 7 8 7\n");
     let p = "Dim A(3)\nFor A(1)=1 To 3 : Print A(1); : Next";
     assert_eq!(run(p), " 1 2 3");
 }

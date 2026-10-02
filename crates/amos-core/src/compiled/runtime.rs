@@ -918,9 +918,13 @@ impl Runtime {
     // Arrays (kept in the interpreter)
     // ------------------------------------------------------------------
 
-    /// Flat index of an element of array `slot` (`Interp::var_ref`).
-    #[allow(clippy::too_many_arguments)]
-    pub fn aref(&mut self, env: &mut dyn Env, mem: &mut [u8], slot: i32, n: i32, idx: [i32; 8]) -> i32 {
+    /// Flat index of an element of array `slot` (`Interp::var_ref`); the
+    /// first 8 indices are in the `IDX` area, `n` is their number.
+    pub fn aref(&mut self, env: &mut dyn Env, mem: &mut [u8], slot: i32, n: i32) -> i32 {
+        let mut idx = [0i32; 8];
+        for (k, v) in idx.iter_mut().enumerate() {
+            *v = ld_i32(mem, layout::IDX + k as u32 * 4);
+        }
         let (it, _) = env.parts();
         let n = (n.max(0) as usize).min(9);
         let r = match it.var_slot(slot as u16) {
