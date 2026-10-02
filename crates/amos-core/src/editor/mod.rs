@@ -19,6 +19,7 @@
 //! * TODO(menus): the editor menu is drawn by `menu.rs` on the editor
 //!   screen rather than with the AMOS menu system.
 
+pub mod build;
 pub mod config;
 pub mod dialogs;
 pub mod direct;
@@ -105,6 +106,11 @@ pub struct Editor {
     text_buffer: i64,
     /// The "save changes?" question was answered for the function called.
     skip_saved: bool,
+    /// Build Application: native, web, folder files; a build in progress
+    /// and the number of results before it.
+    build_options: [bool; 3],
+    building: bool,
+    build_waiting: usize,
     direct: direct::DirectMode,
     blink: u32,
     mouse_prev: u8,
@@ -166,6 +172,9 @@ impl Editor {
             search_mode,
             text_buffer: TEXT_BUFFER,
             skip_saved: false,
+            build_options: [true; 3],
+            building: false,
+            build_waiting: 0,
             direct,
             blink: 0,
             mouse_prev: 0,
@@ -637,6 +646,7 @@ impl Editor {
             self.key(m, k);
         }
         self.mouse(m);
+        self.build_poll(m);
         if self.mode == Mode::Edit && self.dirty && !self.menu.open && self.modal.is_none() {
             self.dirty = false;
             self.redraw(m);
@@ -651,7 +661,13 @@ impl Editor {
     pub fn key(&mut self, m: &mut Machine, k: KeyPress) {
         self.dirty = true;
         self.alert = None;
-        if let Some(f) = self.cfg.function_for_key(&k) {
+        // Amiga+Shift+A: Build Application (not in the original table).
+        let f = if k.raw == 0x20 && k.shift & config::AMI != 0 && k.shift & config::SHF != 0 && k.shift & 0x38 == 0 {
+            Some(build::BUILD_FUNCTION)
+        } else {
+            self.cfg.function_for_key(&k)
+        };
+        if let Some(f) = f {
             self.function(m, f);
         } else if k.ascii >= 32 {
             let ins = self.insert;
@@ -924,6 +940,10 @@ impl Editor {
             }
             1082 => {
                 self.quit_requested = true;
+                Ok(())
+            }
+            build::BUILD_FUNCTION => {
+                self.build_application(m);
                 Ok(())
             }
             menu::SYNTAX_FUNCTION => {

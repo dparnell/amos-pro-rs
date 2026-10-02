@@ -480,3 +480,73 @@ fn information_dialogs() {
     // The text is drawn again with the syntax colours.
     assert_eq!(m.hw.screens.get(EC_EDIT).unwrap().planes, 4);
 }
+
+/// Build Application from the Project menu: output folder with the file
+/// selector, targets dialog, then the request for the platform.
+#[test]
+fn build_application_menu() {
+    let mut m = Machine::new();
+    let mut ed = Editor::new(&mut m);
+    type_text(&mut ed, &mut m, "print \"app\"\n");
+    ed.save_as(&mut m, "Ram Disk:prog").unwrap();
+    // Right button on Project, release on its last item.
+    let (x, y) = display_pos(&m, 20, 4);
+    m.input(InputEvent::MouseMove { x, y });
+    m.input(InputEvent::MouseButton { button: crate::input::MouseButton::Right, pressed: true });
+    frames(&mut ed, &mut m, 1);
+    let n = ed.menu_root.children[0].children.len() as i32;
+    let (x, y) = display_pos(&m, 40, 11 + (n - 1) * 9 + 4);
+    m.input(InputEvent::MouseMove { x, y });
+    frames(&mut ed, &mut m, 1);
+    m.input(InputEvent::MouseButton { button: crate::input::MouseButton::Right, pressed: false });
+    frames(&mut ed, &mut m, 25);
+    // The file selector in Apps (created), the program's name as default.
+    assert!(m.hw.files.is_dir("Ram Disk:Apps"));
+    assert!(matches!(ed.modal, Some(dialogs::Modal::Fsel(Then::BuildFolder))), "{:?}", ed.modal);
+    key(&mut m, raw::RETURN, Some('\r'));
+    frames(&mut ed, &mut m, 30);
+    assert!(matches!(ed.modal, Some(dialogs::Modal::Dialog(Then::BuildTargets(_)))), "{:?}", ed.modal);
+    // F1 unticks Native, Return = Ok.
+    key(&mut m, raw::F1, None);
+    frames(&mut ed, &mut m, 3);
+    key(&mut m, raw::RETURN, Some('\r'));
+    frames(&mut ed, &mut m, 3);
+    assert!(!ed.in_dialog());
+    assert_eq!(m.hw.build_requests.len(), 1);
+    let r = &m.hw.build_requests[0];
+    assert_eq!(r.program, "Ram Disk:prog.AMOS");
+    assert_eq!(r.name, "prog");
+    assert_eq!(r.out, "Ram Disk:Apps/prog");
+    assert!(m.hw.files.is_dir("Ram Disk:Apps/prog"));
+    assert!(!r.native && r.web && r.with_files);
+    assert_eq!(ed.current_alert(), Some("Building prog..."));
+    // The platform's answer goes to the status line.
+    m.hw.build_requests.clear();
+    m.hw.build_results.push(Err("only available in the desktop version".into()));
+    frames(&mut ed, &mut m, 1);
+    assert_eq!(ed.current_alert(), Some("Build failed: only available in the desktop version"));
+}
+
+/// An unsaved, unnamed program is saved first (Save As file selector).
+#[test]
+fn build_application_saves_first() {
+    let mut m = Machine::new();
+    let mut ed = Editor::new(&mut m);
+    type_text(&mut ed, &mut m, "print 1\n");
+    // Amiga+Shift+A.
+    m.input(InputEvent::Key { scancode: raw::LAMIGA, pressed: true, ch: None });
+    with_shift(&mut m, raw::LSHIFT, 0x20, Some('A'));
+    m.input(InputEvent::Key { scancode: raw::LAMIGA, pressed: false, ch: None });
+    frames(&mut ed, &mut m, 25);
+    assert!(
+        matches!(ed.modal, Some(dialogs::Modal::Fsel(Then::SaveAs(Some(build::BUILD_FUNCTION))))),
+        "{:?}",
+        ed.modal
+    );
+    type_text(&mut ed, &mut m, "first.AMOS\n");
+    frames(&mut ed, &mut m, 30);
+    assert!(ed.doc().name.ends_with("first.AMOS"));
+    // Then the output folder is asked.
+    frames(&mut ed, &mut m, 25);
+    assert!(matches!(ed.modal, Some(dialogs::Modal::Fsel(Then::BuildFolder))), "{:?}", ed.modal);
+}

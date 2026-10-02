@@ -193,6 +193,9 @@ pub fn edit(args: &[String]) -> Result<(), String> {
         ed.vbl(&mut m);
     }
     println!("-- mode {:?}, line {}, column {}", ed.mode, ed.doc().y + 1, ed.doc().x + 1);
+    for r in &m.hw.build_requests {
+        println!("-- build request: {r:?}");
+    }
     if let Some(a) = ed.current_alert() {
         println!("-- alert: {a}");
     }

@@ -79,8 +79,34 @@ pub fn build(cfg: &EdConfig) -> MenuNode {
         };
         root.insert(&path, node);
     }
-    // Addition of this port: syntax highlighting on / off, at the end of
-    // the Config menu.
+    // Additions of this port: Build Application at the end of the Project
+    // menu (where the program is run and tested), and syntax highlighting
+    // on / off at the end of the Config menu.
+    if let Some(project) = root.children.iter().find(|c| c.number == 2) {
+        let n = project.children.last().map_or(1, |c| c.number + 1);
+        let sep = project.children.iter().find(|c| !c.active()).cloned();
+        let (ink_a, ink_b) = project.children.first().map_or((0, 3), |c| (c.ink_a, c.ink_b));
+        if let Some(sep) = sep {
+            root.insert(&[2, n], MenuNode { number: n, ..sep });
+        }
+        let node = MenuNode {
+            number: n + 1,
+            text: b" Build Application... ".to_vec(),
+            function: super::build::BUILD_FUNCTION as i16,
+            ink_a,
+            ink_b,
+            children: Vec::new(),
+        };
+        root.insert(&[2, n + 1], node);
+        // Same width for all the items of the menu.
+        if let Some(project) = root.children.iter_mut().find(|c| c.number == 2) {
+            let w = project.children.iter().map(|c| c.text.len()).max().unwrap_or(0);
+            for c in &mut project.children {
+                let pad = if c.active() { b' ' } else { b'-' };
+                c.text.resize(w, pad);
+            }
+        }
+    }
     if let Some(config) = root.children.iter().find(|c| c.number == 6) {
         let n = config.children.last().map_or(1, |c| c.number + 1);
         let (ink_a, ink_b) = config.children.first().map_or((0, 3), |c| (c.ink_a, c.ink_b));

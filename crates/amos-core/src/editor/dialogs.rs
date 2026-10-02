@@ -63,6 +63,10 @@ pub enum Then {
     Saved(u16),
     Quit,
     AboutExt(usize),
+    /// Build Application: output folder chosen, then the targets (with
+    /// the folder).
+    BuildFolder,
+    BuildTargets(String),
     /// The line shown when a program stops (`Ed_Ligne`).
     Ligne(crate::interp::StopInfo),
 }
@@ -163,6 +167,21 @@ impl Editor {
     /// `Ed_Dialogue`: runs the dialog at `label` with the variables given;
     /// `then` continues when it closes.
     pub fn dialog(&mut self, m: &mut Machine, label: i32, vars: &[(usize, DVal)], then: Then) {
+        let Some(prog) = self.res.programs.first() else { return self.dialog_failed(m, 0) };
+        let prog: Rc<[u8]> = Rc::from(&prog[..]);
+        self.dialog_program(m, prog, Some(label), vars, then);
+    }
+
+    /// Runs an Interface program (from its start or a label) on the editor
+    /// screen with the editor resource.
+    pub fn dialog_program(
+        &mut self,
+        m: &mut Machine,
+        prog: Rc<[u8]>,
+        label: Option<i32>,
+        vars: &[(usize, DVal)],
+        then: Then,
+    ) {
         // The dialog saves the screen behind it: draw the editor first,
         // without the syntax colours (see `dialog_planes`).
         let hl = self.cfg.highlight;
@@ -174,15 +193,9 @@ impl Editor {
         let _ = m.hw.dia_close_channel(&mut m.interp, ED_CHANNEL);
         self.dialog_screen = Some(m.hw.screens.current);
         m.hw.screens.current = Some(EC_EDIT);
-        let Some(prog) = self.res.programs.first() else { return self.dialog_failed(m, 0) };
         let res = self.dialog_resource();
-        if let Err((c, _)) = m.hw.dia_open_channel(OpenParams {
-            number: ED_CHANNEL,
-            prog: Rc::from(&prog[..]),
-            nvar: 16,
-            buffer: 1024,
-            res,
-        }) {
+        if let Err((c, _)) = m.hw.dia_open_channel(OpenParams { number: ED_CHANNEL, prog, nvar: 16, buffer: 1024, res })
+        {
             return self.dialog_failed(m, c);
         }
         if let Some(i) = m.hw.dialogs.channel_index(ED_CHANNEL) {
@@ -196,7 +209,7 @@ impl Editor {
         }
         m.hw.input.clear_keys();
         self.modal = Some(Modal::Dialog(then.clone()));
-        let r = m.hw.dia_run_program(&mut m.interp, ED_CHANNEL, Some(label), None, None);
+        let r = m.hw.dia_run_program(&mut m.interp, ED_CHANNEL, label, None, None);
         self.dialog_progress(m, then, r);
     }
 
@@ -240,12 +253,17 @@ impl Editor {
     /// messages `msg` (pattern), `msg+1` (default name), `msg+2` and
     /// `msg+3` (titles).
     pub fn file_selector(&mut self, m: &mut Machine, msg: usize, then: Then) {
-        self.redraw(m);
-        self.dirty = false;
         let s = |n: usize| self.cfg.messages.get(n - 1).cloned().unwrap_or_default();
         let (path, def, t1, t2) = (s(msg), s(msg + 1), s(msg + 2), s(msg + 3));
+        self.file_selector_with(m, [&path, &def, &t1, &t2], then);
+    }
+
+    /// The file selector with the path, default name and titles given.
+    pub fn file_selector_with(&mut self, m: &mut Machine, [path, def, t1, t2]: [&[u8]; 4], then: Then) {
+        self.redraw(m);
+        self.dirty = false;
         m.hw.input.clear_keys();
-        match m.hw.fsel_start(&mut m.interp, &path, &def, &t1, &t2) {
+        match m.hw.fsel_start(&mut m.interp, path, def, t1, t2) {
             Ok(()) => self.modal = Some(Modal::Fsel(then)),
             Err(_) => self.alert_message(184),
         }
@@ -296,6 +314,10 @@ impl Editor {
                 r
             }
             Then::Merge | Then::MergeAscii => self.merge(m, &name),
+            Then::BuildFolder => {
+                self.build_folder_done(m, name);
+                Ok(())
+            }
             Then::SaveBlock | Then::SaveBlockAscii => self.save_block(m, &name, then == Then::SaveBlock),
             _ => Ok(()),
         };
@@ -506,6 +528,10 @@ impl Editor {
                 if res.ret == 1 && !self.saved_check(m, 1082) {
                     self.quit_requested = true;
                 }
+                Ok(())
+            }
+            Then::BuildTargets(out) => {
+                self.build_targets_done(m, out, res.ret, &res.vars);
                 Ok(())
             }
             Then::Ligne(info) => {
