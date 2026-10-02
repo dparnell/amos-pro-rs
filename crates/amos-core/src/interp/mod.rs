@@ -608,7 +608,7 @@ impl Interp {
                     self.pc = self.inst_pos;
                     // Events (Every, Break) are still handled while waiting.
                     match self.test_point(hw) {
-                        Ok(()) => return RunState::Running,
+                        Ok(()) | Err(Exc::Block) => return RunState::Running,
                         Err(Exc::Jump) => {
                             // The waiting instruction restarts from scratch
                             // when the handler returns.

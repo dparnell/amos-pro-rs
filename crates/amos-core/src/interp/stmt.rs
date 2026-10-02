@@ -143,11 +143,19 @@ impl Interp {
                 let n = self.eval_int(hw)?;
                 self.fix = crate::ffp::Fix::from_fix_arg(n);
             }
+            // Wait and Wait Vbl end with a test point (`Test_Normal`), so
+            // events and menus are handled even in loops without jumps.
             WAIT => {
                 let n = self.eval_int(hw)?;
                 self.wait_vbls(n.max(0) as u64)?;
+                self.vbl_pending = true;
+                self.test_point(hw)?;
             }
-            WAIT_VBL => self.wait_vbls(1)?,
+            WAIT_VBL => {
+                self.wait_vbls(1)?;
+                self.vbl_pending = true;
+                self.test_point(hw)?;
+            }
             MID_S | MID_S_2 | LEFT_S | RIGHT_S => self.mid_assign(hw, t)?,
             INPUT | LINE_INPUT => self.input(hw, t == LINE_INPUT)?,
             _ => return Ok(false),

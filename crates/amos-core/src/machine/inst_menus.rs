@@ -18,10 +18,7 @@ use crate::gfx::{gfont, images};
 use crate::interp::value::Value;
 use crate::interp::{Ctl, Exc, Interp, R, WaitKind, err};
 use crate::menus::{self, MenuItem, MenuKey, MenuOp, OnMenu, OnMenuKind, flags};
-use crate::tokens::{
-    Keyword, TK_COMMA, TK_END_PROC, TK_EXIT, TK_EXIT_IF, TK_IF, TK_ON, TK_PAR1, TK_PAR2, TK_PRO,
-    TK_TO, tk,
-};
+use crate::tokens::{Keyword, TK_COMMA, TK_PAR1, TK_PAR2, TK_TO, tk};
 
 /// "Menu not opened".
 const MENU_NOT_OPENED: u16 = 38;
@@ -351,30 +348,6 @@ fn maxi(
     }
     ((x1, y1, x2, y2), end)
 }
-
-/// Tokens of the instructions that reach the test point from inside
-/// their execution (loops and jumps, `interp/flow.rs`).
-const FLOW_TOKENS: [u16; 19] = [
-    tk::NEXT,
-    tk::UNTIL,
-    tk::WEND,
-    tk::LOOP,
-    TK_EXIT,
-    TK_EXIT_IF,
-    TK_IF,
-    tk::GOTO,
-    tk::GOSUB,
-    tk::RETURN,
-    tk::POP,
-    TK_ON,
-    TK_PRO,
-    tk::PROC,
-    TK_END_PROC,
-    tk::POP_PROC,
-    tk::RESUME,
-    tk::RESUME_NEXT,
-    tk::RESUME_LABEL,
-];
 
 impl Hardware {
     pub(crate) fn menus_instruction(&mut self, it: &mut Interp, kw: Keyword) -> R<bool> {
@@ -826,10 +799,11 @@ impl Hardware {
     /// Stops the program while the menu is open: loops and jumps wait at
     /// their test point; an instruction that was already waiting (Wait,
     /// Wait Vbl...) is retried at the next frame, its delay pushed back.
+    /// The program is stopped while the menu is open (the original runs
+    /// the whole menu interaction inside `Test_Force`): the instruction at
+    /// the test point is executed again later; a wait in progress is
+    /// extended so it does not expire while the menu is open.
     fn menu_freeze(it: &mut Interp) -> R<()> {
-        if FLOW_TOKENS.contains(&it.rd(it.inst_pos)) {
-            return Err(Exc::Block);
-        }
         let pos = it.inst_pos;
         if let Some(w) = it.wait.as_mut()
             && w.pos == pos
@@ -837,7 +811,7 @@ impl Hardware {
         {
             *until += 1;
         }
-        Ok(())
+        Err(Exc::Block)
     }
 
     /// Runs `f` with the menu drawing state and a canvas on the displayed
