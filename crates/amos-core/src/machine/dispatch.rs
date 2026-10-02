@@ -37,6 +37,7 @@ impl Host for Hardware {
             || self.input_instruction(it, kw)?
             || self.banks_instruction(it, kw)?
             || self.files_instruction(it, kw)?
+            || self.menus_instruction(it, kw)?
             || self.system_instruction(it, kw)?
         {
             return Ok(());
@@ -69,6 +70,9 @@ impl Host for Hardware {
         if let Some(v) = self.files_function(it, kw)? {
             return Ok(v);
         }
+        if let Some(v) = self.menus_function(it, kw)? {
+            return Ok(v);
+        }
         if let Some(v) = self.system_function(it, kw)? {
             return Ok(v);
         }
@@ -83,7 +87,8 @@ impl Host for Hardware {
 
     fn test_point(&mut self, it: &mut Interp) -> R<()> {
         self.sprites_test_point(it)?;
-        self.screen_test_point(it)
+        self.screen_test_point(it)?;
+        self.menus_test_point(it)
     }
 
     fn take_break(&mut self) -> bool {

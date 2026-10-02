@@ -101,6 +101,8 @@ pub struct InputState {
     pub scanshift: u8,
     /// Keys that emulate joystick port 1: cursor keys, fire on Ctrl / Alt.
     pub joystick_keys: bool,
+    /// Incremented for every key press stored (menu shortcut detection).
+    pub key_serial: u64,
 }
 
 impl Default for InputState {
@@ -120,6 +122,7 @@ impl Default for InputState {
             scancode: 0,
             scanshift: 0,
             joystick_keys: true,
+            key_serial: 0,
         }
     }
 }
@@ -253,6 +256,7 @@ impl InputState {
 
     fn store(&mut self, k: KeyPress) {
         self.last_key = k;
+        self.key_serial += 1;
         if self.buffer.len() < KEY_BUFFER {
             self.buffer.push_back(k);
         }

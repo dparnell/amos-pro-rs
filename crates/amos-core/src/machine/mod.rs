@@ -15,6 +15,7 @@ pub mod inst_banks;
 pub mod inst_draw;
 pub mod inst_files;
 pub mod inst_input;
+pub mod inst_menus;
 pub mod inst_screen;
 pub mod inst_sound;
 pub mod inst_sprites;
@@ -61,6 +62,9 @@ pub struct Hardware {
     pub input_separators: (i32, i32),
     /// Program to start after the current one stopped (`Run "file"`).
     pub pending_run: Option<Vec<u8>>,
+    pub menus: crate::menus::Menus,
+    /// Last key checked against menu shortcuts.
+    pub menu_key_serial: u64,
 }
 
 impl Hardware {
@@ -83,6 +87,8 @@ impl Hardware {
             fields: Default::default(),
             input_separators: (10, -1),
             pending_run: None,
+            menus: Default::default(),
+            menu_key_serial: 0,
         };
         hw.reset();
         hw

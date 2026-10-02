@@ -12,6 +12,7 @@ pub mod gfx;
 pub mod input;
 pub mod interp;
 pub mod machine;
+pub mod menus;
 pub mod number;
 pub mod program;
 pub mod tokenise;
