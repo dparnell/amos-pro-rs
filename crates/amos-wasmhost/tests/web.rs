@@ -114,6 +114,12 @@ const PROGRAMS: &[&str] = &[
     "For K=1 To 200 : P[K] : Next : Print Param\nProcedure P[N]\nDim BIG(2000),S$(100)\nBIG(2000)=N : S$(100)=Str$(N)\nEnd Proc[BIG(2000)+Len(S$(100))]",
     "Dim S$(4),A(9)\nS$(0)=\"d\" : S$(1)=\"b\" : S$(2)=\"a\"\nSort S$(0) : Print S$(2);S$(3);S$(4);Match(S$(0),\"b\")\nFor I=0 To 9 : A(I)=9-I : Next : Sort A(0) : Inc A(3) : Swap A(0),A(9) : Print A(0);A(3);Match(A(0),5)",
     "Dim A(60000),B#(60000)\nA(60000)=1 : B#(60000)=2.5 : Print A(60000)+B#(60000)",
+    "R[0]\nProcedure R[N]\nPrint N;\nGosub L\nPop Proc\nL: R[N+1] : Return\nEnd Proc",
+    "ISEVEN[7] : Print Param\nProcedure ISEVEN[N]\nIf N=0 Then Pop Proc[True]\nISODD[N-1]\nEnd Proc[Param]\nProcedure ISODD[N]\nIf N=0 Then Pop Proc[False]\nISEVEN[N-1]\nEnd Proc[Param]",
+    "For I=1 To 2000 : P[I] : A$=A$+Left$(Param$,2) : Next : Print Len(A$);Right$(A$,8)\nProcedure P[N]\nEnd Proc[Str$(N)+Space$(50)]",
+    "On Error Proc H\nA=1/0\nPrint \"x\";Param\nProcedure H\nQ[2] : Print Param;\nResume Next\nEnd Proc\nProcedure Q[N]\nIf N>0 Then Q[N-1]\nEnd Proc[N*3+Param]",
+    "P[3]\nProcedure P[N]\nPrint V7;V19$;\nV0=N+0 : V1=N+1 : V2=N+2 : V3=N+3 : V4=N+4\nV5=N+5 : V6=N+6 : V7=N+7 : V8=N+8 : V9=N+9\nV10=N+10 : V11=N+11 : V12=N+12 : V13=N+13 : V14=N+14\nV15=N+15 : V16=N+16 : V17=N+17 : V18=N+18 : V19=N+19 : V19$=Str$(N)\nIf N>0 Then P[N-1]\nPrint V7;V19;V19$;\nEnd Proc",
+    "C=0\nEvery 1 Proc E\nFIB[16] : Print Param\nEvery Off\nPrint C>0\nProcedure FIB[N]\nIf N<2 Then Pop Proc[N]\nFIB[N-1] : A=Param\nFIB[N-2]\nEnd Proc[A+Param]\nProcedure E\nShared C\nInc C\nEvery On\nEnd Proc",
 ];
 
 #[wasm_bindgen_test]

@@ -170,6 +170,8 @@ struct Gen<'a> {
     layout: Layout,
     /// Arrays kept in the interpreter (`structure::var_key`s, sorted).
     resident_arrays: &'a [(usize, u16)],
+    /// Scalars kept in the interpreter (`structure::resident_vars`).
+    resident_vars: Vec<(usize, u16)>,
     /// Scope of the instruction being compiled.
     scope: usize,
     /// Point number of the instruction being compiled.
@@ -1152,7 +1154,18 @@ impl<'a> Gen<'a> {
                 self.get(L_BASE);
                 self.w(W::F64Load(mem64(layout::PARAM_F)));
             }
-            Nf::ParamS => self.call(Imp::ParamS),
+            Nf::ParamS => {
+                // Set by an End Proc of the module since the last import, or
+                // the interpreter's.
+                self.hdr(layout::PARAM_SET);
+                self.i32c(4);
+                self.w(W::I32And);
+                self.if_(BlockType::Result(ValType::I32));
+                self.hdr(layout::PARAM_S);
+                self.else_();
+                self.call(Imp::ParamS);
+                self.end();
+            }
             Nf::Pi => {
                 let pi = if self.double {
                     std::f64::consts::PI
@@ -1431,6 +1444,252 @@ impl<'a> Gen<'a> {
         self.release_place(p);
     }
 
+    /// Restores the control stack mirror words saved in the pending entry
+    /// whose address is in local `e`.
+    fn restore_mirror(&mut self, e: u32) {
+        for (k, &w) in layout::MIRROR_WORDS.iter().enumerate() {
+            self.get(L_BASE);
+            self.get(e);
+            self.w(W::I32Load(mem32(layout::PE_MIRROR + k as u32 * 4)));
+            self.w(W::I32Store(mem32(w)));
+        }
+    }
+
+    /// The mirror of a Gosub / procedure frame on top of the control stack.
+    fn routine_mirror(&mut self) {
+        for (w, v) in [
+            (layout::TOP_KIND, layout::TOP_OTHER),
+            (layout::FOR_ADDR, 0),
+            (layout::LOOP_LO, 0),
+            (layout::LOOP_HI, i32::MAX),
+        ] {
+            self.get(L_BASE);
+            self.i32c(v);
+            self.w(W::I32Store(mem32(w)));
+        }
+    }
+
+    /// Pushes the condition "the control stack surely has room for one more
+    /// entry": `(CTL_LEN + PEND_COUNT + 1) * 42 <= STACK_LIMIT`.
+    fn room_check(&mut self) {
+        self.hdr(layout::CTL_LEN);
+        self.hdr(layout::PEND_COUNT);
+        self.w(W::I32Add);
+        self.i32c(1);
+        self.w(W::I32Add);
+        self.i32c(layout::CTL_MAX_ENTRY);
+        self.w(W::I32Mul);
+        self.hdr(layout::STACK_LIMIT);
+        self.w(W::I32LeS);
+    }
+
+    /// Call of procedure `index` with `nargs` parameters (converted, in the
+    /// `args` area) returning to `ret`, done by the module when the stack
+    /// surely has room: a pending entry (`Runtime::flush` pushes the frame
+    /// on the interpreter's stack before the next import), the locals in
+    /// the next memory frame, then the body. Emits nothing (the caller does
+    /// the call through the runtime) for procedures whose parameters are
+    /// kept in the interpreter.
+    fn native_call(&mut self, index: usize, nargs: usize, ret: usize) -> Result<(), CompileError> {
+        let p = &self.prg.procs[index];
+        let params: Vec<(u16, u8)> = p.params.iter().copied().zip(p.param_types.iter().copied()).take(nargs).collect();
+        let n_locals = p.locals.len() as u32;
+        let resident = params.iter().any(|&(slot, _)| {
+            let scope = if slot & GLOBAL != 0 { 0 } else { index + 1 };
+            self.resident_vars.binary_search(&structure::var_key(scope, slot)).is_ok()
+        });
+        if p.machine_code || resident {
+            return Ok(());
+        }
+        let (body, rpt) = (self.point_of(p.body)?, self.point_of(ret)?);
+        self.room_check();
+        self.if_(BlockType::Empty);
+        let e = self.tmp(ValType::I32);
+        self.get(L_BASE);
+        self.hdr(layout::PEND_COUNT);
+        self.i32c(layout::PEND_ENTRY as i32);
+        self.w(W::I32Mul);
+        self.w(W::I32Add);
+        self.i32c(self.layout.pending as i32);
+        self.w(W::I32Add);
+        self.set(e);
+        for (off, v) in [(layout::PE_RET, ret as i32), (layout::PE_POINT, rpt as i32), (layout::PE_KIND, index as i32)]
+        {
+            self.get(e);
+            self.i32c(v);
+            self.w(W::I32Store(mem32(off)));
+        }
+        let saved = layout::MIRROR_WORDS.iter().enumerate().map(|(k, &w)| (layout::PE_MIRROR + k as u32 * 4, w));
+        let saved: Vec<(u32, u32)> = saved
+            .chain([
+                (layout::PE_FP, layout::FP),
+                (layout::PE_SCOPE, layout::SCOPE),
+                (layout::PE_PREV, layout::PEND_PROC),
+            ])
+            .collect();
+        for (off, w) in saved {
+            self.get(e);
+            self.hdr(w);
+            self.w(W::I32Store(mem32(off)));
+        }
+        self.release(e, ValType::I32);
+        // PEND_PROC = PEND_COUNT = PEND_COUNT + 1
+        let n = self.tmp(ValType::I32);
+        self.get(L_BASE);
+        self.hdr(layout::PEND_COUNT);
+        self.i32c(1);
+        self.w(W::I32Add);
+        self.w(W::LocalTee(n));
+        self.w(W::I32Store(mem32(layout::PEND_COUNT)));
+        self.get(L_BASE);
+        self.get(n);
+        self.w(W::I32Store(mem32(layout::PEND_PROC)));
+        self.release(n, ValType::I32);
+        // Global parameters.
+        for (k, &(slot, _)) in params.iter().enumerate() {
+            if slot & GLOBAL != 0 {
+                self.get(L_BASE);
+                self.get(L_BASE);
+                self.w(W::I64Load(mem64(self.layout.args + k as u32 * 8)));
+                self.w(W::I64Store(mem64(layout::GLOBALS + (slot & !GLOBAL) as u32 * 8)));
+            }
+        }
+        // The new frame: base + locals + DEPTH * frame_size.
+        let fp = self.tmp(ValType::I32);
+        self.get(L_BASE);
+        self.hdr(layout::DEPTH);
+        self.i32c(self.layout.frame_size as i32);
+        self.w(W::I32Mul);
+        self.w(W::I32Add);
+        self.i32c(self.layout.locals as i32);
+        self.w(W::I32Add);
+        self.set(fp);
+        let is_param = |i: u32| params.iter().any(|&(slot, _)| slot & GLOBAL == 0 && slot as u32 == i);
+        if n_locals > 16 {
+            self.get(fp);
+            self.i32c(0);
+            self.i32c(n_locals as i32 * 8);
+            self.w(W::MemoryFill(0));
+        } else {
+            for i in (0..n_locals).filter(|&i| !is_param(i)) {
+                self.get(fp);
+                self.w(W::I64Const(0));
+                self.w(W::I64Store(mem64(i * 8)));
+            }
+        }
+        for (k, &(slot, _)) in params.iter().enumerate() {
+            if slot & GLOBAL == 0 {
+                self.get(fp);
+                self.get(L_BASE);
+                self.w(W::I64Load(mem64(self.layout.args + k as u32 * 8)));
+                self.w(W::I64Store(mem64(slot as u32 * 8)));
+            }
+        }
+        self.get(L_BASE);
+        self.get(fp);
+        self.w(W::I32Store(mem32(layout::FP)));
+        self.release(fp, ValType::I32);
+        self.get(L_BASE);
+        self.hdr(layout::DEPTH);
+        self.i32c(1);
+        self.w(W::I32Add);
+        self.w(W::I32Store(mem32(layout::DEPTH)));
+        self.get(L_BASE);
+        self.i32c(index as i32 + 1);
+        self.w(W::I32Store(mem32(layout::SCOPE)));
+        self.routine_mirror();
+        self.jump_point(body);
+        self.end();
+        Ok(())
+    }
+
+    /// End Proc / Pop Proc of a procedure call still pending (done by the
+    /// module, see `native_call`), its value in `RET` / `RET_TAG` (`tag`: its
+    /// type, -2 known at run time only): sets Param (`PARAM_SET`), drops the
+    /// entry and the Gosubs above it, restores the caller's mirror words and
+    /// continues at the return point. Not for the On Error procedure being
+    /// run with an error (`ERR_PROC`, which the runtime handles).
+    fn native_return(&mut self, tag: i32) {
+        self.hdr(layout::PEND_PROC);
+        self.i32c(0);
+        self.w(W::I32Ne);
+        self.hdr(layout::DEPTH);
+        self.hdr(layout::ERR_PROC);
+        self.w(W::I32Ne);
+        self.w(W::I32And);
+        self.if_(BlockType::Empty);
+        let set_param = |g: &mut Self, t: i32| {
+            let (word, bit) = match t {
+                0 => (layout::PARAM_E, 1),
+                1 => (layout::PARAM_F, 2),
+                _ => (layout::PARAM_S, 4),
+            };
+            g.get(L_BASE);
+            g.get(L_BASE);
+            if t == 1 {
+                g.w(W::F64Load(mem64(layout::RET)));
+                g.w(W::F64Store(mem64(word)));
+            } else {
+                g.w(W::I32Load(mem32(layout::RET)));
+                g.w(W::I32Store(mem32(word)));
+            }
+            g.get(L_BASE);
+            g.hdr(layout::PARAM_SET);
+            g.i32c(bit);
+            g.w(W::I32Or);
+            g.w(W::I32Store(mem32(layout::PARAM_SET)));
+        };
+        match tag {
+            -1 => {}
+            -2 => {
+                self.hdr(layout::RET_TAG);
+                self.if_(BlockType::Empty);
+                set_param(self, 1);
+                self.else_();
+                set_param(self, 0);
+                self.end();
+            }
+            t => set_param(self, t),
+        }
+        let e = self.tmp(ValType::I32);
+        let k = self.tmp(ValType::I32);
+        self.hdr(layout::PEND_PROC);
+        self.i32c(1);
+        self.w(W::I32Sub);
+        self.set(k);
+        self.get(L_BASE);
+        self.get(k);
+        self.i32c(layout::PEND_ENTRY as i32);
+        self.w(W::I32Mul);
+        self.w(W::I32Add);
+        self.i32c(self.layout.pending as i32);
+        self.w(W::I32Add);
+        self.set(e);
+        self.get(L_BASE);
+        self.get(k);
+        self.w(W::I32Store(mem32(layout::PEND_COUNT)));
+        self.release(k, ValType::I32);
+        for (w, off) in
+            [(layout::PEND_PROC, layout::PE_PREV), (layout::FP, layout::PE_FP), (layout::SCOPE, layout::PE_SCOPE)]
+        {
+            self.get(L_BASE);
+            self.get(e);
+            self.w(W::I32Load(mem32(off)));
+            self.w(W::I32Store(mem32(w)));
+        }
+        self.restore_mirror(e);
+        self.get(L_BASE);
+        self.hdr(layout::DEPTH);
+        self.i32c(1);
+        self.w(W::I32Sub);
+        self.w(W::I32Store(mem32(layout::DEPTH)));
+        self.get(e);
+        self.w(W::I32Load(mem32(layout::PE_POINT)));
+        self.release(e, ValType::I32);
+        self.status_jump();
+        self.end();
+    }
+
     /// Gosub label `idx` returning to `ret`. Fast path (no host call) when
     /// nothing is pending at the test point, the label is in the current
     /// scope and the control stack surely has room: the Gosub becomes a
@@ -1448,16 +1707,7 @@ impl<'a> Gen<'a> {
             self.i32c(scope as i32);
             self.w(W::I32Eq);
             self.w(W::I32And);
-            // (CTL_LEN + PEND_COUNT + 1) * 42 <= STACK_LIMIT
-            self.hdr(layout::CTL_LEN);
-            self.hdr(layout::PEND_COUNT);
-            self.w(W::I32Add);
-            self.i32c(1);
-            self.w(W::I32Add);
-            self.i32c(layout::CTL_MAX_ENTRY);
-            self.w(W::I32Mul);
-            self.hdr(layout::STACK_LIMIT);
-            self.w(W::I32LeS);
+            self.room_check();
             self.w(W::I32And);
             self.if_(BlockType::Empty);
             {
@@ -1472,14 +1722,17 @@ impl<'a> Gen<'a> {
                 self.set(e);
                 self.get(e);
                 self.i32c(ret as i32);
-                self.w(W::I32Store(mem32(0)));
+                self.w(W::I32Store(mem32(layout::PE_RET)));
                 self.get(e);
                 self.i32c(rpt as i32);
-                self.w(W::I32Store(mem32(4)));
+                self.w(W::I32Store(mem32(layout::PE_POINT)));
+                self.get(e);
+                self.i32c(-1);
+                self.w(W::I32Store(mem32(layout::PE_KIND)));
                 for (k, &w) in layout::MIRROR_WORDS.iter().enumerate() {
                     self.get(e);
                     self.hdr(w);
-                    self.w(W::I32Store(mem32(8 + k as u32 * 4)));
+                    self.w(W::I32Store(mem32(layout::PE_MIRROR + k as u32 * 4)));
                 }
                 self.release(e, ValType::I32);
                 self.get(L_BASE);
@@ -1487,17 +1740,7 @@ impl<'a> Gen<'a> {
                 self.i32c(1);
                 self.w(W::I32Add);
                 self.w(W::I32Store(mem32(layout::PEND_COUNT)));
-                // The mirror of a Gosub on top of the stack.
-                for (w, v) in [
-                    (layout::TOP_KIND, layout::TOP_OTHER),
-                    (layout::FOR_ADDR, 0),
-                    (layout::LOOP_LO, 0),
-                    (layout::LOOP_HI, i32::MAX),
-                ] {
-                    self.get(L_BASE);
-                    self.i32c(v);
-                    self.w(W::I32Store(mem32(w)));
-                }
+                self.routine_mirror();
                 self.jump_point(pt);
             }
             self.end();
@@ -1924,11 +2167,12 @@ impl<'a> Gen<'a> {
             }
             Stmt::Return => {
                 // Fast path: nothing at the test point, and the Gosub was
-                // done by the module (pending): pop it, restore the mirror.
+                // done by the module (pending, above any pending procedure
+                // call): pop it, restore the mirror.
                 self.hdr(layout::ATT);
                 self.w(W::I32Eqz);
                 self.hdr(layout::PEND_COUNT);
-                self.i32c(0);
+                self.hdr(layout::PEND_PROC);
                 self.w(W::I32GtS);
                 self.w(W::I32And);
                 self.if_(BlockType::Empty);
@@ -1948,14 +2192,9 @@ impl<'a> Gen<'a> {
                     self.i32c(self.layout.pending as i32);
                     self.w(W::I32Add);
                     self.set(e);
-                    for (k, &w) in layout::MIRROR_WORDS.iter().enumerate() {
-                        self.get(L_BASE);
-                        self.get(e);
-                        self.w(W::I32Load(mem32(8 + k as u32 * 4)));
-                        self.w(W::I32Store(mem32(w)));
-                    }
+                    self.restore_mirror(e);
                     self.get(e);
-                    self.w(W::I32Load(mem32(4)));
+                    self.w(W::I32Load(mem32(layout::PE_POINT)));
                     self.release(e, ValType::I32);
                     self.status_jump();
                 }
@@ -1974,6 +2213,7 @@ impl<'a> Gen<'a> {
                     self.convert_for(a.ty, ty);
                     self.store(self.layout.args + k as u32 * 8, ty);
                 }
+                self.native_call(*proc, args.len(), *ret)?;
                 self.i32c(pos);
                 self.i32c(*proc as i32);
                 self.i32c(*ret as i32);
@@ -2045,6 +2285,7 @@ impl<'a> Gen<'a> {
                     self.i32c(tag);
                     self.w(W::I32Store(mem32(layout::RET_TAG)));
                 }
+                self.native_return(tag);
                 self.i32c(pos);
                 self.call(Imp::ProcEnd);
                 self.status_jump();
@@ -2566,6 +2807,7 @@ pub fn module(
         prg,
         layout: lay,
         resident_arrays,
+        resident_vars: structure::resident_vars(prg, instrs),
         scope: 0,
         k: 0,
         instrs,

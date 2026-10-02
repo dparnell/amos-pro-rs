@@ -543,3 +543,69 @@ fn gosub_and_return() {
         }
     }
 }
+
+#[test]
+fn native_procedures() {
+    let progs = [
+        // Deep recursion down to Out of stack space (error 13) at the same
+        // depth, with Gosubs and loops on the stack too.
+        "R[0]\nProcedure R[N]\nPrint N;\nR[N+1]\nEnd Proc",
+        "R[0]\nProcedure R[N]\nPrint N;\nGosub L\nPop Proc\nL: R[N+1] : Return\nEnd Proc",
+        "R[0]\nProcedure R[N]\nFor I=1 To 2 : Print N; : R[N+1] : Next\nEnd Proc",
+        "Global D\nR\nProcedure R\nInc D : Print D;\nRepeat : R : Until D<0\nEnd Proc",
+        "R[0]\nPrint \"back\"\nProcedure R[N]\nOn Error Goto H\nR[N+1]\nPop Proc\nH: Print \"h\";N;Errn : Resume Next\nEnd Proc",
+        "On Error Goto H\nR[0]\nEnd\nH: Print \"main\";Errn : Resume Next\nProcedure R[N]\nR[N+1]\nEnd Proc",
+        // Mutual recursion, Param of each kind.
+        "ISEVEN[7] : Print Param\nISEVEN[10] : Print Param\nProcedure ISEVEN[N]\nIf N=0 Then Pop Proc[True]\nISODD[N-1]\nEnd Proc[Param]\nProcedure ISODD[N]\nIf N=0 Then Pop Proc[False]\nISEVEN[N-1]\nEnd Proc[Param]",
+        "A[4]\nProcedure A[N]\nS$=\"a\"+Str$(N)\nIf N>0 Then B[N-1]\nPrint S$;\nEnd Proc\nProcedure B[N]\nT$=\"b\"+Str$(N)\nIf N>0 Then A[N-1]\nPrint T$;\nEnd Proc",
+        "P[1.5,3]\nPrint Param#;Param\nProcedure P[X#,N]\nY#=X#*2\nIf N>0 Then P[Y#,N-1] : Y#=Y#+Param#\nEnd Proc[Y#]",
+        "Set Double Precision\nP[1.1,6]\nPrint Param#\nProcedure P[X#,N]\nY#=X#/3\nIf N>0 Then P[Y#,N-1] : Y#=Y#+Param#\nEnd Proc[Y#]",
+        "P[3]\nPrint Param$\nProcedure P[N]\nIf N=0 Then Pop Proc[\"z\"]\nP[N-1]\nEnd Proc[Param$+Str$(N)]",
+        "P[2]\nPrint Param;Param#;Param$\nProcedure P[N]\nIf N>0 Then P[N-1]\nIf N=0 Then Pop Proc[7]\nIf N=1 Then Pop Proc[2.5]\nEnd Proc[\"s\"+Str$(N)]",
+        "P[1] : Print Param;Param#\nP[2] : Print Param;Param#\nProcedure P[N]\nEnd Proc[Abs(N*1.5)]",
+        "P : Print Param\nQ : Print Param\nProcedure P\nEnd Proc[5]\nProcedure Q\nEnd Proc",
+        // Pop Proc out of loops and Gosubs.
+        "P\nPrint Param\nProcedure P\nFor I=1 To 10 : If I=4 Then Pop Proc[I]\nNext\nEnd Proc",
+        "P\nPrint Param\nProcedure P\nGosub L\nPop Proc[1]\nL: Pop Proc[2]\nEnd Proc",
+        "P[2]\nProcedure P[N]\nGosub L\nPrint N;\nPop Proc\nL: If N>0 Then P[N-1]\nReturn\nEnd Proc",
+        "P[3]\nProcedure P[N]\nWhile N>0 : Q[N] : Dec N : Wend\nEnd Proc\nProcedure Q[M]\nDo : Print M; : Pop Proc : Loop\nEnd Proc",
+        // Local arrays (freed on return), string locals, garbage collection.
+        "P[3]\nProcedure P[N]\nDim A(N)\nFor I=0 To N : A(I)=N*10+I : Next\nIf N>0 Then P[N-1]\nFor I=0 To N : Print A(I); : Next : Print\nEnd Proc",
+        "For K=1 To 60 : P[K] : Next : Print \"ok\"\nProcedure P[N]\nDim A$(N*10)\nA$(N)=Str$(N)\nIf N mod 7=0 Then Q[N]\nEnd Proc\nProcedure Q[N]\nDim B#(N)\nB#(1)=N/2\nPrint B#(1);\nEnd Proc",
+        "For K=1 To 20 : P[40] : Next\nPrint \"ok\"\nProcedure P[N]\nS$=String$(\"x\",200)+Str$(N)\nIf N>0 Then P[N-1]\nIf Right$(S$,Len(Str$(N)))<>Str$(N) Then Print \"bad\"\nEnd Proc",
+        "For I=1 To 2000 : P[I] : A$=A$+Left$(Param$,2) : Next : Print Len(A$);Right$(A$,8)\nProcedure P[N]\nEnd Proc[Str$(N)+Space$(50)]",
+        // Shared / Global variables and global parameters.
+        "A=1 : B$=\"x\"\nP[3]\nPrint A;B$\nProcedure P[N]\nShared A,B$\nA=A*2 : B$=B$+\"y\"\nIf N>0 Then P[N-1]\nEnd Proc",
+        "Global G,H$\nP[5,\"q\"]\nPrint G;H$\nProcedure P[G,H$]\nIf G>0 Then P[G-1,H$+\"r\"]\nEnd Proc",
+        "Global T()\nDim T(10)\nP[10]\nFor I=0 To 10 : Print T(I); : Next\nProcedure P[N]\nT(N)=N*N\nIf N>0 Then P[N-1]\nEnd Proc",
+        // Errors and handlers inside procedures.
+        "P[3]\nPrint \"end\"\nProcedure P[N]\nOn Error Goto H\nA=10/(N-2)\nPrint A;\nIf N>0 Then P[N-1]\nPop Proc\nH: Print \"err\";Errn;N; : Resume Next\nEnd Proc",
+        "On Error Proc H\nA=1/0\nPrint \"x\";Param\nProcedure H\nQ[2] : Print Param;\nResume Next\nEnd Proc\nProcedure Q[N]\nIf N>0 Then Q[N-1]\nEnd Proc[N*3+Param]",
+        "On Error Proc H\nA=1/0\nPrint \"x\"\nProcedure H\nQ[1]\nEnd Proc\nProcedure Q[N]\nEnd Proc",
+        "P[3]\nProcedure P[N]\nOn Error Proc H\nIf N=0 Then A=1/0\nIf N>0 Then P[N-1]\nPrint N;\nEnd Proc\nProcedure H\nPrint \"handler\";Errn;\nResume Next\nEnd Proc",
+        "P\nProcedure P\nOn Error Goto H\nA=1/0\nPrint \"no\"\nPop Proc\nH: Resume L\nL: Print \"label\" : Q[2] : Print Param\nEnd Proc\nProcedure Q[N]\nEnd Proc[N+1]",
+        "P[2]\nProcedure P[N]\nTrap A=1/N\nPrint Errtrap;\nIf N>0 Then P[N-1]\nEnd Proc",
+        "P[3]\nProcedure P[N]\nIf N=0 Then Error 42\nP[N-1]\nEnd Proc",
+        "P[3]\nProcedure P[N]\nIf N=0 Then Return\nP[N-1]\nEnd Proc",
+        // Data / Read scoping.
+        "Read A : P[2] : Read B : Print A;B\nData 1,2\nProcedure P[N]\nRead X : Print X;\nIf N>0 Then P[N-1]\nRead Y : Print Y;\nData 10,20,30\nEnd Proc",
+        "P[2] : Read A : Print A\nData 5\nProcedure P[N]\nIf N>0 Then P[N-1]\nRestore L\nRead X : Print X;\nPop Proc\nL: Data 7\nEnd Proc",
+        // Yields, waits and the interpreter inside procedures.
+        "P[3]\nProcedure P[N]\nWait Vbl\nPrint N;\nIf N>0 Then P[N-1]\nWait 2\nEnd Proc",
+        "For I=1 To 2 : On I Proc A,B : Next\nProcedure A\nPrint \"a\";\nEnd Proc\nProcedure B\nPrint \"b\";\nEnd Proc",
+        "FIB[12] : Print Param\nProcedure FIB[N]\nIf N<2 Then Pop Proc[N]\nFIB[N-1] : A=Param\nFIB[N-2]\nEnd Proc[A+Param]",
+        // Many locals (cleared with memory.fill).
+        "P[3]\nProcedure P[N]\nPrint V7;V19$;\nV0=N+0 : V1=N+1 : V2=N+2 : V3=N+3 : V4=N+4\nV5=N+5 : V6=N+6 : V7=N+7 : V8=N+8 : V9=N+9\nV10=N+10 : V11=N+11 : V12=N+12 : V13=N+13 : V14=N+14\nV15=N+15 : V16=N+16 : V17=N+17 : V18=N+18 : V19=N+19 : V19$=Str$(N)\nIf N>0 Then P[N-1]\nPrint V7;V19;V19$;\nEnd Proc",
+        // Every Proc during recursion (its End Proc sets Param too).
+        "C=0\nEvery 1 Proc E\nFIB[16] : Print Param\nEvery Off\nPrint C>0\nProcedure FIB[N]\nIf N<2 Then Pop Proc[N]\nFIB[N-1] : A=Param\nFIB[N-2]\nEnd Proc[A+Param]\nProcedure E\nShared C\nInc C\nEvery On\nEnd Proc",
+        "C=0\nEvery 1 Proc E\nFor K=1 To 30 : R[K] : Next\nEvery Off\nPrint C>0;Param\nProcedure R[N]\nIf N>0 Then R[N-1]\nEnd Proc[N]\nProcedure E\nShared C\nInc C : Q[C]\nEvery On\nEnd Proc[C]\nProcedure Q[M]\nEnd Proc[-M]",
+    ];
+    for p in progs {
+        same(p);
+        // (With a few instructions per frame an Every handler never ends.)
+        let budgets: &[usize] = if p.contains("Every") { &[40, 97] } else { &[1, 2, 3, 5, 9, 17] };
+        for &budget in budgets {
+            same_budget(p, budget);
+        }
+    }
+}

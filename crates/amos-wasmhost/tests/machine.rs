@@ -57,6 +57,16 @@ fn every_and_procedures() {
 }
 
 #[test]
+fn native_procedures_on_a_machine() {
+    // Recursion with Every Proc firing inside, waits in procedures, and
+    // variables kept in the interpreter (Varptr) as locals and parameters.
+    compare(
+        "Every 3 Proc TICK\nFor K=1 To 12 : FIB[K] : Print K;Param; : P[2] : Q[2] : Next\nEvery Off\nProcedure FIB[N]\nIf N<2 Then Pop Proc[N]\nFIB[N-1] : A=Param\nFIB[N-2]\nEnd Proc[A+Param]\nProcedure P[N]\nA=N : V=Varptr(A)\nPrint A;V>0;\nIf N>0 Then P[N-1]\nEnd Proc\nProcedure Q[N]\nV=Varptr(N)\nPrint N;\nIf N>0 Then Q[N-1]\nWait Vbl\nEnd Proc\nProcedure TICK\nShared T\nInc T : Locate 0,0 : Print T;\nEvery On\nEnd Proc[T]",
+        120,
+    );
+}
+
+#[test]
 fn modules_of_other_programs_are_refused() {
     // The application falls back to the interpreter when this fails.
     let prg = tokenise_program(b"Print 1").unwrap();

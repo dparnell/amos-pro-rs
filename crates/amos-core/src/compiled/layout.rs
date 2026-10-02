@@ -83,17 +83,37 @@ pub const STR_END: u32 = 140;
 /// refreshed by the runtime after every operation.
 pub const FIX_FLG: u32 = 144;
 pub const EXP_FLG: u32 = 148;
-/// Gosubs done by the module and not yet pushed on the interpreter's
-/// control stack (see `Runtime::flush`): their number, then the number of
-/// entries of `Interp::ctl` and `Interp::stack_limit` (mirrors, for the
-/// module's room check: an entry takes at most `CTL_MAX_ENTRY` bytes).
+/// Gosubs and procedure calls done by the module and not yet pushed on
+/// the interpreter's control stack (see `Runtime::flush`): their number,
+/// then the number of entries of `Interp::ctl` and `Interp::stack_limit`
+/// (mirrors, for the module's room check: an entry takes at most
+/// `CTL_MAX_ENTRY` bytes).
 pub const PEND_COUNT: u32 = 152;
 pub const CTL_LEN: u32 = 156;
 pub const STACK_LIMIT: u32 = 160;
 pub const CTL_MAX_ENTRY: i32 = 42;
-/// A pending Gosub: return position, return point, then the control stack
-/// mirror words it hid (`MIRROR_WORDS`, restored by its Return).
-pub const PEND_ENTRY: u32 = 44;
+/// Index + 1 of the topmost pending procedure call (0: none). Entries above
+/// it are Gosubs of that procedure.
+pub const PEND_PROC: u32 = 164;
+/// `Param` values set by an `End Proc` of the module and not yet given to
+/// the interpreter: bit 0 `PARAM_E`, bit 1 `PARAM_F`, bit 2 `PARAM_S` (a
+/// string handle, valid while the bit is set).
+pub const PARAM_SET: u32 = 168;
+pub const PARAM_S: u32 = 172;
+/// Mirror of `Interp::error_proc_depth` (-1 for none).
+pub const ERR_PROC: u32 = 176;
+/// A pending entry (`PEND_ENTRY` bytes): return position, return point,
+/// the control stack mirror words it hid (`MIRROR_WORDS`, restored when it
+/// returns), then its kind: -1 for a Gosub, else the procedure index,
+/// followed (procedures) by the `FP`, `SCOPE` and `PEND_PROC` of the caller.
+pub const PEND_ENTRY: u32 = 64;
+pub const PE_RET: u32 = 0;
+pub const PE_POINT: u32 = 4;
+pub const PE_MIRROR: u32 = 8;
+pub const PE_KIND: u32 = 44;
+pub const PE_FP: u32 = 48;
+pub const PE_SCOPE: u32 = 52;
+pub const PE_PREV: u32 = 56;
 pub const MIRROR_WORDS: [u32; 9] =
     [TOP_KIND, FOR_ADDR, FOR_STEP, FOR_LIMIT, FOR_BODY, LOOP_LO, LOOP_HI, TOP_START, TOP_START_POINT];
 /// Scratch buffers of the number formatting helpers (128 bytes each).
@@ -113,7 +133,7 @@ pub struct Layout {
     /// Table of string constants: address of each once created (0 before).
     pub consts: u32,
     pub n_consts: u32,
-    /// Pending Gosubs (`PEND_ENTRY` bytes each).
+    /// Pending Gosubs and procedure calls (`PEND_ENTRY` bytes each).
     pub pending: u32,
     pub locals: u32,
     pub frame_size: u32,

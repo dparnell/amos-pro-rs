@@ -305,6 +305,7 @@ impl Runtime {
         st_f64(mem, layout::PARAM_F, it.param_f);
         st_i32(mem, layout::FIX_FLG, it.fix.fix_flg() as i32);
         st_i32(mem, layout::EXP_FLG, it.fix.exp_flg() as i32);
+        st_i32(mem, layout::ERR_PROC, it.error_proc_depth.map_or(-1, |d| d as i32));
         self.mirror(it, mem);
     }
 
@@ -551,21 +552,48 @@ impl Runtime {
         it.pc = self.instrs.get(point as usize).map_or(self.end_pos, |i| i.pos);
     }
 
-    /// Pushes the Gosubs done by the module (`layout::PEND_COUNT`) on the
-    /// interpreter's control stack, oldest first. The hosts call it before
-    /// every import, so the runtime always sees the complete control stack.
+    /// Gives the interpreter what the module did on its own since the last
+    /// import: the `Param` values of its `End Proc`s (`layout::PARAM_SET`),
+    /// then its pending Gosubs and procedure calls (`layout::PEND_COUNT`),
+    /// pushed on the control stack oldest first exactly as `Interp` pushes
+    /// them (the procedures' locals are already in their memory frames).
+    /// The hosts call it before every import, so the runtime always sees the
+    /// complete control stack.
     pub fn flush(&mut self, env: &mut dyn Env, mem: &mut [u8]) {
+        let set = ld_i32(mem, layout::PARAM_SET);
         let n = ld_i32(mem, layout::PEND_COUNT);
-        if n <= 0 {
+        if set == 0 && n <= 0 {
             return;
         }
         let (it, _) = env.parts();
+        if set != 0 {
+            st_i32(mem, layout::PARAM_SET, 0);
+            if set & 1 != 0 {
+                it.param_e = ld_i32(mem, layout::PARAM_E);
+            }
+            if set & 2 != 0 {
+                it.param_f = ld_f64(mem, layout::PARAM_F);
+            }
+            if set & 4 != 0 {
+                it.param_s = self.str_of(mem, ld_i32(mem, layout::PARAM_S));
+            }
+        }
+        if n <= 0 {
+            return;
+        }
         for k in 0..n as u32 {
-            let ret = ld_i32(mem, self.layout.pending + k * layout::PEND_ENTRY) as usize;
+            let e = self.layout.pending + k * layout::PEND_ENTRY;
+            let ret = ld_i32(mem, e + layout::PE_RET) as usize;
+            let kind = ld_i32(mem, e + layout::PE_KIND);
             // The module checked the room (entries are at most 42 bytes).
-            let _ = it.push_ctl(Ctl::Gosub { ret });
+            if kind < 0 {
+                let _ = it.push_ctl(Ctl::Gosub { ret });
+            } else {
+                let _ = self.push_frame(it, kind as usize, ret);
+            }
         }
         st_i32(mem, layout::PEND_COUNT, 0);
+        st_i32(mem, layout::PEND_PROC, 0);
         st_i32(mem, layout::CTL_LEN, it.ctl.len() as i32);
     }
 
@@ -1498,7 +1526,8 @@ impl Runtime {
         if p.machine_code {
             return Err(Exc::Message("Machine code procedures are not supported".into()));
         }
-        let arg = |k: usize| self.layout.args + k as u32 * 8;
+        let args = self.layout.args;
+        let arg = |k: usize| args + k as u32 * 8;
         // Global parameters are assigned before the frame is pushed (only
         // the parameters given: `On n Proc` gives none).
         for (k, (&slot, &ty)) in p.params.iter().zip(&p.param_types).enumerate().take(nargs) {
@@ -1512,33 +1541,7 @@ impl Runtime {
                 }
             }
         }
-        let mut frame = self.frame_pool.pop().unwrap_or_else(|| {
-            Box::new(ProcFrame {
-                proc_index: 0,
-                ret: 0,
-                locals: Vec::new(),
-                data: DataPtr::default(),
-                on_error: OnError::None,
-                error_on: 0,
-                error_pos: 0,
-                scope: 0,
-            })
-        });
-        frame.proc_index = index;
-        frame.ret = ret;
-        frame.locals.clear();
-        frame.locals.resize(p.locals.len(), Var::Unset);
-        frame.data = it.data;
-        frame.on_error = it.on_error;
-        frame.error_on = it.error_on;
-        frame.error_pos = it.error_pos;
-        frame.scope = it.scope;
-        it.push_ctl(Ctl::Proc(frame))?;
-        it.frame_stack.push(it.ctl.len() - 1);
-        it.scope = index + 1;
-        it.data = DataPtr { base: p.body, line: 0, item: 0 };
-        it.on_error = OnError::None;
-        it.pc = p.body;
+        self.push_frame(it, index, ret)?;
         // The frame in memory: cleared, then the local parameters.
         let depth = it.frame_stack.len();
         let base = self.layout.frame_base(depth) as usize;
@@ -1561,13 +1564,51 @@ impl Runtime {
                 mem.copy_within(from..from + 8, base + slot as usize * 8);
             }
         }
+        Ok(self.point(it, p.body))
+    }
+
+    /// Pushes the frame of a call of procedure `index` returning to `ret`
+    /// (`Interp::call_proc` without the parameters: the caller puts them in
+    /// the memory frame), reusing frames of earlier calls. The memory frame
+    /// of the new depth belongs to it.
+    fn push_frame(&mut self, it: &mut Interp, index: usize, ret: usize) -> R<()> {
+        let p = &self.prg.procs[index];
+        let (n_locals, body) = (p.locals.len(), p.body);
+        let mut frame = self.frame_pool.pop().unwrap_or_else(|| {
+            Box::new(ProcFrame {
+                proc_index: 0,
+                ret: 0,
+                locals: Vec::new(),
+                data: DataPtr::default(),
+                on_error: OnError::None,
+                error_on: 0,
+                error_pos: 0,
+                scope: 0,
+            })
+        });
+        frame.proc_index = index;
+        frame.ret = ret;
+        frame.locals.clear();
+        frame.locals.resize(n_locals, Var::Unset);
+        frame.data = it.data;
+        frame.on_error = it.on_error;
+        frame.error_on = it.error_on;
+        frame.error_pos = it.error_pos;
+        frame.scope = it.scope;
+        it.push_ctl(Ctl::Proc(frame))?;
+        it.frame_stack.push(it.ctl.len() - 1);
+        it.scope = index + 1;
+        it.data = DataPtr { base: body, line: 0, item: 0 };
+        it.on_error = OnError::None;
+        it.pc = body;
         // Memory is up to date for this frame.
+        let depth = it.frame_stack.len();
         if self.frames.len() > depth - 1 {
             self.free_arrays_above(depth - 1);
         }
         self.frames.truncate(depth - 1);
         self.frames.push(it.ctl.len() - 1);
-        Ok(self.point(it, p.body))
+        Ok(())
     }
 
     /// End Proc / Pop Proc in a procedure (the test point was done and the

@@ -119,8 +119,16 @@ Mid$= ...) are compiled specially.
   `Compile` and the editor's Build Application compile by default
   (`--interpreted` skips it) and fall back to interpreting on failure.
 * Hosts: `amos-wasmhost` (wasmtime natively, `WebAssembly.instantiate` on
-  the web) share the import list in `amos-wasmhost/src/imports.rs`;
-  interface version 2 passes array indices through scratch memory.
+  the web) share the import list in `amos-wasmhost/src/imports.rs`
+  (interface version 8, `amos_core::compiled::ABI_VERSION`).
+* Gosub / Return and procedure calls / End Proc / Pop Proc run in the
+  module: a call the stack surely has room for becomes a *pending* entry in
+  memory (locals and parameters in the procedure's memory frame, Param /
+  Param# / Param$ in header words), and `Runtime::flush` turns pending
+  entries into the interpreter's `Ctl::Gosub` / `Ctl::Proc` frames before
+  every import, so errors (13 at the same depth, 8), On Error / Every /
+  menu procedures, Resume, Trap, Data pointers, local arrays, string roots
+  and yields all see the exact interpreter stack.
 * Checks: differential tests (`cargo test -p amos-wasmhost`), the native
   frame-by-frame comparison of all examples (`cargo run -p amos-wasmhost
   --example compare`), and the same comparison in the real web runtime under

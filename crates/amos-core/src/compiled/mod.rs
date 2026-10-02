@@ -18,7 +18,13 @@
 //!   loops, Gosub, procedures, Every, On Error, menus... behave exactly as
 //!   in the interpreter: the runtime calls the same `Interp` methods.
 //!   Positions in the code are the resume points: `Interp::pc` holds the
-//!   position where a suspended program continues.
+//!   position where a suspended program continues. Gosubs and procedure
+//!   calls the module can do on its own (the common case) are kept as
+//!   *pending* entries in memory, with the procedure's locals in its memory
+//!   frame, and pushed on the interpreter's control stack
+//!   ([`Runtime::flush`]) before anything else can see the stack: the hosts
+//!   flush before every import. A Return / End Proc of a still pending entry
+//!   just drops it.
 //! * Keywords of the subsystems run through the *keyword bridge*: the
 //!   module evaluates the parameters, the runtime builds a small token
 //!   stream with the values as constants and calls the existing handler.
@@ -36,7 +42,7 @@ pub use runtime::{Env, HeapKind, Runtime, ST_CONTINUE, ST_GROW, ST_STOP, ST_YIEL
 
 /// Version of the module / runtime interface. A module records the version
 /// it was compiled for (exported global `amos_abi`).
-pub const ABI_VERSION: i32 = 7;
+pub const ABI_VERSION: i32 = 8;
 
 /// Status returned by the module's `run` export.
 pub const RUN_RUNNING: i32 = 1;
