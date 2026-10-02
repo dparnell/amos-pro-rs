@@ -12,7 +12,12 @@ impl Hardware {
             // Compiler extension: its instructions only steer the compiler
             // (Comp Test On/Off, Comp Err...) and do nothing when interpreted.
             5 => {
-                it.inst_args(self, kw)?;
+                let a = it.inst_args(self, kw)?;
+                if matches!(kw.token, tk::COMP_COMPILE | tk::COMP_COMPILE_2) {
+                    self.compile_command(&a.str(0));
+                    // Param = 0: compilation finished.
+                    it.param_e = 0;
+                }
                 return Ok(true);
             }
             // Request extension: Request On/Off/Wb choose whether AmigaDOS
@@ -79,10 +84,50 @@ impl Hardware {
         Ok(true)
     }
 
+    /// `Compile "FROM ""src"" TO ""dest"" ..."`: instead of 68000 code, a
+    /// standalone application (native + web) is built next to `dest`.
+    fn compile_command(&mut self, cmd: &[u8]) {
+        let cmd = crate::detok::latin1_to_string(cmd);
+        let arg = |key: &str| -> Option<String> {
+            let up = cmd.to_uppercase();
+            let i = up.find(&format!("{key} "))? + key.len() + 1;
+            let rest = cmd[i..].trim_start();
+            if let Some(r) = rest.strip_prefix('"') {
+                r.split('"').next().map(str::to_string)
+            } else {
+                rest.split_whitespace().next().map(str::to_string)
+            }
+        };
+        let (Some(src), Some(dest)) = (arg("FROM"), arg("TO")) else {
+            // Step / Conf / Cont / Stop sub-commands of the shell.
+            return;
+        };
+        let split = dest.rfind(['/', ':']).map_or(0, |i| i + 1);
+        let name = dest[split..].trim_end_matches(".AMOS").trim_end_matches(".amos").to_string();
+        let out = if split == 0 { self.files.current_dir.clone() } else { dest[..split].trim_end_matches('/').to_string() };
+        self.build_requests.push(super::BuildRequest {
+            program: src,
+            with_files: true,
+            name: if name.is_empty() { "App".into() } else { name },
+            out,
+            native: true,
+            web: true,
+        });
+    }
+
     pub(crate) fn system_function(&mut self, it: &mut Interp, kw: Keyword) -> R<Option<Value>> {
         if kw.slot == 5 {
             it.func_args(self, kw)?;
-            return Ok(Some(Value::Int(0)));
+            return Ok(Some(match kw.token {
+                // The last build error, if any.
+                tk::COMP_COMP_ERR_S => match self.build_results.last() {
+                    Some(Err(e)) => Value::Str(astr(e.as_bytes())),
+                    _ => Value::Str(empty_str()),
+                },
+                // The builder is always available.
+                tk::COMP_COMP_HERE => Value::Int(-1),
+                _ => Value::Int(0),
+            }));
         }
         if kw.slot == 6 {
             it.func_args(self, kw)?;
@@ -138,5 +183,19 @@ impl Hardware {
             _ => return Ok(None),
         };
         Ok(Some(v))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn compile_queues_a_build_request() {
+        let src = "Compile 'FROM \"Work:game.AMOS\" TO \"Work:out/game_C.AMOS\" TYPE=3'\nPrint Param";
+        let prg = crate::tokenise::tokenise_program(src.as_bytes()).unwrap();
+        let mut m = crate::Machine::new();
+        m.run_program(&prg).unwrap();
+        m.vbl();
+        let r = &m.hw.build_requests[0];
+        assert_eq!((r.program.as_str(), r.out.as_str(), r.name.as_str()), ("Work:game.AMOS", "Work:out", "game_C"));
     }
 }

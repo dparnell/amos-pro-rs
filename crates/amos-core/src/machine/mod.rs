@@ -39,6 +39,22 @@ use crate::program::Program;
 /// Vertical blank frequency of a PAL Amiga.
 pub const VBL_HZ: f64 = 50.0;
 
+/// A request to build a standalone application (from the editor or the
+/// `Compile` instruction), carried out by the host application.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BuildRequest {
+    /// AMOS path of the program to bundle.
+    pub program: String,
+    /// Bundle the other files of the program's directory too.
+    pub with_files: bool,
+    /// Application name.
+    pub name: String,
+    /// AMOS path of the output directory.
+    pub out: String,
+    pub native: bool,
+    pub web: bool,
+}
+
 /// Everything except the interpreter.
 pub struct Hardware {
     pub screens: Screens,
@@ -67,6 +83,10 @@ pub struct Hardware {
     pub menus: crate::menus::Menus,
     /// Variables given an address with Varptr / Array.
     pub var_maps: Vec<inst_banks::VarMap>,
+    /// Applications to build, taken by the host (`amos-app`).
+    pub build_requests: Vec<BuildRequest>,
+    /// Results of finished builds: Ok(message) or Err(error).
+    pub build_results: Vec<Result<String, String>>,
     /// Remaining entries of Dev First$ / Dev Next$.
     pub dev_listing: Vec<String>,
     /// `Command Line$`: text passed by the program that ran this one.
@@ -110,6 +130,8 @@ impl Hardware {
             command_line: Vec::new(),
             var_maps: Vec::new(),
             dev_listing: Vec::new(),
+            build_requests: Vec::new(),
+            build_results: Vec::new(),
             system_requests: 1,
             menu_key_serial: 0,
             menu_session: None,

@@ -99,6 +99,20 @@ impl App {
             for line in self.machine.hw.log.drain(..) {
                 log::info!("{line}");
             }
+            self.process_build_requests();
+        }
+    }
+
+    /// Builds the standalone applications requested by the editor or the
+    /// Compile instruction (the AMOS app is its own native runtime).
+    fn process_build_requests(&mut self) {
+        let requests = std::mem::take(&mut self.machine.hw.build_requests);
+        for req in requests {
+            let result = build_app(&self.machine.hw.files, &req);
+            if let Err(e) = &result {
+                log::error!("Build of {} failed: {e}", req.name);
+            }
+            self.machine.hw.build_results.push(result);
         }
     }
 
@@ -230,6 +244,30 @@ impl ApplicationHandler<UserEvent> for App {
             _ => {}
         }
     }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn build_app(fs: &amos_core::files::FileSystem, req: &amos_core::machine::BuildRequest) -> Result<String, String> {
+    let bundle = amos_core::bundle::Bundle::from_vfs(fs, &req.program, req.with_files).map_err(|e| format!("{e:?}"))?;
+    let out = fs.host_path(&req.out).ok_or("the output directory must be on a disc of this computer")?;
+    let mut made = Vec::new();
+    if req.native {
+        let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+        let image = std::fs::read(&exe).map_err(|e| e.to_string())?;
+        made.push(amos_build::build_native(&bundle, &req.name, &out, &image)?);
+    }
+    if req.web {
+        let rt = amos_build::find_web_runtime().ok_or("web runtime not found (scripts/build-web.sh)")?;
+        made.push(amos_build::build_web(&bundle, &req.name, &out, &rt)?);
+    }
+    let names: Vec<String> =
+        made.iter().map(|p| p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()).collect();
+    Ok(format!("Built {}", names.join(" and ")))
+}
+
+#[cfg(target_arch = "wasm32")]
+fn build_app(_fs: &amos_core::files::FileSystem, _req: &amos_core::machine::BuildRequest) -> Result<String, String> {
+    Err("Building applications is only available in the desktop version".into())
 }
 
 /// A standalone application: a program bundle appended to the executable

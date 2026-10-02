@@ -153,6 +153,19 @@ impl Bundle {
         Ok(Bundle { files, main: main_name })
     }
 
+    /// Builds a bundle from an AMOS path, optionally with all the files of
+    /// the program's directory (through the virtual file system, so it also
+    /// works from the editor).
+    pub fn from_vfs(fs: &crate::files::FileSystem, program: &str, with_dir: bool) -> crate::files::FsResult<Bundle> {
+        let full = fs.full_path(program).ok_or(crate::files::FsError::NotFound)?;
+        let split = full.rfind(['/', ':']).map_or(0, |i| i + 1);
+        let (dir, main) = (&full[..split], full[split..].to_string());
+        let mut files = if with_dir { fs.read_tree(dir)? } else { Vec::new() };
+        files.retain(|(p, _)| *p != main);
+        files.insert(0, (main.clone(), fs.read(&full)?));
+        Ok(Bundle { files, main })
+    }
+
     /// Total size of the bundled data.
     pub fn data_size(&self) -> usize {
         self.files.iter().map(|(_, d)| d.len()).sum()

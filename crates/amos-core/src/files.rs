@@ -481,6 +481,45 @@ impl FileSystem {
         }
     }
 
+    /// Host path of an AMOS path on a host volume (None for memory volumes).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn host_path(&self, path: &str) -> Option<PathBuf> {
+        let (v, comps) = self.resolve(path).ok()?;
+        match &self.volumes[v].backend {
+            Backend::Native(dir) => Self::native_path(dir, &comps).ok(),
+            Backend::Memory(_) => None,
+        }
+    }
+
+    /// Full AmigaDOS form of a path ("Volume:dir/file").
+    pub fn full_path(&self, path: &str) -> Option<String> {
+        let (v, comps) = self.resolve(path).ok()?;
+        Some(self.display_path(v, &comps))
+    }
+
+    /// All files under a directory (recursively), as (relative path, data).
+    pub fn read_tree(&self, dir: &str) -> FsResult<Vec<(String, Vec<u8>)>> {
+        let mut out = Vec::new();
+        let base = self.full_path(dir).ok_or(FsError::DirNotFound)?;
+        let base = if base.ends_with(':') || base.ends_with('/') { base } else { format!("{base}/") };
+        let mut stack = vec![String::new()];
+        while let Some(rel) = stack.pop() {
+            for e in self.list(&format!("{base}{rel}"))? {
+                if e.name.starts_with('.') || e.name.to_lowercase().ends_with(".info") {
+                    continue;
+                }
+                let r = format!("{rel}{}", e.name);
+                if e.is_dir {
+                    stack.push(format!("{r}/"));
+                } else {
+                    out.push((r.clone(), self.read(&format!("{base}{r}"))?));
+                }
+            }
+        }
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        Ok(out)
+    }
+
     /// Changes the current directory (`Dir$=`).
     pub fn set_current_dir(&mut self, path: &str) -> FsResult<()> {
         let (v, comps) = self.resolve(path)?;
