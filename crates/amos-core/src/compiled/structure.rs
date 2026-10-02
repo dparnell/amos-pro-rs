@@ -624,6 +624,25 @@ pub fn data_is_constant(code: &[u8], p: usize) -> bool {
     }
 }
 
+/// Positions of the string constants (`TK_CH1` / `TK_CH2` tokens) of the
+/// program's instructions, in order: a constant's index in this list is its
+/// slot in the constant table of compiled programs.
+pub fn string_constants(c: &Compiled) -> Vec<usize> {
+    let code = &c.code;
+    let mut out = Vec::new();
+    for ins in instructions(c) {
+        let mut p = ins.pos;
+        while p < ins.end {
+            let t = rd(code, p);
+            if t == TK_CH1 || t == TK_CH2 {
+                out.push(p);
+            }
+            p += token_size(code, p);
+        }
+    }
+    out
+}
+
 /// FNV-1a hash of the verified code: a compiled module records the hash of
 /// the program it was compiled from.
 pub fn code_hash(code: &[u8]) -> u32 {

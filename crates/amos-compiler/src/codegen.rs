@@ -41,6 +41,7 @@ use crate::CompileError;
 use crate::ffp::{self as ffp_helpers, H};
 use crate::ir::*;
 use crate::lower::is_comparison;
+use crate::strings::{self as string_helpers, S};
 
 macro_rules! vt {
     (i) => {
@@ -115,6 +116,8 @@ imports! {
     ProcEnd = "host" "proc_end" (i) -> i;
     DynOp = "host" "dyn_op" (i f i f i) -> f;
     Wait = "host" "wait" (i i) -> i;
+    StrChunk = "host" "str_chunk" (i) -> i;
+    StrConst = "rt" "str_const" (i i) -> i;
     FnDef = "host" "fn_def" (i i) -> i;
     WhileEnd = "host" "while_end" (i i) -> i;
     Dim = "host" "dim" (i i i i i) -> i;
@@ -124,19 +127,7 @@ imports! {
     NextDone = "host" "next_done" (i) -> i;
     StrF = "host" "str_f" (f) -> i;
     ParamS = "host" "param_s" () -> i;
-    StrLen = "rt" "str_len" (i) -> i;
-    StrAsc = "rt" "str_asc" (i) -> i;
-    Chr = "rt" "chr" (i) -> i;
-    LeftRight = "rt" "left_right" (i i i) -> i;
-    Mid = "rt" "mid" (i i i i) -> i;
-    StrI = "rt" "str_i" (i) -> i;
-    Instr = "rt" "instr" (i i i i) -> i;
-    ChangeCase = "rt" "change_case" (i i) -> i;
     IntF = "rt" "int_f" (f) -> f;
-    StrConst = "rt" "str_const" (i) -> i;
-    StrConcat = "rt" "str_concat" (i i) -> i;
-    StrMinus = "rt" "str_minus" (i i) -> i;
-    StrCmp = "rt" "str_cmp" (i i) -> i;
     Pow = "rt" "pow" (f f) -> f;
 }
 
@@ -193,6 +184,10 @@ struct Gen<'a> {
     fn_idiv: u32,
     /// Function index of the first single precision helper.
     fn_ffp: u32,
+    /// Function index of the first string helper.
+    fn_str: u32,
+    /// Positions of the string constants (index = slot in the table).
+    consts: Vec<usize>,
     /// Position of the instruction being compiled.
     pos: usize,
 }
@@ -216,6 +211,32 @@ impl<'a> Gen<'a> {
 
     fn call(&mut self, f: Imp) {
         self.w(W::Call(f as u32));
+    }
+
+    /// Calls a string helper of the module.
+    fn shelper(&mut self, h: S) {
+        self.w(W::Call(self.fn_str + h as u32));
+    }
+
+    /// Raises `code` if the value on the stack is -1 (sentinel of the string
+    /// helpers); leaves the value.
+    fn check_sentinel(&mut self, code: u16) {
+        let t = self.tmp(ValType::I32);
+        self.w(W::LocalTee(t));
+        self.i32c(-1);
+        self.w(W::I32Eq);
+        self.if_(BlockType::Empty);
+        self.raise(code);
+        self.end();
+        self.get(t);
+        self.release(t, ValType::I32);
+    }
+
+    /// Raises `code` if the condition on the stack is true.
+    fn raise_if(&mut self, code: u16) {
+        self.if_(BlockType::Empty);
+        self.raise(code);
+        self.end();
     }
 
     /// Calls a single precision helper of the module.
@@ -680,8 +701,21 @@ impl<'a> Gen<'a> {
             ExprKind::Int(v) => self.i32c(*v),
             ExprKind::Float(x) => self.w(W::F64Const((*x).into())),
             ExprKind::Str(p) => {
+                // Cached in the constant table once created.
+                let idx = self.consts.binary_search(p).expect("string constant") as u32;
+                let t = self.tmp(ValType::I32);
+                self.get(L_BASE);
+                self.w(W::I32Load(mem32(self.layout.consts + idx * 4)));
+                self.w(W::LocalTee(t));
+                self.w(W::I32Eqz);
+                self.if_(BlockType::Result(ValType::I32));
                 self.i32c(*p as i32);
+                self.i32c(idx as i32);
                 self.call(Imp::StrConst);
+                self.else_();
+                self.get(t);
+                self.end();
+                self.release(t, ValType::I32);
             }
             ExprKind::Var(slot) => self.load_var(*slot, e.ty),
             ExprKind::Elem(slot, idx) => {
@@ -847,19 +881,30 @@ impl<'a> Gen<'a> {
         match nf {
             Nf::Len | Nf::Asc => {
                 self.expr(&a[0]);
-                self.call(if nf == Nf::Len { Imp::StrLen } else { Imp::StrAsc });
+                self.shelper(if nf == Nf::Len { S::Len } else { S::Asc });
             }
             Nf::Chr => {
                 self.int_arg(&a[0]);
-                self.call(Imp::Chr);
-                self.err_check();
+                let t = self.tmp(ValType::I32);
+                self.w(W::LocalTee(t));
+                self.i32c(255);
+                self.w(W::I32GtU);
+                self.raise_if(errors::ILLEGAL_FUNCTION_CALL);
+                self.get(t);
+                self.release(t, ValType::I32);
+                self.shelper(S::Chr);
             }
             Nf::Left | Nf::Right => {
                 self.expr(&a[0]);
                 self.int_arg(&a[1]);
-                self.i32c((nf == Nf::Right) as i32);
-                self.call(Imp::LeftRight);
-                self.err_check();
+                let t = self.tmp(ValType::I32);
+                self.w(W::LocalTee(t));
+                self.i32c(0);
+                self.w(W::I32LtS);
+                self.raise_if(errors::ILLEGAL_FUNCTION_CALL);
+                self.get(t);
+                self.release(t, ValType::I32);
+                self.shelper(if nf == Nf::Left { S::Left } else { S::Right });
             }
             Nf::Mid2 | Nf::Mid3 => {
                 self.expr(&a[0]);
@@ -871,30 +916,86 @@ impl<'a> Gen<'a> {
                     self.i32c(0);
                     self.i32c(0);
                 }
-                self.call(Imp::Mid);
-                self.err_check();
+                self.shelper(S::Mid);
+                self.check_sentinel(errors::ILLEGAL_FUNCTION_CALL);
             }
             Nf::Str => {
-                self.expr(&a[0]);
-                self.call(if a[0].ty == Ty::Int { Imp::StrI } else { Imp::StrF });
+                if a[0].ty == Ty::Int {
+                    self.expr(&a[0]);
+                    self.shelper(S::StrI);
+                } else {
+                    self.expr(&a[0]);
+                    self.call(Imp::StrF);
+                }
             }
             Nf::Instr2 | Nf::Instr3 => {
                 self.expr(&a[0]);
                 self.expr(&a[1]);
                 if nf == Nf::Instr3 {
                     self.int_arg(&a[2]);
+                    let t = self.tmp(ValType::I32);
+                    self.w(W::LocalTee(t));
+                    self.i32c(0);
+                    self.w(W::I32LtS);
+                    self.raise_if(errors::ILLEGAL_FUNCTION_CALL);
+                    // start.max(1)
+                    self.get(t);
                     self.i32c(1);
+                    self.get(t);
+                    self.i32c(1);
+                    self.w(W::I32GtS);
+                    self.w(W::Select);
+                    self.release(t, ValType::I32);
                 } else {
-                    self.i32c(0);
-                    self.i32c(0);
+                    self.i32c(1);
                 }
-                self.call(Imp::Instr);
-                self.err_check();
+                self.shelper(S::Instr);
             }
             Nf::Upper | Nf::Lower => {
                 self.expr(&a[0]);
                 self.i32c((nf == Nf::Lower) as i32);
-                self.call(Imp::ChangeCase);
+                self.shelper(S::Case);
+            }
+            Nf::Flip => {
+                self.expr(&a[0]);
+                self.shelper(S::Flip);
+            }
+            Nf::StringS | Nf::Space => {
+                // String$(a$,n): first character n times; Space$(n).
+                let (st, nt) = (self.tmp(ValType::I32), self.tmp(ValType::I32));
+                if nf == Nf::StringS {
+                    self.expr(&a[0]);
+                    self.set(st);
+                    self.int_arg(&a[1]);
+                } else {
+                    self.int_arg(&a[0]);
+                }
+                self.w(W::LocalTee(nt));
+                self.i32c(0);
+                self.w(W::I32LtS);
+                self.raise_if(errors::ILLEGAL_FUNCTION_CALL);
+                if nf == Nf::StringS {
+                    // An empty a$ gives an empty string.
+                    self.get(st);
+                    self.if_(BlockType::Result(ValType::I32));
+                    self.get(st);
+                    self.w(W::I32Load8U(MemArg { offset: 4, align: 0, memory_index: 0 }));
+                    self.get(nt);
+                    self.i32c(0xFFFF);
+                    self.w(W::I32And);
+                    self.shelper(S::Fill);
+                    self.else_();
+                    self.i32c(0);
+                    self.end();
+                } else {
+                    self.i32c(32);
+                    self.get(nt);
+                    self.i32c(0xFFFF);
+                    self.w(W::I32And);
+                    self.shelper(S::Fill);
+                }
+                self.release(st, ValType::I32);
+                self.release(nt, ValType::I32);
             }
             Nf::Abs => {
                 self.expr(&a[0]);
@@ -975,7 +1076,7 @@ impl<'a> Gen<'a> {
                 match ty {
                     Ty::Float => self.w(W::F64Gt),
                     Ty::Str => {
-                        self.call(Imp::StrCmp);
+                        self.shelper(S::Cmp);
                         self.i32c(0);
                         self.w(W::I32GtS);
                     }
@@ -1107,7 +1208,7 @@ impl<'a> Gen<'a> {
                 Ty::Str => {
                     self.expr(a);
                     self.expr(b);
-                    self.call(Imp::StrCmp);
+                    self.shelper(S::Cmp);
                     self.i32c(0);
                     self.cmp_i32(op);
                 }
@@ -1138,10 +1239,10 @@ impl<'a> Gen<'a> {
                 self.expr(a);
                 self.expr(b);
                 if op == OP_PLUS {
-                    self.call(Imp::StrConcat);
-                    self.err_check();
+                    self.shelper(S::Concat);
+                    self.check_sentinel(errors::STRING_TOO_LONG);
                 } else {
-                    self.call(Imp::StrMinus);
+                    self.shelper(S::Minus);
                 }
             }
             Ty::Int => {
@@ -1937,6 +2038,89 @@ impl<'a> Gen<'a> {
                     self.status_jump();
                 }
             }
+            Stmt::MidAssign { kind, lv, nums, e } => {
+                // `Interp::mid_assign`: numbers, value, then the current
+                // string; negative numbers are an error.
+                let p = self.place(lv);
+                let off = self.store_prefix(&p);
+                let mut nts = Vec::new();
+                for n in nums {
+                    self.int_arg(n);
+                    let t = self.tmp(ValType::I32);
+                    self.set(t);
+                    nts.push(t);
+                }
+                self.expr(e);
+                let et = self.tmp(ValType::I32);
+                self.set(et);
+                self.load_place(&p, 2);
+                let cur = self.tmp(ValType::I32);
+                self.set(cur);
+                for &t in &nts {
+                    self.get(t);
+                    self.i32c(0);
+                    self.w(W::I32LtS);
+                    self.raise_if(errors::ILLEGAL_FUNCTION_CALL);
+                }
+                self.get(cur);
+                let max1_minus1 = |g: &mut Self, t: u32| {
+                    g.get(t);
+                    g.i32c(1);
+                    g.get(t);
+                    g.i32c(1);
+                    g.w(W::I32GtS);
+                    g.w(W::Select);
+                    g.i32c(1);
+                    g.w(W::I32Sub);
+                };
+                match *kind {
+                    tk::MID_S => {
+                        max1_minus1(self, nts[0]);
+                        self.get(nts[1]);
+                    }
+                    tk::MID_S_2 => {
+                        max1_minus1(self, nts[0]);
+                        self.i32c(-1);
+                    }
+                    tk::LEFT_S => {
+                        self.i32c(0);
+                        self.get(nts[0]);
+                    }
+                    _ => {
+                        // Right$: n >= len ? (0, len) : (len - n, n)
+                        let l = self.tmp(ValType::I32);
+                        self.get(cur);
+                        self.shelper(S::Len);
+                        self.set(l);
+                        // start: n >= len ? 0 : len - n
+                        self.i32c(0);
+                        self.get(l);
+                        self.get(nts[0]);
+                        self.w(W::I32Sub);
+                        self.get(nts[0]);
+                        self.get(l);
+                        self.w(W::I32GeU);
+                        self.w(W::Select);
+                        // count: n >= len ? len : n
+                        self.get(l);
+                        self.get(nts[0]);
+                        self.get(nts[0]);
+                        self.get(l);
+                        self.w(W::I32GeU);
+                        self.w(W::Select);
+                        self.release(l, ValType::I32);
+                    }
+                }
+                self.get(et);
+                self.shelper(S::MidSet);
+                self.store_place(&p, off, 2);
+                self.release_place(p);
+                for t in nts {
+                    self.release(t, ValType::I32);
+                }
+                self.release(et, ValType::I32);
+                self.release(cur, ValType::I32);
+            }
             Stmt::Wait(n) => {
                 self.i32c(pos);
                 match n {
@@ -2213,6 +2397,10 @@ pub fn module(
         let t = type_of(&mut types, p, r);
         funcs.function(t);
     }
+    for (_, p, r) in string_helpers::HELPERS {
+        let t = type_of(&mut types, p, r);
+        funcs.function(t);
+    }
 
     let mut g = Gen {
         prg,
@@ -2230,6 +2418,8 @@ pub fn module(
         fn_imul: n_imports + 1,
         fn_idiv: n_imports + 2,
         fn_ffp: n_imports + 3,
+        fn_str: n_imports + 3 + ffp_helpers::HELPERS.len() as u32,
+        consts: structure::string_constants(prg),
         pos: 0,
     };
     // Locals 1..N_FIXED are the fixed ones; temporaries follow.
@@ -2244,6 +2434,10 @@ pub fn module(
     code.function(&idiv_function());
     for (h, ..) in ffp_helpers::HELPERS {
         code.function(&ffp_helpers::body(*h, n_imports + 3));
+    }
+    let first_str = n_imports + 3 + ffp_helpers::HELPERS.len() as u32;
+    for (h, ..) in string_helpers::HELPERS {
+        code.function(&string_helpers::body(*h, first_str, Imp::StrChunk as u32));
     }
 
     let mut globals = GlobalSection::new();

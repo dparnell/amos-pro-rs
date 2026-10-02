@@ -830,6 +830,28 @@ impl<'a> Lower<'a> {
                 Stmt::Swap(a, b)
             }
             tk::DIM => self.dim(p + 2, ins)?,
+            tk::MID_S | tk::MID_S_2 | tk::LEFT_S | tk::RIGHT_S => {
+                // `Interp::mid_assign`.
+                let q = self.expect(p + 2, TK_PAR1)?;
+                let (lv, mut q) = self.var_ref(q)?;
+                if lv.ty() != 2 {
+                    return Err("type mismatch");
+                }
+                let mut nums = Vec::new();
+                while self.rd(q) == TK_COMMA {
+                    let (e, nq) = self.num_expr(q + 2)?;
+                    nums.push(e);
+                    q = nq;
+                }
+                let q = self.expect(q, TK_PAR2)?;
+                let q = self.expect(q, tk::OP_EQ)?;
+                let (e, q) = self.expr(q)?;
+                if e.ty != Ty::Str || nums.len() != if t == tk::MID_S { 2 } else { 1 } {
+                    return Err("Mid$ assignment");
+                }
+                self.check_end(q, ins)?;
+                Stmt::MidAssign { kind: t, lv, nums, e }
+            }
             tk::SORT => {
                 let (slot, _, idx, q) = self.array_ref(p + 2)?;
                 self.check_end(q, ins)?;
@@ -1069,6 +1091,9 @@ fn native_function(t: u16, args: &[Expr]) -> Option<Nf> {
         INSTR if s(0) && s(1) => Nf::Instr2,
         INSTR_2 if s(0) && s(1) && num(2) => Nf::Instr3,
         UPPER_S if s(0) => Nf::Upper,
+        FLIP_S if s(0) => Nf::Flip,
+        STRING_S if s(0) && num(1) => Nf::StringS,
+        SPACE_S if num(0) => Nf::Space,
         LOWER_S if s(0) => Nf::Lower,
         ABS if known(0) => Nf::Abs,
         INT if known(0) => Nf::Int,

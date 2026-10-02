@@ -21,12 +21,22 @@ struct Ctx {
 /// Calls `f` with the runtime, the machine and the module memory.
 fn with<R>(c: &mut Caller<'_, Ctx>, f: impl FnOnce(&mut Runtime, &mut dyn Env, &mut [u8]) -> R) -> R {
     let mem = c.data().mem.expect("memory");
-    let (data, ctx) = mem.data_and_store_mut(c);
-    // SAFETY: `env` is set by `CompiledProgram::run` from a `&mut dyn Env`
-    // that outlives the call into the module, and cleared after it; the
-    // module only calls imports during that call.
-    let env = unsafe { ctx.env.expect("machine").as_mut() };
-    f(&mut ctx.rt, env, data)
+    let (r, reserve) = {
+        let (data, ctx) = mem.data_and_store_mut(&mut *c);
+        // SAFETY: `env` is set by `CompiledProgram::run` from a `&mut dyn
+        // Env` that outlives the call into the module, and cleared after it;
+        // the module only calls imports during that call.
+        let env = unsafe { ctx.env.expect("machine").as_mut() };
+        let len = data.len();
+        let r = f(&mut ctx.rt, env, data);
+        (r, ctx.rt.reserve_bytes(len))
+    };
+    // Keep free memory after the heap, so that the runtime never has to
+    // grow the memory in the middle of a call (strings, arrays).
+    if reserve > 0 {
+        let _ = mem.grow(&mut *c, (reserve as u64).div_ceil(65536));
+    }
+    r
 }
 
 macro_rules! def {
@@ -98,6 +108,11 @@ impl CompiledProgram {
         &self.store.data().rt
     }
 
+    /// Size of the module's memory in bytes (for tests).
+    pub fn memory_size(&self) -> usize {
+        self.store.data().mem.map_or(0, |m| m.data_size(&self.store))
+    }
+
     /// Runs the program until it waits, stops, or `budget` jumps were done.
     pub fn run(&mut self, env: &mut (dyn Env + 'static), budget: usize) -> RunState {
         {
@@ -120,13 +135,18 @@ impl CompiledProgram {
                     Err(e) => format!("Compiled program failed: {e}"),
                     Ok(s) => format!("Compiled program returned {s}"),
                 };
+                let trapped = self.store.data_mut().rt.take_trap_error();
                 if let Some(mut env) = env {
                     // SAFETY: as in `with`, the machine is still borrowed.
                     let (it, _) = unsafe { env.as_mut() }.parts();
                     it.running = false;
                     it.wait = None;
                 }
-                RunState::Stopped(StopInfo { reason: StopReasonOrError::Message(msg), pos: 0 })
+                let reason = match trapped {
+                    Some(n) => StopReasonOrError::Error(n),
+                    None => StopReasonOrError::Message(msg),
+                };
+                RunState::Stopped(StopInfo { reason, pos: 0 })
             }
         }
     }
@@ -161,6 +181,21 @@ impl CompiledProgram {
                 let mem = c.data().mem.expect("memory");
                 if mem.grow(&mut c, bytes.div_ceil(65536)).is_err() {
                     return with(&mut c, |rt, env, mem| rt.grow_failed(env, mem, p));
+                }
+            }
+        })
+        .map_err(|e| e.to_string())?;
+        // A string chunk may need the memory to grow too.
+        l.func_wrap("host", "str_chunk", |mut c: Caller<'_, Ctx>, need: i32| -> i32 {
+            loop {
+                let st = with(&mut c, |rt, _, mem| rt.str_chunk(mem, need));
+                if st != ST_GROW {
+                    return st;
+                }
+                let bytes = c.data().rt.grow_bytes() as u64;
+                let mem = c.data().mem.expect("memory");
+                if mem.grow(&mut c, bytes.div_ceil(65536)).is_err() {
+                    return amos_core::compiled::ST_STOP;
                 }
             }
         })

@@ -23,7 +23,7 @@ use super::layout::{self, Layout};
 use super::structure::{self, Call, Instr};
 use crate::errors;
 use crate::ffp::Ffp;
-use crate::interp::value::{AStr, STRING_MAX, Value, Var, astr, empty_str, float_to_int};
+use crate::interp::value::{AStr, Value, Var, astr, float_to_int};
 use crate::interp::verify::{Compiled, GLOBAL};
 use crate::interp::{
     Ctl, DataPtr, Exc, Host, Interp, OnError, ProcFrame, R, StopInfo, StopReason, StopReasonOrError, VarLoc,
@@ -31,6 +31,7 @@ use crate::interp::{
 use crate::tokens::*;
 
 mod arrays;
+mod strings;
 pub use arrays::HeapKind;
 
 pub const ST_CONTINUE: i32 = -1;
@@ -97,15 +98,11 @@ pub struct Runtime {
     base: u32,
     double: bool,
     end_pos: usize,
-    // String table: handles are indices, 0 is the empty string.
-    strs: Vec<AStr>,
-    live: Vec<bool>,
-    pinned: Vec<bool>,
-    free: Vec<u32>,
-    consts: HashMap<usize, i32>,
-    allocs: usize,
-    gc_limit: usize,
+    /// Strings in linear memory.
+    strings: strings::Strings,
     gc_wanted: bool,
+    /// Error to report when the module traps (allocation failure).
+    trap_error: Option<u16>,
     /// Parameters of the next call (procedure or keyword).
     stack: Vec<Value>,
     print_buf: Vec<u8>,
@@ -136,6 +133,7 @@ impl Runtime {
         let end_pos = structure::end_position(&prg.code);
         let resident = structure::resident_vars(&prg, &instrs);
         let point_at = point_table(&prg.code, &instrs);
+        let consts = structure::string_constants(&prg);
         Runtime {
             point_at,
             resident,
@@ -145,14 +143,9 @@ impl Runtime {
             layout,
             base,
             end_pos,
-            strs: vec![empty_str()],
-            live: vec![true],
-            pinned: vec![true],
-            free: Vec::new(),
-            consts: HashMap::new(),
-            allocs: 0,
-            gc_limit: 8192,
+            strings: strings::Strings::new(consts),
             gc_wanted: false,
+            trap_error: None,
             stack: Vec::new(),
             print_buf: Vec::new(),
             pending: None,
@@ -190,82 +183,9 @@ impl Runtime {
         self.stopped.take()
     }
 
-    /// Number of live strings (for tests).
-    pub fn string_count(&self) -> usize {
-        self.live.iter().filter(|&&l| l).count()
-    }
-
-    // ------------------------------------------------------------------
-    // Strings
-    // ------------------------------------------------------------------
-
-    pub fn str_of(&self, h: i32) -> AStr {
-        self.strs.get(h as usize).cloned().unwrap_or_else(empty_str)
-    }
-
-    fn alloc(&mut self, mem: &mut [u8], s: AStr) -> i32 {
-        if s.is_empty() {
-            return 0;
-        }
-        self.allocs += 1;
-        if self.allocs >= self.gc_limit && !self.gc_wanted {
-            self.gc_wanted = true;
-            st_i32(mem, layout::ATT, 1);
-        }
-        if let Some(h) = self.free.pop() {
-            self.strs[h as usize] = s;
-            self.live[h as usize] = true;
-            h as i32
-        } else {
-            self.strs.push(s);
-            self.live.push(true);
-            self.pinned.push(false);
-            (self.strs.len() - 1) as i32
-        }
-    }
-
-    /// Frees the strings no variable refers to. Only called where the
-    /// module holds no string in its wasm locals (start of an instruction
-    /// or test point).
-    fn gc(&mut self, it: &Interp, mem: &mut [u8]) {
-        let mut mark = vec![false; self.strs.len()];
-        let prg = self.prg.clone();
-        let mut mark_slot = |a: u32| {
-            let h = ld_i32(mem, a);
-            if h > 0 && (h as usize) < mark.len() {
-                mark[h as usize] = true;
-            }
-        };
-        for (i, d) in prg.globals.iter().enumerate() {
-            if d.ty == 2 && structure::is_scalar(d) {
-                mark_slot(self.layout.globals + i as u32 * 8);
-            }
-        }
-        for (k, &idx) in self.frames.iter().enumerate() {
-            if let Some(Ctl::Proc(f)) = it.ctl.get(idx) {
-                let base = self.layout.frame_base(k + 1);
-                for (i, d) in prg.procs[f.proc_index].locals.iter().enumerate() {
-                    if d.ty == 2 && structure::is_scalar(d) {
-                        mark_slot(base + i as u32 * 8);
-                    }
-                }
-            }
-        }
-        self.mark_arrays(mem, &mut mark);
-        let mut live = 0;
-        for (h, &marked) in mark.iter().enumerate().skip(1) {
-            if self.live[h] && !marked && !self.pinned[h] {
-                self.live[h] = false;
-                self.strs[h] = empty_str();
-                self.free.push(h as u32);
-            } else if self.live[h] {
-                live += 1;
-            }
-        }
-        self.allocs = 0;
-        self.gc_limit = (live * 2).max(8192);
-        self.gc_wanted = false;
-        st_i32(mem, layout::ATT, it.vbl_pending as i32);
+    /// Error to report after the module trapped (allocation failure).
+    pub fn take_trap_error(&mut self) -> Option<u16> {
+        self.trap_error.take()
     }
 
     // ------------------------------------------------------------------
@@ -282,10 +202,10 @@ impl Runtime {
         }
     }
 
-    fn mem_value(&self, mem: &[u8], a: u32, ty: u8) -> Value {
+    fn mem_value(&self, mem: &mut [u8], a: u32, ty: u8) -> Value {
         match ty {
             1 => Value::Float(ld_f64(mem, a)),
-            2 => Value::Str(self.str_of(ld_i32(mem, a))),
+            2 => Value::Str(self.str_of(mem, ld_i32(mem, a))),
             _ => Value::Int(ld_i32(mem, a)),
         }
     }
@@ -298,7 +218,7 @@ impl Runtime {
             (1, Value::Int(i)) => st_f64(mem, a, *i as f64),
             (2, Value::Str(s)) => {
                 let cur = ld_i32(mem, a);
-                if Rc::ptr_eq(&self.str_of(cur), s) {
+                if self.str_bytes(mem, cur) == &s[..] {
                     return;
                 }
                 let h = self.alloc(mem, s.clone());
@@ -947,8 +867,8 @@ impl Runtime {
         self.stack.push(Value::Float(v));
     }
 
-    pub fn push_s(&mut self, h: i32) {
-        let s = self.str_of(h);
+    pub fn push_s(&mut self, mem: &mut [u8], h: i32) {
+        let s = self.str_of(mem, h);
         self.stack.push(Value::Str(s));
     }
 
@@ -977,9 +897,9 @@ impl Runtime {
         if tag == 0 { self.print_i(v as i32) } else { self.print_f(env, v) }
     }
 
-    pub fn print_s(&mut self, h: i32) {
-        let s = self.str_of(h);
-        self.print_buf.extend_from_slice(&s);
+    pub fn print_s(&mut self, mem: &mut [u8], h: i32) {
+        let s = self.str_bytes(mem, h);
+        self.print_buf.extend_from_slice(s);
     }
 
     pub fn print_tab(&mut self) {
@@ -1073,7 +993,7 @@ impl Runtime {
     }
 
     pub fn aset_s(&mut self, env: &mut dyn Env, mem: &mut [u8], slot: i32, flat: i32, h: i32) {
-        let s = self.str_of(h);
+        let s = self.str_of(mem, h);
         self.aset(env, mem, slot, flat, 2, Value::Str(s));
     }
 
@@ -1638,7 +1558,7 @@ impl Runtime {
         match ld_i32(mem, layout::RET_TAG) {
             0 => it.param_e = ld_i32(mem, layout::RET),
             1 => it.param_f = ld_f64(mem, layout::RET),
-            2 => it.param_s = self.str_of(ld_i32(mem, layout::RET)),
+            2 => it.param_s = self.str_of(mem, ld_i32(mem, layout::RET)),
             _ => {}
         }
         let in_error_proc = it.error_proc_depth.is_some() && it.error_proc_depth == Some(it.frame_stack.len());
@@ -1691,151 +1611,9 @@ impl Runtime {
     // Values (`rt.*`)
     // ------------------------------------------------------------------
 
-    /// String constant of the `TK_CH1` / `TK_CH2` token at `pos`.
-    pub fn str_const(&mut self, mem: &mut [u8], pos: i32) -> i32 {
-        if let Some(&h) = self.consts.get(&(pos as usize)) {
-            return h;
-        }
-        let p = pos as usize;
-        let code = &self.prg.code;
-        let n = structure::rd(code, p + 2) as usize;
-        let s = astr(code.get(p + 4..p + 4 + n).unwrap_or(&[]));
-        let h = self.alloc(mem, s);
-        if h > 0 {
-            self.pinned[h as usize] = true;
-        }
-        self.consts.insert(p, h);
-        h
-    }
-
-    pub fn str_concat(&mut self, mem: &mut [u8], a: i32, b: i32) -> i32 {
-        let (x, y) = (self.str_of(a), self.str_of(b));
-        if x.is_empty() {
-            return b;
-        }
-        if y.is_empty() {
-            return a;
-        }
-        if x.len() + y.len() >= STRING_MAX {
-            self.set_pending(mem, Exc::Error(errors::STRING_TOO_LONG));
-            return 0;
-        }
-        let mut v = Vec::with_capacity(x.len() + y.len());
-        v.extend_from_slice(&x);
-        v.extend_from_slice(&y);
-        self.alloc(mem, v.into())
-    }
-
-    /// `a$-b$`: removes every occurrence of b$ (`string_minus`).
-    pub fn str_minus(&mut self, mem: &mut [u8], a: i32, b: i32) -> i32 {
-        let (x, y) = (self.str_of(a), self.str_of(b));
-        if y.is_empty() {
-            return a;
-        }
-        let mut s = x.to_vec();
-        while let Some(i) = s.windows(y.len()).position(|w| w == &y[..]) {
-            s.drain(i..i + y.len());
-        }
-        self.alloc(mem, s.into())
-    }
-
-    pub fn str_cmp(&self, a: i32, b: i32) -> i32 {
-        if a == b {
-            return 0;
-        }
-        match self.str_of(a)[..].cmp(&self.str_of(b)[..]) {
-            std::cmp::Ordering::Less => -1,
-            std::cmp::Ordering::Equal => 0,
-            std::cmp::Ordering::Greater => 1,
-        }
-    }
-
-    pub fn str_len(&self, h: i32) -> i32 {
-        self.str_of(h).len() as i32
-    }
-
-    // String and maths functions of the interpreter core
-    // (`Interp::string_maths_function`), for the most used ones.
-
-    pub fn str_asc(&self, h: i32) -> i32 {
-        self.str_of(h).first().copied().unwrap_or(0) as i32
-    }
-
-    pub fn chr(&mut self, mem: &mut [u8], n: i32) -> i32 {
-        if !(0..=255).contains(&n) {
-            self.set_pending(mem, Exc::Error(errors::ILLEGAL_FUNCTION_CALL));
-            return 0;
-        }
-        self.alloc(mem, astr(&[n as u8]))
-    }
-
-    /// `Left$` (`right` 0) / `Right$` (1).
-    pub fn left_right(&mut self, mem: &mut [u8], h: i32, n: i32, right: i32) -> i32 {
-        if n < 0 {
-            self.set_pending(mem, Exc::Error(errors::ILLEGAL_FUNCTION_CALL));
-            return 0;
-        }
-        let s = self.str_of(h);
-        let n = (n as usize).min(s.len());
-        if n == s.len() {
-            return h;
-        }
-        let r = if right == 0 { astr(&s[..n]) } else { astr(&s[s.len() - n..]) };
-        self.alloc(mem, r)
-    }
-
-    /// `Mid$(s,p,n)` (`has_n` 1) / `Mid$(s,p)`.
-    pub fn mid(&mut self, mem: &mut [u8], h: i32, p: i32, n: i32, has_n: i32) -> i32 {
-        if p < 0 {
-            self.set_pending(mem, Exc::Error(errors::ILLEGAL_FUNCTION_CALL));
-            return 0;
-        }
-        let s = self.str_of(h);
-        let start = (p.max(1) - 1) as usize;
-        if start >= s.len() {
-            return 0;
-        }
-        let r = if has_n != 0 {
-            if n == 0 {
-                return 0;
-            } else if n < 0 {
-                self.set_pending(mem, Exc::Error(errors::ILLEGAL_FUNCTION_CALL));
-                return 0;
-            }
-            let end = (start + n as usize).min(s.len());
-            astr(&s[start..end])
-        } else {
-            astr(&s[start..])
-        };
-        self.alloc(mem, r)
-    }
-
-    pub fn str_i(&mut self, mem: &mut [u8], n: i32) -> i32 {
-        let s = crate::ffp::format_int(n);
-        self.alloc(mem, astr(s.as_bytes()))
-    }
-
     pub fn str_f(&mut self, env: &mut dyn Env, mem: &mut [u8], x: f64) -> i32 {
         let s = env.parts().0.format_float(x);
         self.alloc(mem, astr(s.as_bytes()))
-    }
-
-    /// `Instr(h$,n$)` (`has_start` 0) / `Instr(h$,n$,start)`.
-    pub fn instr(&mut self, mem: &mut [u8], h: i32, n: i32, start: i32, has_start: i32) -> i32 {
-        let start = if has_start != 0 { start } else { 1 };
-        if start < 0 {
-            self.set_pending(mem, Exc::Error(errors::ILLEGAL_FUNCTION_CALL));
-            return 0;
-        }
-        crate::interp::expr::instr(&self.str_of(h), &self.str_of(n), start.max(1) as usize)
-    }
-
-    /// `Upper$` (`lower` 0) / `Lower$` (1).
-    pub fn change_case(&mut self, mem: &mut [u8], h: i32, lower: i32) -> i32 {
-        let s = self.str_of(h);
-        let v: Vec<u8> =
-            s.iter().map(|&c| if lower == 0 { c.to_ascii_uppercase() } else { c.to_ascii_lowercase() }).collect();
-        self.alloc(mem, v.into())
     }
 
     pub fn param_s(&mut self, env: &mut dyn Env, mem: &mut [u8]) -> i32 {

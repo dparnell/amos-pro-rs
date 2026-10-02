@@ -112,6 +112,10 @@ const PROGRAMS: &[(&str, &str)] = &[
         "A$=\"\" : N=0\nFor I=1 To 200000\nA$=A$+Chr$(65+I mod 26)\nIf Len(A$)>50 Then A$=Mid$(A$,10) : Inc N\nNext\nPrint N;A$",
     ),
     (
+        "string ops",
+        "N=0 : A$=\"The quick brown fox jumps over the lazy dog\"\nFor I=1 To 100000\nB$=Mid$(A$,I mod 40+1,5)\nIf B$>\"m\" Then Inc N\nC$=Left$(A$,10)+Right$(A$,5)-\"o\"\nN=N+Instr(A$,\"o\",I mod 30+1)+Len(C$)+Asc(B$)\nD$=Upper$(B$)+Chr$(65+I mod 26)+Flip$(B$)+String$(\"*\",3)+Space$(2)\nIf D$=B$ Then Inc N\nNext\nPrint N;D$",
+    ),
+    (
         "procedures (fib 24)",
         "FIB[24]\nPrint Param\nProcedure FIB[N]\nIf N<2 Then Pop Proc[N]\nFIB[N-1] : A=Param\nFIB[N-2]\nEnd Proc[A+Param]",
     ),

@@ -85,6 +85,9 @@ pub enum Nf {
     Instr3,
     Upper,
     Lower,
+    Flip,
+    StringS,
+    Space,
     Abs,
     Int,
     Sgn,
@@ -237,6 +240,14 @@ pub enum Stmt {
     },
     /// `Wait n` / `Wait Vbl` (None).
     Wait(Option<Expr>),
+    /// `Mid$(a$,p,n)=e$`, `Mid$(a$,p)=`, `Left$(a$,n)=`, `Right$(a$,n)=`:
+    /// the keyword token, the string variable, the numbers, the value.
+    MidAssign {
+        kind: u16,
+        lv: LValue,
+        nums: Vec<Expr>,
+        e: Expr,
+    },
     /// Instruction of a subsystem run through the keyword bridge.
     Keyword(Vec<Expr>),
     /// Instruction run by the interpreter (with its variables copied).

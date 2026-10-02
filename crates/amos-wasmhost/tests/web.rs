@@ -90,6 +90,11 @@ async fn compiled(src: &str, budget: usize) -> (String, StopReasonOrError, usize
 }
 
 const PROGRAMS: &[&str] = &[
+    "For I=1 To 300000\nA$=Str$(I)+\"-\"+Upper$(\"abc\")+Space$(I mod 50)\nNext\nPrint A$",
+    "Dim S$(300)\nFor I=0 To 300 : S$(I)=\"k\"+Str$(I) : Next\nFor J=1 To 60\nFor I=0 To 300 : T$=S$(I)+String$(\"x\",200) : Next\nNext\nSort S$(0)\nPrint S$(0);S$(300);Match(S$(0),\"k 150\")",
+    "R[\"\",10]\nPrint Len(Param$);Left$(Param$,30)\nProcedure R[S$,N]\nT$=S$+Chr$(65+N)\nIf N=0 Then Pop Proc[T$]\nFor I=1 To 300 : G$=T$+Str$(I) : Next\nR[T$,N-1]\nEnd Proc[Param$+T$]",
+    "A$=\"Hello\" : Mid$(A$,2,3)=\"XYZW\" : Left$(A$,1)=\"j\" : Right$(A$,2)=\"!?\" : Print A$;\"aXbXc\"-\"X\";Flip$(A$);Instr(A$,\"Z\");String$(A$,3);Lower$(A$)",
+    "For I=1 To 200\nA$=Space$(60000)+Str$(I)\nB$=Right$(A$,4)\nNext\nPrint B$;Len(A$)",
     "For I=1 To 3 : Print I; : Next I",
     "A$=\"Hello\" : Print Left$(A$,2);Right$(A$,2);Mid$(A$,2,3);Len(A$);Str$(1.5)",
     "FIB[12]\nPrint Param\nProcedure FIB[N]\nIf N<2 Then Pop Proc[N]\nFIB[N-1] : A=Param\nFIB[N-2]\nEnd Proc[A+Param]",

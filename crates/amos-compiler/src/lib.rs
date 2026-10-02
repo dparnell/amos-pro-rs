@@ -11,6 +11,7 @@ pub mod codegen;
 pub mod ffp;
 pub mod ir;
 pub mod lower;
+pub mod strings;
 
 use amos_core::Program;
 use amos_core::compiled::structure;

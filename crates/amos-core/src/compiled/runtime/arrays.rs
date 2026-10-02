@@ -70,7 +70,7 @@ impl Heap {
 
     /// Allocates `size` zeroed bytes; `None` if the memory must grow first
     /// (Linear, `grow_bytes` set).
-    fn alloc(&mut self, mem: &mut [u8], base: u32, size: u32) -> Option<u32> {
+    pub fn alloc(&mut self, mem: &mut [u8], base: u32, size: u32) -> Option<u32> {
         let size = size.next_multiple_of(16);
         match self.kind {
             HeapKind::Linear => {
@@ -112,7 +112,7 @@ impl Heap {
         }
     }
 
-    fn release(&mut self, base: u32, addr: u32, size: u32) {
+    pub fn release(&mut self, base: u32, addr: u32, size: u32) {
         match self.kind {
             HeapKind::Linear => {
                 let (start, size) = (addr - base, size.next_multiple_of(16));
@@ -142,6 +142,20 @@ impl Heap {
                     drop(unsafe { Box::from_raw(p) });
                 }
             }
+        }
+    }
+
+    /// Bytes the host should add to the memory (Linear) so that the
+    /// runtime does not run out of memory in the middle of a call: some
+    /// megabytes are kept free after the heap.
+    pub fn reserve_bytes(&self, mem_len: usize) -> u32 {
+        const LOW: u64 = 1 << 20;
+        const GROW: u64 = 4 << 20;
+        match self.kind {
+            HeapKind::Linear if (mem_len as u64).saturating_sub(self.top as u64) < LOW => {
+                (self.top as u64 + GROW - mem_len as u64).min(u32::MAX as u64) as u32
+            }
+            _ => 0,
         }
     }
 
@@ -257,17 +271,9 @@ impl Runtime {
         }
     }
 
-    /// Marks the string handles of the string arrays (GC).
-    pub(super) fn mark_arrays(&self, mem: &mut [u8], mark: &mut [bool]) {
-        for b in self.heap.blocks.iter().filter(|b| b.ty == 2) {
-            let data = self.heap.bytes(mem, self.base, b.addr + ARR_DATA, b.count * 4);
-            for c in data.as_chunks::<4>().0 {
-                let h = i32::from_le_bytes(*c);
-                if h > 0 && (h as usize) < mark.len() {
-                    mark[h as usize] = true;
-                }
-            }
-        }
+    /// String arrays in memory: (address, element count).
+    pub(super) fn string_arrays(&self) -> Vec<(u32, u32)> {
+        self.heap.blocks.iter().filter(|b| b.ty == 2).map(|b| (b.addr, b.count)).collect()
     }
 
     /// Type and element count of the array block at `addr`.
@@ -301,15 +307,8 @@ impl Runtime {
                 }
             }
             _ => {
-                let mut v: Vec<(AStr, i32)> = data
-                    .as_chunks::<4>()
-                    .0
-                    .iter()
-                    .map(|c| {
-                        let h = i32::from_le_bytes(*c);
-                        (self.str_of(h), h)
-                    })
-                    .collect();
+                let hs: Vec<i32> = data.as_chunks::<4>().0.iter().map(|c| i32::from_le_bytes(*c)).collect();
+                let mut v: Vec<(AStr, i32)> = hs.into_iter().map(|h| (self.str_of(mem, h), h)).collect();
                 // Stable, like `Vec<AStr>::sort`.
                 v.sort_by(|a, b| a.0[..].cmp(&b.0[..]));
                 let data = self.heap.bytes(mem, self.base, addr as u32 + ARR_DATA, count * es);
@@ -328,14 +327,20 @@ impl Runtime {
         let Some((ty, n)) = self.block(addr as u32) else { return 0 };
         let n = n as usize;
         let es = elem_size(ty);
-        let (vi, vf, vs) = (ld_i32(mem, layout::RET), ld_f64(mem, layout::RET), self.str_of(ld_i32(mem, layout::RET)));
+        let rv = ld_i32(mem, layout::RET);
+        let (vi, vf, vs) = (rv, ld_f64(mem, layout::RET), self.str_of(mem, rv));
         let data = self.heap.bytes(mem, self.base, addr as u32 + ARR_DATA, n as u32 * es).to_vec();
+        let strs: Vec<AStr> = if ty == 2 {
+            data.as_chunks::<4>().0.iter().map(|c| self.str_of(mem, i32::from_le_bytes(*c))).collect()
+        } else {
+            Vec::new()
+        };
         let cmp = |i: usize| -> Ordering {
             let c = &data[i * es as usize..];
             match ty {
                 0 => i32::from_le_bytes(c[..4].try_into().unwrap()).cmp(&vi),
                 1 => f64::from_le_bytes(c[..8].try_into().unwrap()).partial_cmp(&vf).unwrap_or(Ordering::Equal),
-                _ => self.str_of(i32::from_le_bytes(c[..4].try_into().unwrap()))[..].cmp(&vs[..]),
+                _ => strs[i][..].cmp(&vs[..]),
             }
         };
         match_search(n, cmp)
@@ -347,7 +352,8 @@ impl Runtime {
         use std::cmp::Ordering;
         let (it, _) = env.parts();
         it.inst_pos = pos as usize;
-        let (vi, vf, vs) = (ld_i32(mem, layout::RET), ld_f64(mem, layout::RET), self.str_of(ld_i32(mem, layout::RET)));
+        let rv = ld_i32(mem, layout::RET);
+        let (vi, vf, vs) = (rv, ld_f64(mem, layout::RET), self.str_of(mem, rv));
         match it.var_slot(slot as u16) {
             Var::Array(a) => match &a.data {
                 ArrayData::Int(v) => match_search(v.len(), |i| v[i].cmp(&vi)),

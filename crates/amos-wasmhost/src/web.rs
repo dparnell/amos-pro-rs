@@ -71,6 +71,7 @@ fn define_imports(l: &mut Imports) -> Result<(), String> {
     include!("imports.rs");
     // Arrays are separate allocations of the runtime: no memory to grow.
     def!(l, "host" "dim" |rt, env, mem, p: i32, s: i32, t: i32, n: i32, r: i32| -> i32 { rt.dim(env, mem, p, s, t, n, r) });
+    def!(l, "host" "str_chunk" |rt, env, mem, n: i32| -> i32 { rt.str_chunk(mem, n) });
     Ok(())
 }
 
@@ -183,10 +184,15 @@ impl CompiledProgram {
                     Err(e) => format!("Compiled program failed: {}", js_err(e)),
                     Ok(s) => format!("Compiled program returned {s:?}"),
                 };
+                let trapped = self.ctx.borrow_mut().rt.take_trap_error();
                 let (it, _) = env.parts();
                 it.running = false;
                 it.wait = None;
-                RunState::Stopped(StopInfo { reason: StopReasonOrError::Message(msg), pos: 0 })
+                let reason = match trapped {
+                    Some(n) => StopReasonOrError::Error(n),
+                    None => StopReasonOrError::Message(msg),
+                };
+                RunState::Stopped(StopInfo { reason, pos: 0 })
             }
         }
     }

@@ -75,6 +75,10 @@ pub const DEPTH: u32 = 108;
 /// runtime after every operation.
 pub const PARAM_E: u32 = 124;
 pub const PARAM_F: u32 = 128;
+/// String allocator: next free byte and end of the current chunk
+/// (absolute addresses, see `runtime/strings.rs`).
+pub const STR_PTR: u32 = 136;
+pub const STR_END: u32 = 140;
 /// Start of the global variables.
 pub const GLOBALS: u32 = 192;
 
@@ -86,6 +90,9 @@ pub struct Layout {
     pub n_globals: u32,
     /// Parameters of a procedure call.
     pub args: u32,
+    /// Table of string constants: address of each once created (0 before).
+    pub consts: u32,
+    pub n_consts: u32,
     pub locals: u32,
     pub frame_size: u32,
     pub max_frames: u32,
@@ -100,7 +107,9 @@ impl Layout {
         let n_globals = c.globals.len() as u32;
         let args = (GLOBALS + n_globals.max(1) * 8).next_multiple_of(16);
         let max_params = c.procs.iter().map(|p| p.params.len() as u32).max().unwrap_or(0).max(1);
-        let locals = (args + max_params * 8).next_multiple_of(16);
+        let n_consts = crate::compiled::structure::string_constants(c).len() as u32;
+        let consts = (args + max_params * 8).next_multiple_of(16);
+        let locals = (consts + n_consts * 4).next_multiple_of(16);
         let max_locals = c.procs.iter().map(|p| p.locals.len() as u32).max().unwrap_or(0).max(1);
         let frame_size = max_locals * 8;
         // The control stack limit of the interpreter (`Interp::start`)
@@ -109,7 +118,7 @@ impl Layout {
         let max_frames = stack_limit / 42 + 2;
         let size = locals + frame_size * max_frames;
         let pages = size.div_ceil(PAGE).max(1);
-        Layout { globals: GLOBALS, n_globals, args, locals, frame_size, max_frames, size, pages }
+        Layout { globals: GLOBALS, n_globals, args, consts, n_consts, locals, frame_size, max_frames, size, pages }
     }
 
     /// Start of the frame of procedure depth `depth` (globals for 0).
