@@ -300,12 +300,6 @@ impl Interp {
         let sig = crate::tokens::lookup(t).map_or("", |d| d.param_types());
         let v = match t {
             FN => return self.call_fn(hw).map(Some),
-            VARPTR => {
-                self.expect(TK_PAR1)?;
-                let (_loc, _) = self.var_ref(hw)?;
-                self.expect(TK_PAR2)?;
-                Value::Int(0)
-            }
             MIN | MAX => {
                 self.expect(TK_PAR1)?;
                 let a = self.eval(hw)?;
@@ -330,12 +324,6 @@ impl Interp {
                 let v = self.convert_for(ty, v)?;
                 let arr = self.array_mut(&loc)?;
                 Value::Int(array_match(arr, &v))
-            }
-            ARRAY => {
-                self.expect(TK_PAR1)?;
-                self.array_ref(hw)?;
-                self.expect(TK_PAR2)?;
-                Value::Int(0)
             }
             PARAM => Value::Int(self.param_e),
             PARAM_F => Value::Float(self.param_f),

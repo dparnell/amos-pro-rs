@@ -65,6 +65,8 @@ pub struct Hardware {
     /// Program to start after the current one stopped (`Run "file"`).
     pub pending_run: Option<Vec<u8>>,
     pub menus: crate::menus::Menus,
+    /// Variables given an address with Varptr / Array.
+    pub var_maps: Vec<inst_banks::VarMap>,
     /// `Command Line$`: text passed by the program that ran this one.
     pub command_line: Vec<u8>,
     /// Request On/Off/Wb setting (1, 0, 2).
@@ -104,6 +106,7 @@ impl Hardware {
             menus: Default::default(),
             draw: Default::default(),
             command_line: Vec::new(),
+            var_maps: Vec::new(),
             system_requests: 1,
             menu_key_serial: 0,
             menu_session: None,
@@ -125,6 +128,7 @@ impl Hardware {
         self.menu_session = None;
         self.copper = Default::default();
         self.dialogs_reset();
+        self.var_maps.clear();
     }
 
     /// Work done at each vertical blank (the VBL interrupt).

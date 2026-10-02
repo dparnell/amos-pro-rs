@@ -4,7 +4,46 @@ use super::Hardware;
 use crate::banks::{self, Bank, BankData};
 use crate::errors;
 use crate::interp::value::Value;
-use crate::interp::{Exc, Interp, R, err};
+use crate::interp::{Exc, Interp, R, VarLoc, err};
+
+/// A variable given an address by Varptr / Array.
+#[derive(Clone, Debug)]
+pub struct VarMap {
+    /// Address returned to the program.
+    pub addr: u32,
+    /// Start of the memory image (the length word for strings).
+    pub base: u32,
+    pub cap: u32,
+    pub loc: VarLoc,
+    pub ty: u8,
+    pub array: bool,
+}
+
+/// Memory image of a variable: big-endian value, or length word + chars
+/// for strings, or the elements of an array.
+fn var_bytes(it: &mut Interp, loc: &VarLoc, ty: u8, array: bool) -> Vec<u8> {
+    use crate::interp::value::ArrayData;
+    if array {
+        return match it.array_mut(loc) {
+            Ok(a) => match &a.data {
+                ArrayData::Int(v) => v.iter().flat_map(|x| x.to_be_bytes()).collect(),
+                ArrayData::Float(v) => v.iter().flat_map(|x| crate::ffp::Ffp::from_f64(*x).0.to_be_bytes()).collect(),
+                ArrayData::Str(v) => v.iter().flat_map(|_| 0u32.to_be_bytes()).collect(),
+            },
+            Err(_) => Vec::new(),
+        };
+    }
+    match it.read_loc(loc, ty) {
+        Value::Int(i) => i.to_be_bytes().to_vec(),
+        Value::Float(f) if it.double => f.to_be_bytes().to_vec(),
+        Value::Float(f) => crate::ffp::Ffp::from_f64(f).0.to_be_bytes().to_vec(),
+        Value::Str(s) => {
+            let mut v = (s.len() as u16).to_be_bytes().to_vec();
+            v.extend_from_slice(&s);
+            v
+        }
+    }
+}
 use crate::tokens::{Keyword, TK_COMMA, TK_EOL, TK_VAR, tk};
 
 impl Hardware {
@@ -69,18 +108,29 @@ impl Hardware {
             POKE | DOKE | LOKE => {
                 let a = it.inst_args(self, kw)?;
                 let (addr, v) = (a.int(0) as u32, a.int(1) as u32);
+                self.refresh_var_maps(it, addr, 4);
                 match kw.token {
                     POKE => self.mem_write(addr, &[v as u8]),
                     DOKE => self.mem_write(addr, &(v as u16).to_be_bytes()),
                     _ => self.mem_write(addr, &v.to_be_bytes()),
                 }
+                self.write_back_var_maps(it, addr, 4)?;
+            }
+            POKE_S => {
+                let a = it.inst_args(self, kw)?;
+                let (addr, data) = (a.int(0) as u32, a.str(1));
+                self.refresh_var_maps(it, addr, data.len());
+                self.mem_write(addr, &data);
+                self.write_back_var_maps(it, addr, data.len())?;
             }
             COPY => {
                 let a = it.inst_args(self, kw)?;
                 let (s, e, d) = (a.int(0) as u32, a.int(1) as u32, a.int(2) as u32);
                 if e > s {
+                    self.refresh_var_maps(it, s, (e - s) as usize);
                     let data = self.banks.peek_bytes(s, (e - s) as usize);
                     self.mem_write(d, &data);
+                    self.write_back_var_maps(it, d, (e - s) as usize)?;
                 }
             }
             FILL => {
@@ -161,12 +211,31 @@ impl Hardware {
             }
             PEEK | DEEK | LEEK => {
                 let addr = it.func_args(self, kw)?.int(0) as u32;
+                self.refresh_var_maps(it, addr, 4);
                 let v = match kw.token {
                     PEEK => self.mem_read(addr, 1)[0] as i32,
                     DEEK => u16::from_be_bytes(self.mem_read(addr, 2).try_into().unwrap()) as i32,
                     _ => u32::from_be_bytes(self.mem_read(addr, 4).try_into().unwrap()) as i32,
                 };
                 Value::Int(v)
+            }
+            PEEK_S | PEEK_S_2 => {
+                // Peek$(address,length[,stop$]): bytes up to the length or
+                // the first character of stop$.
+                let a = it.func_args(self, kw)?;
+                let (addr, len) = (a.int(0) as u32, a.int(1));
+                if len < 0 {
+                    return err(errors::ILLEGAL_FUNCTION_CALL);
+                }
+                self.refresh_var_maps(it, addr, len as usize);
+                let mut data = self.banks.peek_bytes(addr, (len as usize).min(crate::interp::value::STRING_MAX));
+                if a.len() > 2
+                    && let Some(&stop) = a.str(2).first()
+                    && let Some(i) = data.iter().position(|&c| c == stop)
+                {
+                    data.truncate(i);
+                }
+                Value::Str(data.into())
             }
             HUNT => {
                 let a = it.func_args(self, kw)?;
@@ -179,6 +248,18 @@ impl Hardware {
                     }
                 }
                 Value::Int(found)
+            }
+            VARPTR => {
+                it.expect(crate::tokens::TK_PAR1)?;
+                let (loc, ty) = it.var_ref(self)?;
+                it.expect(crate::tokens::TK_PAR2)?;
+                Value::Int(self.map_variable(it, loc, ty, false) as i32)
+            }
+            ARRAY => {
+                it.expect(crate::tokens::TK_PAR1)?;
+                let (loc, ty) = it.array_ref(self)?;
+                it.expect(crate::tokens::TK_PAR2)?;
+                Value::Int(self.map_variable(it, loc, ty, true) as i32)
             }
             FREE => Value::Int(32_000),
             CHIP_FREE => Value::Int(1_500_000),
@@ -203,6 +284,76 @@ impl Hardware {
             return err(errors::ILLEGAL_FUNCTION_CALL);
         }
         Ok(n as usize)
+    }
+
+    /// `Varptr(v)` / `Array(a(0))`: gives the variable an address in the
+    /// emulated memory. The memory is refreshed from the variable before
+    /// each read and written back after each write, so Peek/Poke/Leek on
+    /// variable addresses work like on the Amiga. Strings point at their
+    /// characters, with the length word just before as in AMOS.
+    fn map_variable(&mut self, it: &mut Interp, loc: VarLoc, ty: u8, array: bool) -> u32 {
+        if let Some(m) = self.var_maps.iter().find(|m| m.loc == loc && m.array == array) {
+            let a = m.addr;
+            self.refresh_var_maps(it, a, 1);
+            return a;
+        }
+        let bytes = var_bytes(it, &loc, ty, array);
+        let cap = (bytes.len() + 64).next_multiple_of(4) as u32;
+        // Variable images live in their own area of free memory.
+        let base = 0x0080_0000 + self.var_maps.iter().map(|m| m.cap + 16).sum::<u32>();
+        let addr = if ty == 2 && !array { base + 2 } else { base };
+        self.var_maps.push(VarMap { addr, base, cap, loc, ty, array });
+        self.banks.poke_bytes(base, &bytes);
+        addr
+    }
+
+    /// Copies variables mapped over [addr, addr+len) into memory.
+    fn refresh_var_maps(&mut self, it: &mut Interp, addr: u32, len: usize) {
+        let end = addr.wrapping_add(len as u32);
+        let maps: Vec<VarMap> =
+            self.var_maps.iter().filter(|m| m.base < end && addr < m.base + m.cap).cloned().collect();
+        for m in maps {
+            let mut bytes = var_bytes(it, &m.loc, m.ty, m.array);
+            bytes.truncate(m.cap as usize);
+            self.banks.poke_bytes(m.base, &bytes);
+        }
+    }
+
+    /// Writes memory changes over [addr, addr+len) back to mapped variables.
+    fn write_back_var_maps(&mut self, it: &mut Interp, addr: u32, len: usize) -> R<()> {
+        let end = addr.wrapping_add(len as u32);
+        let maps: Vec<VarMap> =
+            self.var_maps.iter().filter(|m| m.base < end && addr < m.base + m.cap).cloned().collect();
+        for m in maps {
+            let old = var_bytes(it, &m.loc, m.ty, m.array);
+            let new = self.banks.peek_bytes(m.base, old.len().min(m.cap as usize));
+            if new == old[..new.len()] {
+                continue;
+            }
+            if m.array {
+                if let Ok(arr) = it.array_mut(&m.loc) {
+                    let n = arr.len();
+                    for i in 0..n {
+                        let w = u32::from_be_bytes(new[i * 4..i * 4 + 4].try_into().unwrap_or([0; 4]));
+                        match &mut arr.data {
+                            crate::interp::value::ArrayData::Int(v) => v[i] = w as i32,
+                            crate::interp::value::ArrayData::Float(v) => v[i] = crate::ffp::Ffp(w).to_f64(),
+                            crate::interp::value::ArrayData::Str(_) => {}
+                        }
+                    }
+                }
+                continue;
+            }
+            let v = match m.ty {
+                0 => Value::Int(u32::from_be_bytes(new[..4].try_into().unwrap()) as i32),
+                1 if it.double => Value::Float(f64::from_be_bytes(new[..8].try_into().unwrap())),
+                1 => Value::Float(crate::ffp::Ffp(u32::from_be_bytes(new[..4].try_into().unwrap())).to_f64()),
+                // Strings keep their length; only the characters change.
+                _ => Value::Str(new[2..].to_vec().into()),
+            };
+            it.write_loc(&m.loc, m.ty, v)?;
+        }
+        Ok(())
     }
 
     /// Reads memory, including the emulated hardware registers.
@@ -321,5 +472,29 @@ impl Hardware {
         self.sound_bank_check();
         // Sprite/icon masks are made lazily from the bank images.
         self.sprites.masks = Default::default();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::Machine;
+
+    fn run(src: &str) -> String {
+        let prg = crate::tokenise::tokenise_program(src.as_bytes()).unwrap();
+        let mut m = Machine::new();
+        m.run_program(&prg).unwrap();
+        for _ in 0..5 {
+            m.vbl();
+        }
+        m.hw.log.concat().replace("\r\n", "\n").trim_end_matches("End").to_string()
+    }
+
+    #[test]
+    fn varptr_maps_variables_to_memory() {
+        assert_eq!(run("A$=\"ABCD\" : Print Leek(Varptr(A$)) : Print Deek(Varptr(A$)-2)"), " 1094861636\n 4\n");
+        assert_eq!(run("A$=\"ABCD\" : Poke Varptr(A$),90 : Print A$"), "ZBCD\n");
+        assert_eq!(run("X=5 : Loke Varptr(X),7 : Print X"), " 7\n");
+        assert_eq!(run("Dim T(3) : T(2)=9 : Print Leek(Array(T(0))+8)"), " 9\n");
+        assert_eq!(run("Reserve As Work 10,16 : Poke Start(10)+3,42 : Print Peek(Start(10)+3)"), " 42\n");
     }
 }
