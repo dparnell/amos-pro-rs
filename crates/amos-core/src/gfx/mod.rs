@@ -15,3 +15,4 @@ pub mod iff;
 pub mod amal;
 pub mod bobs;
 pub mod images;
+pub mod copper;

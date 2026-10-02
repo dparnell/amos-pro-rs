@@ -73,6 +73,10 @@ pub struct Hardware {
     pub draw: crate::gfx::blocks::DrawGlobals,
     /// Last key checked against menu shortcuts.
     pub menu_key_serial: u64,
+    /// The menu bar while it is open.
+    pub menu_session: Option<Box<inst_menus::MenuSession>>,
+    /// User copper list state (Copper Off mode).
+    pub copper: crate::gfx::copper::Copper,
 }
 
 impl Hardware {
@@ -100,6 +104,8 @@ impl Hardware {
             command_line: Vec::new(),
             system_requests: 1,
             menu_key_serial: 0,
+            menu_session: None,
+            copper: Default::default(),
         };
         hw.reset();
         hw
@@ -111,6 +117,10 @@ impl Hardware {
         self.draw_reset();
         self.sprites_reset();
         self.sound_reset();
+        // Menus and user copper lists belong to the program that defined them.
+        self.menus = Default::default();
+        self.menu_session = None;
+        self.copper = Default::default();
     }
 
     /// Work done at each vertical blank (the VBL interrupt).

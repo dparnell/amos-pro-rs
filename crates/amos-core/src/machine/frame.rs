@@ -7,6 +7,9 @@
 //! DMA off), then its bitmap; the whole width of its lines outside the
 //! display window shows its colour 0. Lines without a screen show
 //! `Colour Back`. Rainbows replace one colour register per line.
+//!
+//! With `Copper Off` the frame is made by running the user copper list
+//! instead (`gfx::copper`).
 
 use std::collections::HashMap;
 
@@ -15,7 +18,8 @@ use crate::display::{
     DISPLAY_WIDTH, Frame, Layer, LayerFormat, Rect, hw_x_to_display, hw_y_to_display, rgb12_to_rgba,
 };
 use crate::gfx::Screen;
-use crate::gfx::screen::{END_LINE, FIRST_LINE};
+use crate::gfx::copper::{self, Chip, PlaneSrc};
+use crate::gfx::screen::{END_LINE, FIRST_LINE, Screens};
 
 /// Where the pixels of a layer come from.
 #[derive(Clone, Copy, Debug)]
@@ -26,6 +30,8 @@ enum Source {
     Ham(usize),
     /// Sprite `n` of `SpriteState::display`.
     Sprite(usize),
+    /// The picture made by the user copper list.
+    Copper,
     /// A one pixel dummy (background colour layers).
     Dummy,
 }
@@ -64,6 +70,92 @@ pub struct FrameCache {
     specs: Vec<Spec>,
     palettes: Vec<Vec<[u8; 4]>>,
     ham: HashMap<usize, HamCache>,
+    /// Display made by the user copper list (Copper Off).
+    copper_rgba: Vec<u8>,
+    copper_serial: u64,
+}
+
+/// Chip memory seen by the copper: screen bitmaps through the addresses
+/// of `Logbase` / `Phybase` and of the lists made by `=Cop Logic`, the
+/// emulated memory elsewhere.
+struct ChipView<'a> {
+    screens: &'a Screens,
+    banks: &'a crate::banks::BankSet,
+}
+
+impl Chip for ChipView<'_> {
+    fn word(&self, addr: u32) -> u16 {
+        u16::from_be_bytes([self.banks.peek(addr), self.banks.peek(addr.wrapping_add(1))])
+    }
+
+    fn decode(&self, addr: u32) -> (PlaneSrc, i64) {
+        match addr {
+            0x0100_0000..0x0200_0000 => {
+                let a = addr - 0x0100_0000;
+                let sb = (a >> 20) as usize;
+                let within = a & 0xF_FFFF;
+                let src = PlaneSrc::Bitmap {
+                    screen: sb / 2,
+                    bitmap: sb % 2,
+                    plane: (within >> 17) as u8,
+                };
+                (src, (within & 0x1_FFFF) as i64)
+            }
+            // Logbase(n) / Phybase(n) (inst_screen.rs).
+            0x0020_0000..0x0030_0000 => {
+                let a = addr - 0x0020_0000;
+                let sb = (a >> 16) as usize;
+                let src = PlaneSrc::Bitmap {
+                    screen: sb / 2,
+                    bitmap: sb % 2,
+                    plane: ((a & 0xFFFF) / 0x2000) as u8,
+                };
+                (src, (a & 0x1FFF) as i64)
+            }
+            _ => (PlaneSrc::Memory, addr as i64),
+        }
+    }
+
+    fn plane_bytes(&self, src: PlaneSrc, offset: i64, out: &mut [u8]) {
+        out.fill(0);
+        match src {
+            PlaneSrc::Memory => {
+                for (k, b) in out.iter_mut().enumerate() {
+                    *b = self.banks.peek((offset + k as i64) as u32);
+                }
+            }
+            PlaneSrc::Bitmap {
+                screen,
+                bitmap,
+                plane,
+            } => {
+                let Some(s) = self.screens.get(screen) else {
+                    return;
+                };
+                let Some(bm) = s.bitmaps.get(bitmap) else {
+                    return;
+                };
+                if plane >= s.planes {
+                    return;
+                }
+                let (w, h) = (s.width as i64, s.height as i64);
+                let bpr = (w / 8).max(1);
+                for (k, b) in out.iter_mut().enumerate() {
+                    let o = offset + k as i64;
+                    let (y, x) = (o.div_euclid(bpr), o.rem_euclid(bpr) * 8);
+                    if o < 0 || y >= h {
+                        continue;
+                    }
+                    let row = &bm[(y * w + x) as usize..(y * w + x + 8) as usize];
+                    for (bit, &px) in row.iter().enumerate() {
+                        if (px >> plane) & 1 != 0 {
+                            *b |= 0x80 >> bit;
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// Palette transformation (dual playfield 2 colours).
@@ -128,7 +220,7 @@ fn clip_window(
 impl Hardware {
     /// Screen whose bitmap a screen shows (itself, or the original of a
     /// clone) and the index of the displayed bitmap.
-    fn shown_bitmap(&self, n: usize) -> (usize, usize) {
+    pub(crate) fn shown_bitmap(&self, n: usize) -> (usize, usize) {
         let s = self.screens.get(n).unwrap();
         if let Some(o) = s.clone_of
             && let Some(orig) = self.screens.get(o)
@@ -152,6 +244,64 @@ impl Hardware {
             });
         }
         owners
+    }
+
+    /// Slices of lines owned by the same screen: (screen, first line, end).
+    pub(crate) fn line_runs(&self) -> Vec<(usize, i32, i32)> {
+        let owners = self.line_owners();
+        let mut runs: Vec<(usize, i32, i32)> = Vec::new();
+        let mut i = 0;
+        while i < owners.len() {
+            let Some(n) = owners[i] else {
+                i += 1;
+                continue;
+            };
+            let mut j = i;
+            while j < owners.len() && owners[j] == Some(n) {
+                j += 1;
+            }
+            let (l0, l1) = (FIRST_LINE + i as i32, FIRST_LINE + j as i32);
+            // A slice cannot start on the last lines (+W.s:5940).
+            if l0 < END_LINE - 1 {
+                runs.push((n, l0, l1));
+            }
+            i = j;
+        }
+        runs
+    }
+
+    /// Copper Off: the whole display comes from the user copper list (no
+    /// screens, no sprites).
+    fn copper_frame(&mut self) {
+        let chip = ChipView {
+            screens: &self.screens,
+            banks: &self.banks,
+        };
+        self.copper.render(&chip, &mut self.frame.copper_rgba);
+        self.frame.copper_serial += 1;
+        let r = Rect {
+            x: 0,
+            y: 0,
+            w: DISPLAY_WIDTH,
+            h: (copper::SHOWN_LINES * 2) as u32,
+        };
+        self.frame.specs.push(Spec {
+            id: 0x7FFE_0000,
+            version: self.frame.copper_serial,
+            format: LayerFormat::Rgba,
+            source: Source::Copper,
+            width: DISPLAY_WIDTH,
+            height: copper::SHOWN_LINES as u32,
+            palette: usize::MAX,
+            palette_rows: 1,
+            band: r,
+            window: r,
+            src_x: 0,
+            src_y: 0,
+            scale_x: 1,
+            scale_y: 2,
+            transparent: None,
+        });
     }
 
     /// Adds a palette (rows of 256 colours for lines `l0..l1`, or a single
@@ -194,9 +344,14 @@ impl Hardware {
         }
         self.frame.specs.clear();
         self.frame.palettes.clear();
+        if !self.copper.on {
+            self.copper_frame();
+            return;
+        }
         let screens = &self.screens;
-        self.frame.ham.retain(|n, _| screens.get(*n).is_some_and(|s| s.ham));
-        let owners = self.line_owners();
+        self.frame
+            .ham
+            .retain(|n, _| screens.get(*n).is_some_and(|s| s.ham));
 
         // Rainbows of colour 0 also colour the lines without a screen.
         if self
@@ -235,26 +390,7 @@ impl Hardware {
             });
         }
 
-        // Slices of lines owned by the same screen.
-        let mut runs: Vec<(usize, i32, i32)> = Vec::new();
-        let mut i = 0;
-        while i < owners.len() {
-            let Some(n) = owners[i] else {
-                i += 1;
-                continue;
-            };
-            let mut j = i;
-            while j < owners.len() && owners[j] == Some(n) {
-                j += 1;
-            }
-            let (l0, l1) = (FIRST_LINE + i as i32, FIRST_LINE + j as i32);
-            // A slice cannot start on the last lines (+W.s:5940).
-            if l0 < END_LINE - 1 {
-                runs.push((n, l0, l1));
-            }
-            i = j;
-        }
-
+        let runs = self.line_runs();
         let mut segment: HashMap<usize, u32> = HashMap::new();
         for (n, l0, l1) in runs {
             let seg = segment.entry(n).or_insert(0);
@@ -486,6 +622,7 @@ impl Hardware {
                     }
                     Source::Ham(n) => &this.frame.ham[&n].rgba,
                     Source::Sprite(k) => &this.sprites.display[k].rgba,
+                    Source::Copper => &this.frame.copper_rgba,
                     Source::Dummy => &DUMMY_PIXEL[..1],
                 };
                 let palette: &[[u8; 4]] = if sp.palette == usize::MAX {
