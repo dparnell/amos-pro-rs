@@ -1,0 +1,21 @@
+execute adelete
+execute alib
+execute aw
+execute apro
+execute adata
+execute aedit
+execute amon
+execute acomp
+execute aclib
+execute acheader
+execute acompext
+execute arequestext
+execute amusicext
+execute acompactext
+execute aioext
+execute a3dext
+c/Make_Checklist
+
+execute acleanup
+
+echo "***assembly script complete***"
