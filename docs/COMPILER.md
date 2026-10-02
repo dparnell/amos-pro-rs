@@ -108,3 +108,20 @@ Mid$= ...) are compiled specially.
    `Compile` produce compiled apps.
 4. Optimisation: direct branches inside scopes, typed locals for hot loops,
    inlining of FFP/string helpers into the module.
+
+## Status
+
+* Milestones 1 and 3 are done; parts of milestone 2 work through the
+  interpreter fallback (instructions the compiler does not translate yet are
+  executed by the interpreter one at a time with variables synced, so every
+  keyword works). `amos-cli compile PROG -v` lists them.
+* Bundles carry the module in an optional `WASM` section; `amos-cli build`,
+  `Compile` and the editor's Build Application compile by default
+  (`--interpreted` skips it) and fall back to interpreting on failure.
+* Hosts: `amos-wasmhost` (wasmtime natively, `WebAssembly.instantiate` on
+  the web) share the import list in `amos-wasmhost/src/imports.rs`;
+  interface version 2 passes array indices through scratch memory.
+* Checks: differential tests (`cargo test -p amos-wasmhost`), the native
+  frame-by-frame comparison of all examples (`cargo run -p amos-wasmhost
+  --example compare`), and the same comparison in the real web runtime under
+  node (`scripts/check-web-compiled.sh`).

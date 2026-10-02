@@ -43,7 +43,17 @@ files of the program's folder are bundled too, so pictures and data the
 program loads are available (`--no-files` bundles the program only,
 `--include DIR` another folder). Bundled files appear in the `Bundle:`
 volume, which is the current directory. The `Compile` instruction of the
-Compiler extension builds applications the same way.
+Compiler extension and the editor's Build Application (Project menu) build
+applications the same way.
+
+The program is compiled to WebAssembly and run natively by the app (see
+`docs/COMPILER.md`); `--interpreted` ships the interpreter only. To compile
+or run compiled without building an app:
+
+```sh
+target/release/amos-cli compile Game.AMOS -o Game.wasm -v
+target/release/amos-cli run --compiled Game.AMOS
+```
 
 ### Console version
 
