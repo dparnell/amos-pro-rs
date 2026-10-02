@@ -38,6 +38,7 @@ pub mod label {
     pub const SET_TAB: i32 = 38;
     pub const INFOS: i32 = 54;
     pub const ABOUT_EXT: i32 = 55;
+    pub const LIGNE: i32 = 59;
 }
 
 /// What the editor does when a dialog or the file selector closes.
@@ -62,6 +63,8 @@ pub enum Then {
     Saved(u16),
     Quit,
     AboutExt(usize),
+    /// The line shown when a program stops (`Ed_Ligne`).
+    Ligne(crate::interp::StopInfo),
 }
 
 /// A dialog in progress.
@@ -503,6 +506,10 @@ impl Editor {
                 if res.ret == 1 && !self.saved_check(m, 1082) {
                     self.quit_requested = true;
                 }
+                Ok(())
+            }
+            Then::Ligne(info) => {
+                self.ligne_done(m, info, res.ret);
                 Ok(())
             }
             Then::AboutExt(n) => {

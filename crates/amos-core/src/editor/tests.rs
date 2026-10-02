@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::input::InputEvent;
+use crate::input::raw;
 
 fn key(m: &mut Machine, scancode: u8, ch: Option<char>) {
     m.input(InputEvent::Key { scancode, pressed: true, ch });
@@ -60,14 +61,88 @@ fn type_run_and_return() {
     assert_eq!(ed.mode, Mode::Running);
     assert!(m.hw.screens.get(EC_EDIT).is_none());
     frames(&mut ed, &mut m, 5);
-    // End of program: the Direct / Editor line.
+    // End of program: the Direct / Editor line (`Ed_Ligne`): the editor
+    // screen in front as a 56 line strip at Es_Y1, the program's screen
+    // still shown.
     assert!(matches!(ed.mode, Mode::Stopped(_)), "{:?}", ed.mode);
-    assert!(m.hw.screens.get(EC_FONC).is_some());
+    let s = m.hw.screens.get(EC_EDIT).expect("editor strip");
+    assert_eq!((s.display_y, s.display_h), (ed.cfg.esc_y1 as i32, 56));
+    assert_eq!(m.hw.screens.priority[0], EC_EDIT);
+    assert!(m.hw.screens.get(0).is_some_and(|s| !s.hidden));
+    assert!(ed.in_dialog());
     key(&mut m, raw::RETURN, Some('\r'));
     frames(&mut ed, &mut m, 2);
     assert_eq!(ed.mode, Mode::Edit);
-    assert!(m.hw.screens.get(EC_EDIT).is_some());
-    assert!(m.hw.screens.get(EC_FONC).is_none());
+    let s = m.hw.screens.get(EC_EDIT).unwrap();
+    assert_eq!((s.display_y, s.display_h), (ed.cfg.wy as i32, 256));
+    assert!(m.hw.screens.get(0).is_some_and(|s| s.hidden));
+    // End: no message, the cursor stays where it was.
+    assert_eq!(ed.current_alert(), None);
+}
+
+/// The texts of the stop line: message, line number, the line around the
+/// error with `>>>`, as the dialog's variables give them.
+#[test]
+fn stop_line_texts() {
+    let mut m = Machine::new();
+    let mut ed = Editor::new(&mut m);
+    type_text(&mut ed, &mut m, "for i=1 to 3\nnext i\n  if i>2 then a=1 : print 1/0\n");
+    key(&mut m, raw::F1, None);
+    frames(&mut ed, &mut m, 5);
+    let i = m.hw.dialogs.channel_index(dialogs::ED_CHANNEL).expect("Ed_Ligne dialog");
+    let v = &m.hw.dialogs.channels[i].vars;
+    let st = |n: usize| match &v[n] {
+        crate::interface::DVal::Str(s) => latin1_to_string(s),
+        other => format!("{other:?}"),
+    };
+    assert_eq!(st(0), "Division by zero");
+    assert!(matches!(v[1], crate::interface::DVal::Int(3)));
+    assert_eq!(st(2), "2 Then A=1 : ");
+    assert_eq!(st(3), "Print 1/0");
+    // The dialog builds "message at line n." in variable 8.
+    assert_eq!(st(8), "Division by zero at line 3.");
+}
+
+/// Ctrl-C (Program interrupted), then Esc: Direct mode.
+#[test]
+fn break_then_direct() {
+    let mut m = Machine::new();
+    let mut ed = Editor::new(&mut m);
+    type_text(&mut ed, &mut m, "do\nloop\n");
+    key(&mut m, raw::F1, None);
+    frames(&mut ed, &mut m, 3);
+    assert_eq!(ed.mode, Mode::Running);
+    m.input(InputEvent::Key { scancode: raw::CTRL, pressed: true, ch: None });
+    key(&mut m, 0x33, Some('\u{3}'));
+    m.input(InputEvent::Key { scancode: raw::CTRL, pressed: false, ch: None });
+    frames(&mut ed, &mut m, 3);
+    assert!(matches!(&ed.mode, Mode::Stopped(i) if i.reason == StopReasonOrError::Stop(StopReason::Break)));
+    let i = m.hw.dialogs.channel_index(dialogs::ED_CHANNEL).unwrap();
+    assert!(
+        matches!(&m.hw.dialogs.channels[i].vars[0], crate::interface::DVal::Str(s) if &s[..] == b"Program interrupted")
+    );
+    key(&mut m, raw::ESC, Some('\u{1b}'));
+    frames(&mut ed, &mut m, 3);
+    assert_eq!(ed.mode, Mode::Direct);
+    assert!(m.hw.screens.get(EC_EDIT).is_none());
+    assert!(m.hw.screens.get(EC_FONC).is_some());
+}
+
+/// The Edit and Direct instructions skip the line.
+#[test]
+fn edit_and_direct_instructions() {
+    let mut m = Machine::new();
+    let mut ed = Editor::new(&mut m);
+    type_text(&mut ed, &mut m, "edit\n");
+    key(&mut m, raw::F1, None);
+    frames(&mut ed, &mut m, 3);
+    assert_eq!(ed.mode, Mode::Edit);
+    assert!(!ed.in_dialog());
+    ed.function(&mut m, 1080);
+    type_text(&mut ed, &mut m, "direct\n");
+    key(&mut m, raw::F1, None);
+    frames(&mut ed, &mut m, 3);
+    assert_eq!(ed.mode, Mode::Direct);
 }
 
 #[test]
@@ -111,7 +186,7 @@ fn direct_mode() {
     frames(&mut ed, &mut m, 5);
     // Esc on the stop line: direct mode with the program's variables.
     key(&mut m, raw::ESC, Some('\u{1b}'));
-    frames(&mut ed, &mut m, 1);
+    frames(&mut ed, &mut m, 3);
     assert_eq!(ed.mode, Mode::Direct);
     type_text(&mut ed, &mut m, "b=a+1\n");
     frames(&mut ed, &mut m, 3);

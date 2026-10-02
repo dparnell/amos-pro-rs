@@ -1,7 +1,6 @@
-//! Direct mode (`Ed_Escape`, `Esc_Loop`, +Edit.s:8877-9330) and the line
-//! shown when a program stops (`Ed_Ligne`, +Edit.s:8330).
+//! Direct mode (`Ed_Escape`, `Esc_Loop`, +Edit.s:8877-9330).
 //!
-//! Both use screen 8 (`EcFonc`) as a strip at the bottom of the display,
+//! It uses screen 8 (`EcFonc`) as a strip at the bottom of the display,
 //! over the screens of the program: the program's output stays visible.
 //! The direct mode strip has the button bar of the resource bank (button
 //! 1 back to the editor, the logo, the output button, the ten function
@@ -32,9 +31,6 @@ pub enum Action {
     Run(Vec<u8>),
 }
 
-/// X ranges of the Direct and Editor buttons of the stop line, and their y.
-type StopButtons = ((i32, i32), (i32, i32), i32);
-
 #[derive(Debug, Default)]
 pub struct DirectMode {
     pub history: Vec<Vec<u8>>,
@@ -46,8 +42,6 @@ pub struct DirectMode {
     prompt: Vec<u8>,
     max_history: usize,
     mouse_prev: u8,
-    /// Buttons of the stop line: (x1, x2) of Direct and Editor.
-    stop_buttons: Option<StopButtons>,
 }
 
 /// Printable part of a string with AMOS window escape codes.
@@ -98,7 +92,6 @@ impl DirectMode {
 
     /// Removes the strip.
     pub fn close(&mut self, m: &mut Machine) {
-        self.stop_buttons = None;
         if m.hw.screens.get(EC_FONC).is_some() {
             let cur = m.hw.screens.current;
             m.hw.screens.remove(EC_FONC);
@@ -274,77 +267,5 @@ impl DirectMode {
         }
         self.hist_pos = self.history.len();
         Action::Run(line)
-    }
-
-    /// The line shown when a program stops (`Ed_Ligne`): the message, the
-    /// line number, the text of the line with the error position, and the
-    /// two choices Direct mode [ESC] / Editor [RETURN].
-    #[allow(clippy::too_many_arguments)]
-    pub fn show_stop(
-        &mut self,
-        m: &mut Machine,
-        cfg: &EdConfig,
-        res: &Resource,
-        msg: &str,
-        line_no: Option<usize>,
-        text: &[u8],
-        col: usize,
-    ) {
-        let _ = res;
-        self.close(m);
-        self.open_screen(m, cfg, 40);
-        m.hw.input.clear_keys();
-        let Some(s) = m.hw.screens.get_mut(EC_FONC) else { return };
-        let sx = s.width as i32;
-        draw::fill(s, 0, 0, sx, 40, col::STATUS_PAPER);
-        draw::frame(s, 0, 0, sx - 1, 39, 0);
-        let mut title = cfg.message(210);
-        title.push(' ');
-        title.push_str(msg);
-        if let Some(n) = line_no {
-            title.push_str(&cfg.message(211));
-            title.push_str(&n.to_string());
-        }
-        draw::text(s, 8, 3, &super::bytes(&title), col::STATUS_PEN, col::STATUS_PAPER);
-        // The line: text before the error, then the rest highlighted.
-        let tx = (sx / 8 - 2) as usize;
-        let start = col.saturating_sub(60);
-        let before: Vec<u8> = text[start.min(text.len())..col.min(text.len())].to_vec();
-        let after: Vec<u8> = text[col.min(text.len())..].to_vec();
-        draw::fill(s, 8, 14, sx - 8, 22, col::TEXT_PAPER);
-        let x = draw::text(s, 8, 14, &before[..before.len().min(tx)], col::TEXT_PEN, col::TEXT_PAPER);
-        let room = tx.saturating_sub(before.len());
-        draw::text(s, x, 14, &after[..after.len().min(room)], col::ALERT_PEN, col::ALERT_PAPER);
-        // Buttons.
-        let b1 = super::bytes(&cfg.message(212));
-        let b2 = super::bytes(&cfg.message(213));
-        let w1 = b1.len() as i32 * 8 + 8;
-        let w2 = b2.len() as i32 * 8 + 8;
-        let x1 = sx / 4 - w1 / 2;
-        let x2 = sx * 3 / 4 - w2 / 2;
-        for (x, w, t) in [(x1, w1, &b1), (x2, w2, &b2)] {
-            draw::fill(s, x, 26, x + w, 37, 3);
-            draw::frame(s, x, 26, x + w - 1, 36, 0);
-            draw::text(s, x + 4, 28, t, 0, 3);
-        }
-        self.stop_buttons = Some(((x1, x1 + w1), (x2, x2 + w2), 26));
-    }
-
-    /// Button of the stop line under the mouse: Some(true) Direct mode,
-    /// Some(false) Editor.
-    pub fn stop_button_at(&self, m: &Machine) -> Option<bool> {
-        let ((a1, a2), (b1, b2), y0) = self.stop_buttons?;
-        let s = m.hw.screens.get(EC_FONC)?;
-        let (x, y) = (s.x_screen(m.hw.input.mouse_x), s.y_screen(m.hw.input.mouse_y));
-        if !(y0..y0 + 11).contains(&y) {
-            return None;
-        }
-        if (a1..a2).contains(&x) {
-            Some(true)
-        } else if (b1..b2).contains(&x) {
-            Some(false)
-        } else {
-            None
-        }
     }
 }

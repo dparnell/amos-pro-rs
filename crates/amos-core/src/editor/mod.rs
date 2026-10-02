@@ -31,7 +31,7 @@ pub mod text;
 use crate::Machine;
 use crate::detok::latin1_to_string;
 use crate::gfx::Screen;
-use crate::input::{KeyPress, raw};
+use crate::input::KeyPress;
 use crate::interface::DVal;
 use crate::interp::verify::Verifier;
 use crate::interp::{RunState, StopInfo, StopReason, StopReasonOrError};
@@ -50,6 +50,9 @@ pub const EC_EDIT: usize = 9;
 const TITLE_SY: i32 = 16;
 const ETAT_SY: i32 = 11;
 const BAS_SY: i32 = 5;
+
+/// Height of the `Ed_Ligne` strip.
+const LIGNE_SY: i32 = 56;
 
 /// Size of the text buffer shown as "Free" (`PI_DefSize`).
 const TEXT_BUFFER: i64 = 64 * 1024;
@@ -394,16 +397,10 @@ impl Editor {
                 let msg = self.cfg.test_message(*n);
                 self.back_to_editor(m, Some((info.pos, msg)));
             }
+            // End, errors, Control-C: the Direct mode / Editor line.
             _ => {
                 self.mode = Mode::Stopped(info.clone());
-                let msg = self.stop_message(&info);
-                let line = self.docs.get_mut(self.running_doc).and_then(|d| d.locate_offset(info.pos));
-                let text = match line {
-                    Some((y, _)) => self.docs[self.running_doc].line_text(y),
-                    None => Vec::new(),
-                };
-                let line_no = line.map(|(y, _)| y + 1);
-                self.direct.show_stop(m, &self.cfg, &self.res, &msg, line_no, &text, line.map_or(0, |l| l.1));
+                self.ligne(m, info);
             }
         }
     }
@@ -457,30 +454,12 @@ impl Editor {
                 }
             }
             Mode::Stopped(info) => {
-                // Return: editor (with the error), Esc: direct mode.
-                while let Some(k) = m.hw.input.inkey() {
-                    if k.raw == raw::ESC {
-                        self.direct.close(m);
-                        self.mode = Mode::Direct;
-                        self.direct.open(m, &self.cfg, &self.res);
-                        return;
-                    }
-                    if k.raw == raw::RETURN || k.raw == raw::ENTER || k.ascii == 13 {
-                        self.stopped_to_editor(m, &info);
-                        return;
-                    }
-                }
-                let clicks = m.hw.input.take_clicks();
-                if clicks & 1 != 0 {
-                    match self.direct.stop_button_at(m) {
-                        Some(true) => {
-                            self.direct.close(m);
-                            self.mode = Mode::Direct;
-                            self.direct.open(m, &self.cfg, &self.res);
-                        }
-                        Some(false) => self.stopped_to_editor(m, &info),
-                        None => {}
-                    }
+                // The `Ed_Ligne` dialog runs until Esc / Return / a click.
+                if self.modal.is_some() {
+                    self.modal_vbl(m);
+                } else {
+                    // The dialog could not be shown: back to the editor.
+                    self.stopped_to_editor(m, &info);
                 }
             }
             Mode::Direct => {
@@ -504,6 +483,81 @@ impl Editor {
             }
             Mode::Edit => self.edit_vbl(m),
         }
+    }
+
+    /// `Ed_Ligne` (+Edit.s:8330): the editor screen is shown as a 56 line
+    /// strip at `Es_Y1` over the program's screens, and the dialog at label
+    /// 59 of the editor resource shows the message ("... at line n."), the
+    /// line around the error with `>>>` at the error, and the buttons
+    /// "Direct mode [ESC]" / "Editor [RETURN]". The original's `CA 4VA`
+    /// calls `EdReCop` (wait VBL, force the copper list): nothing to do
+    /// here, the display is rebuilt at each frame.
+    fn ligne(&mut self, m: &mut Machine, info: StopInfo) {
+        let msg = self.stop_message(&info);
+        self.current = self.running_doc.min(self.docs.len() - 1);
+        let d = &mut self.docs[self.current];
+        let (y, col) = match d.locate_offset(info.pos) {
+            Some(l) => l,
+            None => (d.len().saturating_sub(1), d.line_text(d.len().saturating_sub(1)).len()),
+        };
+        let text = d.line_text(y);
+        // Variables 2 and 3: up to 13 characters before the error, up to 60
+        // from it.
+        let col = col.min(text.len());
+        let before = &text[col.saturating_sub(13)..col];
+        let after = &text[col..(col + 60).min(text.len())];
+        let vars = [
+            (0, DVal::str(&bytes(&msg))),
+            (1, DVal::Int(y as i32 + 1)),
+            (2, DVal::str(before)),
+            (3, DVal::str(after)),
+            (4, DVal::Int(0)),
+        ];
+        // The editor screen in front, 56 lines at Es_Y1, program screens
+        // still visible around it (`EHide`, `First`, `AView`, `OffSet`).
+        if let Some(s) = self.screen.take() {
+            let cur = m.hw.screens.current;
+            m.hw.screens.insert(*s);
+            m.hw.screens.current = cur;
+        }
+        let _ = m.hw.screens.to_front(EC_EDIT);
+        if let Some(s) = m.hw.screens.get_mut(EC_EDIT) {
+            s.pending_display = [Some(self.cfg.wx as i32), Some(self.cfg.esc_y1 as i32), None, Some(LIGNE_SY)];
+            s.pending_offset = [Some(0), Some(0)];
+            s.apply_pending();
+        }
+        // The mouse on the strip (`Esc_MaxMouse`, `SetM`).
+        m.hw.sprites.mouse_show = m.hw.sprites.mouse_show.max(0);
+        m.hw.input.limit_mouse(None);
+        m.hw.input.set_mouse(Some(self.cfg.wx as i32 + 1), Some(self.cfg.esc_y1 as i32 + 1));
+        self.dialog(m, dialogs::label::LIGNE, &vars, Then::Ligne(info));
+    }
+
+    /// End of `Ed_Ligne`: button 1 (Esc) Direct mode, else the editor.
+    pub(super) fn ligne_done(&mut self, m: &mut Machine, info: StopInfo, ret: i32) {
+        self.full_screen(m);
+        if ret == 1 {
+            self.hide(m);
+            self.mode = Mode::Direct;
+            self.direct.open(m, &self.cfg, &self.res);
+        } else {
+            self.stopped_to_editor(m, &info);
+        }
+    }
+
+    /// The editor screen at its normal position and size.
+    fn full_screen(&mut self, m: &mut Machine) {
+        let h = (self.cfg.sy as i32 + 7) & !7;
+        let s = match m.hw.screens.get_mut(EC_EDIT) {
+            Some(s) => s,
+            None => match self.screen.as_deref_mut() {
+                Some(s) => s,
+                None => return,
+            },
+        };
+        s.pending_display = [Some(self.cfg.wx as i32), Some(self.cfg.wy as i32), None, Some(h)];
+        s.pending_offset = [Some(0), Some(0)];
+        s.apply_pending();
     }
 
     fn stopped_to_editor(&mut self, m: &mut Machine, info: &StopInfo) {
