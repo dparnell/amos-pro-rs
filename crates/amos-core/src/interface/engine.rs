@@ -1001,6 +1001,14 @@ impl Hardware {
                         }
                         s
                     }
+                    // A string given by the host (the editor passes the
+                    // text where the original gives its address).
+                    DVal::Str(t) => t
+                        .iter()
+                        .take_while(|&&b| b >= 32)
+                        .take(max.max(1) as usize)
+                        .copied()
+                        .collect(),
                     _ => Vec::new(),
                 };
                 Self::dia_alloc_str(ch, s.len());

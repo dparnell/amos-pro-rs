@@ -44,6 +44,8 @@ pub struct EdConfig {
     pub esc_y2: u16,
     pub search_mode: u16,
     pub tabs: u16,
+    /// Quit options (`Ed_QuitFlags`): bit 0 confirm quit.
+    pub quit_flags: u8,
     pub insert: bool,
     pub sounds: bool,
     /// Key table: for each function (index = number - 1), the list of
@@ -139,6 +141,7 @@ impl EdConfig {
             esc_y2: rd16(c, 46),
             search_mode: rd16(c, 84),
             tabs: rd16(c, 86).clamp(1, 16),
+            quit_flags: c[89],
             insert: c[90] != 0,
             sounds: c[91] != 0,
             keys,

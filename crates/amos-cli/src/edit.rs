@@ -17,9 +17,20 @@ use amos_core::input::{InputEvent, MouseButton};
 
 enum Step {
     Char(char),
-    Key { shifts: Vec<u8>, raw: u8, ch: Option<char> },
+    Key {
+        shifts: Vec<u8>,
+        raw: u8,
+        ch: Option<char>,
+    },
     Wait(usize),
-    Mouse { x: i32, y: i32, button: MouseButton, pressed: bool },
+    /// `{FN n}`: calls editor function n (numbers of `JFonc`).
+    Function(u16),
+    Mouse {
+        x: i32,
+        y: i32,
+        button: MouseButton,
+        pressed: bool,
+    },
 }
 
 fn parse_keys(s: &str) -> Result<Vec<Step>, String> {
@@ -36,6 +47,10 @@ fn parse_keys(s: &str) -> Result<Vec<Step>, String> {
                 break;
             }
             name.push(c);
+        }
+        if let Some(n) = name.strip_prefix("FN ") {
+            out.push(Step::Function(n.trim().parse().map_err(|_| "bad FN")?));
+            continue;
         }
         if let Some(n) = name.strip_prefix("WAIT ") {
             out.push(Step::Wait(n.trim().parse().map_err(|_| "bad WAIT")?));
@@ -154,6 +169,7 @@ pub fn edit(args: &[String]) -> Result<(), String> {
                     m.input(InputEvent::Key { scancode: s, pressed: false, ch: None });
                 }
             }
+            Step::Function(f) => ed.function(&mut m, f),
             Step::Wait(n) => {
                 for _ in 0..n {
                     ed.vbl(&mut m);

@@ -31,6 +31,8 @@ pub struct Resource {
     pub palette: Vec<u16>,
     /// Interface programs (dialog sources).
     pub programs: Vec<Vec<u8>>,
+    /// The bank data (without the `AmBk` header), for the dialogs.
+    pub raw: Vec<u8>,
 }
 
 fn rd16(d: &[u8], p: usize) -> usize {
@@ -77,7 +79,7 @@ impl Resource {
                 programs.push(b.get(s + 2..s + 2 + n).unwrap_or(&[]).to_vec());
             }
         }
-        Some(Resource { images, palette, programs })
+        Some(Resource { images, palette, programs, raw: b.to_vec() })
     }
 
     pub fn defaults() -> Resource {

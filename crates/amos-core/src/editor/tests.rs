@@ -172,12 +172,22 @@ fn save_and_load() {
     assert_eq!(listing(&ed), "");
     ed.load(&mut m, "Ram Disk:test.AMOS").unwrap();
     assert_eq!(listing(&ed), "Print \"saved\"\n");
-    // Load through the status line prompt (Amiga+L).
+    // Load through the file selector (Amiga+L): it lists the current
+    // directory, the name is typed and Return chooses it.
     ed.function(&mut m, 1080);
     with_shift(&mut m, raw::LAMIGA, 0x28, Some('l'));
-    frames(&mut ed, &mut m, 1);
-    type_text(&mut ed, &mut m, "Ram Disk:test.AMOS\n");
+    frames(&mut ed, &mut m, 20);
+    assert!(ed.in_dialog());
+    assert!(m.hw.screens.get(10).is_some(), "file selector screen");
+    let names: Vec<String> =
+        m.hw.dialogs.fsel.as_ref().unwrap().list.iter().map(|e| latin1_to_string(&e.text)).collect();
+    assert!(names.iter().any(|n| n.contains("test.AMOS")), "{names:?}");
+    type_text(&mut ed, &mut m, "test.AMOS\n");
+    frames(&mut ed, &mut m, 40);
+    assert!(!ed.in_dialog());
+    assert!(m.hw.screens.get(10).is_none());
     assert_eq!(listing(&ed), "Print \"saved\"\n");
+    assert!(ed.doc().name.ends_with("test.AMOS"));
 }
 
 #[test]
@@ -230,7 +240,7 @@ fn click_places_cursor() {
 }
 
 #[test]
-fn search_prompt_and_fold_keys() {
+fn search_dialog_and_fold_keys() {
     let mut m = Machine::new();
     let mut ed = Editor::new(&mut m);
     type_text(&mut ed, &mut m, "print 1\nprocedure TEST\nprint 2\nend proc\nprint 3\n");
@@ -240,7 +250,10 @@ fn search_prompt_and_fold_keys() {
     m.input(InputEvent::Key { scancode: raw::CTRL, pressed: false, ch: None });
     with_shift(&mut m, raw::LAMIGA, 0x23, Some('f'));
     frames(&mut ed, &mut m, 1);
-    type_text(&mut ed, &mut m, "print 2\n");
+    assert!(ed.in_dialog());
+    // Return leaves the edit zone, the second one is the Ok shortcut.
+    type_text(&mut ed, &mut m, "Print 2\n\n");
+    assert!(!ed.in_dialog());
     assert_eq!(ed.doc().y, 2);
     // F9 folds the procedure: the cursor goes to its first line.
     key(&mut m, 0x58, None);
@@ -273,4 +286,122 @@ fn several_windows() {
     assert_eq!(listing(&ed), "A=1\n");
     ed.current = 1;
     assert_eq!(listing(&ed), "B=2\n");
+}
+
+/// Opens a dialog with function `f` and checks it is shown on the editor
+/// screen (the channel exists and the box was drawn).
+fn open_dialog(ed: &mut Editor, m: &mut Machine, f: u16) {
+    let before = m.hw.screens.get(EC_EDIT).unwrap().logic_ref().to_vec();
+    ed.function(m, f);
+    frames(ed, m, 2);
+    assert!(ed.in_dialog(), "function {f}");
+    assert!(m.hw.dialogs.channel_index(dialogs::ED_CHANNEL).is_some());
+    assert_ne!(m.hw.screens.get(EC_EDIT).unwrap().logic_ref(), &before[..], "function {f} drew nothing");
+}
+
+#[test]
+fn goto_line_and_set_tab_dialogs() {
+    let mut m = Machine::new();
+    let mut ed = Editor::new(&mut m);
+    type_text(&mut ed, &mut m, "a=1\nb=2\nc=3\nd=4\n");
+    // Amiga+G: Goto Line.
+    with_shift(&mut m, raw::LAMIGA, 0x24, Some('g'));
+    frames(&mut ed, &mut m, 2);
+    assert!(ed.in_dialog());
+    type_text(&mut ed, &mut m, "3\n\n");
+    assert!(!ed.in_dialog());
+    assert_eq!(ed.doc().y, 2);
+    // Ctrl+Tab: Set Tab (the field holds the current value 3).
+    open_dialog(&mut ed, &mut m, 26);
+    key(&mut m, raw::BACKSPACE, None);
+    type_text(&mut ed, &mut m, "5\n\n");
+    assert!(!ed.in_dialog());
+    assert_eq!(ed.cfg.tabs, 5);
+    // Cancel keeps the value (Escape is not a shortcut: the Cancel button
+    // has the $C5 shortcut, i.e. Esc as a raw key).
+    open_dialog(&mut ed, &mut m, 76);
+    key(&mut m, raw::ESC, Some('\u{1b}'));
+    frames(&mut ed, &mut m, 3);
+    assert!(!ed.in_dialog());
+    assert_eq!(ed.doc().y, 2);
+}
+
+#[test]
+fn replace_all_dialogs() {
+    let mut m = Machine::new();
+    let mut ed = Editor::new(&mut m);
+    type_text(&mut ed, &mut m, "a=1\nb=a+a\n");
+    open_dialog(&mut ed, &mut m, 99);
+    // Search string, Return to the replace field, its text, Return.
+    type_text(&mut ed, &mut m, "A\nZZ\n");
+    // Click on "All Occurences" (its box is at 16,56 from the bottom left
+    // of the dialog: display position measured on a rendering).
+    m.input(InputEvent::MouseMove { x: 156.0, y: 299.0 });
+    frames(&mut ed, &mut m, 1);
+    m.input(InputEvent::MouseButton { button: crate::input::MouseButton::Left, pressed: true });
+    frames(&mut ed, &mut m, 2);
+    m.input(InputEvent::MouseButton { button: crate::input::MouseButton::Left, pressed: false });
+    frames(&mut ed, &mut m, 2);
+    type_text(&mut ed, &mut m, "\n");
+    assert_eq!(ed.search_mode & 8, 8, "all occurrences ticked");
+    // "Replace in whole text. Are you sure?" then "n change(s) done.".
+    assert!(ed.in_dialog());
+    frames(&mut ed, &mut m, 2);
+    assert!(matches!(ed.modal, Some(dialogs::Modal::Dialog(Then::ReplaceAll))), "{:?}", ed.modal);
+    type_text(&mut ed, &mut m, "\n");
+    frames(&mut ed, &mut m, 2);
+    assert!(ed.in_dialog());
+    assert_eq!(listing(&ed), "ZZ=1\nB=ZZ+ZZ\n");
+    // The message box goes away with a click.
+    m.input(InputEvent::MouseButton { button: crate::input::MouseButton::Left, pressed: true });
+    frames(&mut ed, &mut m, 2);
+    m.input(InputEvent::MouseButton { button: crate::input::MouseButton::Left, pressed: false });
+    frames(&mut ed, &mut m, 2);
+    assert!(!ed.in_dialog());
+}
+
+#[test]
+fn saved_new_and_quit_dialogs() {
+    let mut m = Machine::new();
+    let mut ed = Editor::new(&mut m);
+    type_text(&mut ed, &mut m, "print 1");
+    // Amiga+Q (New) on a changed program: "not saved. Save?" - No (N).
+    with_shift(&mut m, raw::LAMIGA, 0x10, Some('q'));
+    frames(&mut ed, &mut m, 2);
+    assert!(ed.in_dialog());
+    assert_eq!(listing(&ed), "Print 1\n");
+    key(&mut m, 0x36, Some('n'));
+    frames(&mut ed, &mut m, 3);
+    assert!(!ed.in_dialog());
+    assert_eq!(listing(&ed), "");
+    // Quit: confirmation, Return = Yes.
+    open_dialog(&mut ed, &mut m, 82);
+    key(&mut m, raw::RETURN, Some('\r'));
+    frames(&mut ed, &mut m, 3);
+    assert!(ed.quit_requested);
+}
+
+#[test]
+fn information_dialogs() {
+    let mut m = Machine::new();
+    let mut ed = Editor::new(&mut m);
+    type_text(&mut ed, &mut m, "print 1 : print 2\n");
+    for f in [83, 150, 149] {
+        open_dialog(&mut ed, &mut m, f);
+        // Ok / Cancel shortcut (Return, or Esc for About Extensions).
+        let (k, c) = if f == 149 { (raw::ESC, '\u{1b}') } else { (raw::RETURN, '\r') };
+        if f == 150 {
+            // About closes on a click or after its time out.
+            m.input(InputEvent::MouseButton { button: crate::input::MouseButton::Left, pressed: true });
+            frames(&mut ed, &mut m, 2);
+            m.input(InputEvent::MouseButton { button: crate::input::MouseButton::Left, pressed: false });
+        } else {
+            key(&mut m, k, Some(c));
+        }
+        frames(&mut ed, &mut m, 3);
+        assert!(!ed.in_dialog(), "function {f}");
+        assert!(m.hw.dialogs.channel_index(dialogs::ED_CHANNEL).is_none());
+    }
+    // The text is drawn again with the syntax colours.
+    assert_eq!(m.hw.screens.get(EC_EDIT).unwrap().planes, 4);
 }

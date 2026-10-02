@@ -11,15 +11,16 @@
 //! [`Machine::vbl`]: while a program runs it forwards to the machine, and
 //! when the program stops control comes back to the editor.
 //!
+//! The dialogs (search, goto line, about...) are the Interface programs of
+//! the editor resource bank and the file selector is `Fsel$` (see
+//! `dialogs.rs`).
+//!
 //! Integration points not wired yet:
-//! * TODO(dialogs): the original's dialogs (file selector, search,
-//!   about...) are Interface programs of the resource bank; until the
-//!   Interface system and `Fsel$` exist, prompts are typed in the status
-//!   line of the current window.
 //! * TODO(menus): the editor menu is drawn by `menu.rs` on the editor
 //!   screen rather than with the AMOS menu system.
 
 pub mod config;
+pub mod dialogs;
 pub mod direct;
 pub mod draw;
 pub mod highlight;
@@ -31,10 +32,12 @@ use crate::Machine;
 use crate::detok::latin1_to_string;
 use crate::gfx::Screen;
 use crate::input::{KeyPress, raw};
+use crate::interface::DVal;
 use crate::interp::verify::Verifier;
 use crate::interp::{RunState, StopInfo, StopReason, StopReasonOrError};
 use crate::program::Program;
 use config::EdConfig;
+use dialogs::Then;
 use draw::col;
 use resource::*;
 use text::{Doc, EditError};
@@ -66,33 +69,6 @@ pub enum Mode {
     DirectRunning,
 }
 
-/// A line typed in the status line (stands in for the dialogs).
-#[derive(Clone, Debug)]
-struct Prompt {
-    kind: PromptKind,
-    title: String,
-    text: Vec<u8>,
-    cursor: usize,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-enum PromptKind {
-    Load,
-    LoadNew,
-    SaveAs,
-    Merge,
-    MergeAscii,
-    SaveBlock,
-    SaveBlockAscii,
-    Search,
-    ReplaceWhat,
-    ReplaceWith,
-    GotoLine,
-    SetTab,
-    /// Yes / No question, then the function to call.
-    Confirm(u16),
-}
-
 /// The editor.
 pub struct Editor {
     pub cfg: EdConfig,
@@ -115,7 +91,17 @@ pub struct Editor {
     clipboard: Vec<Vec<u8>>,
     search: Vec<u8>,
     replace: Vec<u8>,
-    prompt: Option<Prompt>,
+    /// Dialog or file selector in progress, and the current screen to
+    /// restore after it.
+    modal: Option<dialogs::Modal>,
+    dialog_screen: Option<Option<usize>>,
+    /// Search options (`Ed_SchMode`): bit 0 upper case = lower case, bit 1
+    /// backwards, bit 2 in the block, bit 3 all occurrences.
+    search_mode: u16,
+    /// Text buffer size shown as "Free" (`Set Text Buffer`).
+    text_buffer: i64,
+    /// The "save changes?" question was answered for the function called.
+    skip_saved: bool,
     direct: direct::DirectMode,
     blink: u32,
     mouse_prev: u8,
@@ -154,6 +140,7 @@ impl Editor {
                 .unwrap_or_else(Resource::defaults);
         let menu_root = menu::build(&cfg);
         let direct = direct::DirectMode::new(&cfg);
+        let search_mode = cfg.search_mode;
         let mut ed = Editor {
             insert: cfg.insert,
             cfg,
@@ -171,7 +158,11 @@ impl Editor {
             clipboard: Vec::new(),
             search: Vec::new(),
             replace: Vec::new(),
-            prompt: None,
+            modal: None,
+            dialog_screen: None,
+            search_mode,
+            text_buffer: TEXT_BUFFER,
+            skip_saved: false,
             direct,
             blink: 0,
             mouse_prev: 0,
@@ -566,6 +557,12 @@ impl Editor {
     }
 
     fn edit_vbl(&mut self, m: &mut Machine) {
+        if self.modal.is_some() {
+            self.modal_vbl(m);
+            if self.modal.is_some() || self.mode != Mode::Edit {
+                return;
+            }
+        }
         self.blink = self.blink.wrapping_add(1);
         if self.blink.is_multiple_of(16) {
             self.dirty = true;
@@ -576,7 +573,7 @@ impl Editor {
                 continue;
             }
             self.key(m, k);
-            if self.mode != Mode::Edit {
+            if self.mode != Mode::Edit || self.modal.is_some() {
                 return;
             }
         }
@@ -586,7 +583,7 @@ impl Editor {
             self.key(m, k);
         }
         self.mouse(m);
-        if self.mode == Mode::Edit && self.dirty && !self.menu.open {
+        if self.mode == Mode::Edit && self.dirty && !self.menu.open && self.modal.is_none() {
             self.dirty = false;
             self.redraw(m);
         }
@@ -599,10 +596,6 @@ impl Editor {
     /// `Ed_Key`: a key press in the editor.
     pub fn key(&mut self, m: &mut Machine, k: KeyPress) {
         self.dirty = true;
-        if self.prompt.is_some() {
-            self.prompt_key(m, k);
-            return;
-        }
         self.alert = None;
         if let Some(f) = self.cfg.function_for_key(&k) {
             self.function(m, f);
@@ -683,7 +676,8 @@ impl Editor {
             24 => self.doc_mut().tab(tabs),
             25 => self.doc_mut().untab(tabs),
             26 => {
-                self.open_prompt(PromptKind::SetTab, 117, self.cfg.tabs.to_string().as_bytes());
+                let t = self.cfg.tabs as i32;
+                self.dialog(m, dialogs::label::SET_TAB, &[(2, DVal::Int(t))], Then::SetTab);
                 Ok(())
             }
             27 | 152..=167 | 183 => Err(self.message_alert(13)),
@@ -696,17 +690,18 @@ impl Editor {
             31 => self.doc_mut().goto_label(false),
             32 => self.doc_mut().goto_label(true),
             33 => {
-                self.open_prompt(PromptKind::Load, 72, b"");
+                if !self.saved_check(m, 33) {
+                    self.file_selector(m, 70, Then::Load);
+                }
                 Ok(())
             }
             34 => {
-                let n = bytes(&self.doc().name);
-                self.open_prompt(PromptKind::SaveAs, 76, &n);
+                self.file_selector(m, 74, Then::SaveAs(None));
                 Ok(())
             }
             35 => {
                 if self.doc().name.is_empty() {
-                    self.open_prompt(PromptKind::SaveAs, 76, b"");
+                    self.file_selector(m, 74, Then::SaveAs(None));
                 } else {
                     let name = self.doc().name.clone();
                     self.alert(format!("{}{name}", self.cfg.message(154)));
@@ -731,7 +726,7 @@ impl Editor {
                 Ok(())
             }
             61 => {
-                self.open_prompt(PromptKind::LoadNew, 72, b"");
+                self.file_selector(m, 70, Then::LoadNew);
                 Ok(())
             }
             62 => self.doc_mut().block_cut().map(|l| self.clipboard = l),
@@ -742,13 +737,16 @@ impl Editor {
             64 => self.doc_mut().delete_to_start(),
             65 => self.doc_mut().undo(),
             66 => {
-                let s = self.search.clone();
-                self.open_prompt(PromptKind::Search, 27, &s);
+                self.search_dialog(m);
                 Ok(())
             }
             67 | 68 => {
-                let s = self.search.clone();
-                self.doc_mut().search(&s, f == 67, true)
+                if self.search.is_empty() {
+                    self.search_dialog(m);
+                    Ok(())
+                } else {
+                    self.do_search(f == 68)
+                }
             }
             70 => {
                 let a = self.last_alert.clone();
@@ -767,7 +765,7 @@ impl Editor {
                 Ok(())
             }
             76 => {
-                self.open_prompt(PromptKind::GotoLine, 113, b"");
+                self.dialog(m, dialogs::label::GOTO_LINE, &[], Then::GotoLine);
                 Ok(())
             }
             77 => {
@@ -784,35 +782,39 @@ impl Editor {
                 self.doc_mut().indent(tabs)
             }
             80 => {
-                if self.doc().modified {
-                    self.open_prompt(PromptKind::Confirm(1080), 122, b"");
-                } else {
+                if !self.saved_check(m, 80) {
                     self.new_program();
                 }
                 Ok(())
             }
             81 => {
-                self.close_window();
+                if !self.saved_check(m, 81) {
+                    self.close_window();
+                }
                 Ok(())
             }
             82 => {
-                if self.docs.iter().any(|d| d.modified) {
-                    self.open_prompt(PromptKind::Confirm(1082), 20, b"");
-                } else {
+                // `Ed_Quit`: confirmation if asked by the configuration.
+                if self.cfg.quit_flags & 1 != 0 {
+                    self.dialog(m, dialogs::label::QUIT, &[], Then::Quit);
+                } else if !self.saved_check(m, 1082) {
                     self.quit_requested = true;
                 }
                 Ok(())
             }
             83 => {
-                self.info();
+                if let Err(e) = self.doc_mut().commit() {
+                    return self.edit_error(e);
+                }
+                self.infos(m);
                 Ok(())
             }
             84 => {
-                self.open_prompt(PromptKind::Merge, 80, b"");
+                self.file_selector(m, 78, Then::Merge);
                 Ok(())
             }
             85 => {
-                self.open_prompt(PromptKind::MergeAscii, 88, b"");
+                self.file_selector(m, 86, Then::MergeAscii);
                 Ok(())
             }
             87 => self.doc_mut().toggle_fold(),
@@ -824,30 +826,41 @@ impl Editor {
             }
             94 => self.doc_mut().redo(),
             97 => {
-                self.open_prompt(PromptKind::SaveBlockAscii, 84, b"");
+                self.file_selector(m, 82, Then::SaveBlockAscii);
                 Ok(())
             }
             98 => {
-                self.open_prompt(PromptKind::SaveBlock, 92, b"");
+                self.file_selector(m, 90, Then::SaveBlock);
                 Ok(())
             }
             99 => {
-                let s = self.search.clone();
-                self.open_prompt(PromptKind::ReplaceWhat, 27, &s);
+                self.replace_dialog(m);
                 Ok(())
             }
-            100 | 101 => self.replace_next(f == 100),
+            100 | 101 => {
+                if self.search.is_empty() {
+                    self.replace_dialog(m);
+                    Ok(())
+                } else {
+                    self.do_replace(f == 101)
+                }
+            }
             103 => {
                 self.open_window();
                 Ok(())
             }
             145 => Err(self.message_alert(222)),
             149 => {
-                self.alert(format!("{} - {}", self.cfg.message(21), latin1_to_string(b"no extension loaded")));
+                self.about_extension(m, 0);
                 Ok(())
             }
             150 => {
-                self.alert(format!("{} {}", self.cfg.message(21), self.cfg.message(22)));
+                self.about(m);
+                Ok(())
+            }
+            114 => {
+                let b = self.text_buffer as i32;
+                self.dialog(m, dialogs::label::SET_BUF, &[(2, DVal::Int(b))], Then::SetBuffer);
                 Ok(())
             }
             181 => self.doc_mut().block_all(),
@@ -885,37 +898,12 @@ impl Editor {
         self.dirty = true;
     }
 
-    /// `Ed_Infos` (Amiga+I).
-    fn info(&mut self) {
-        let prg = self.doc().to_program();
-        let banks: usize = self.doc().banks.iter().map(|b| b.length()).sum();
-        self.alert(format!(
-            "{}{}{}  {}{}{}",
-            self.cfg.message(170),
-            prg.source.len(),
-            self.cfg.message(174),
-            self.cfg.message(171),
-            banks,
-            self.cfg.message(174)
-        ));
-    }
-
-    fn replace_next(&mut self, forward: bool) -> Result<(), EditError> {
-        let (s, r) = (self.search.clone(), self.replace.clone());
-        let d = self.doc_mut();
-        if !d.replace_here(&s, &r, true)? {
-            d.search(&s, forward, true)?;
-            d.replace_here(&s, &r, true)?;
-        }
-        Ok(())
-    }
-
     // ------------------------------------------------------------------
     // Windows
     // ------------------------------------------------------------------
 
     /// `Ed_OpenWindow`: a new window for a new program.
-    fn open_window(&mut self) {
+    pub(crate) fn open_window(&mut self) {
         if self.docs.len() >= self.rows_total() / 3 {
             return self.alert_message(3);
         }
@@ -926,7 +914,7 @@ impl Editor {
     }
 
     /// `Ed_CloseWindowQuit`.
-    fn close_window(&mut self) {
+    pub(crate) fn close_window(&mut self) {
         if self.docs.len() == 1 {
             self.new_program();
             return;
@@ -962,146 +950,6 @@ impl Editor {
             d.left = d.x + 10 - tx;
         }
         self.dirty = true;
-    }
-
-    // ------------------------------------------------------------------
-    // Prompts
-    // ------------------------------------------------------------------
-
-    fn open_prompt(&mut self, kind: PromptKind, title_msg: usize, init: &[u8]) {
-        let title = self.cfg.message(title_msg);
-        let title = match kind {
-            PromptKind::Confirm(_) => format!("{title} (Y/N)"),
-            _ => title,
-        };
-        self.prompt = Some(Prompt { kind, title, text: init.to_vec(), cursor: init.len() });
-        self.dirty = true;
-    }
-
-    fn prompt_key(&mut self, m: &mut Machine, k: KeyPress) {
-        let Some(mut p) = self.prompt.take() else { return };
-        if let PromptKind::Confirm(f) = p.kind {
-            match k.ascii.to_ascii_lowercase() {
-                b'y' => self.function(m, f),
-                b'n' | 27 => {}
-                _ => self.prompt = Some(p),
-            }
-            return;
-        }
-        match (k.raw, k.ascii) {
-            (raw::ESC, _) | (_, 27) => return,
-            (raw::RETURN | raw::ENTER, _) | (_, 13) => {
-                self.prompt_done(m, p.kind, p.text);
-                return;
-            }
-            (raw::LEFT, _) => p.cursor = p.cursor.saturating_sub(1),
-            (raw::RIGHT, _) => p.cursor = (p.cursor + 1).min(p.text.len()),
-            (raw::BACKSPACE, _) | (_, 8) => {
-                if p.cursor > 0 {
-                    p.cursor -= 1;
-                    p.text.remove(p.cursor);
-                }
-            }
-            (raw::DEL, _) => {
-                if p.cursor < p.text.len() {
-                    p.text.remove(p.cursor);
-                }
-            }
-            (_, c) if c >= 32 && p.text.len() < 200 => {
-                p.text.insert(p.cursor, c);
-                p.cursor += 1;
-            }
-            _ => {}
-        }
-        self.prompt = Some(p);
-    }
-
-    fn prompt_done(&mut self, m: &mut Machine, kind: PromptKind, text: Vec<u8>) {
-        let s = latin1_to_string(&text);
-        let s = s.trim().to_string();
-        let r: Result<(), String> = match kind {
-            PromptKind::Load => self.load(m, &s),
-            PromptKind::LoadNew => {
-                self.open_window();
-                let r = self.load(m, &s);
-                if r.is_err() {
-                    self.close_window();
-                }
-                r
-            }
-            PromptKind::SaveAs => self.save_as(m, &s),
-            PromptKind::Merge | PromptKind::MergeAscii => match m.hw.files.read(&s) {
-                Ok(data) => {
-                    let d = &mut self.docs[self.current];
-                    let r = if data.starts_with(b"AMOS") {
-                        match Program::load(&data) {
-                            Ok(p) => d.paste(&p.lines().map(|(_, l)| l.to_vec()).collect::<Vec<_>>()),
-                            Err(_) => Err(EditError::NotFound),
-                        }
-                    } else {
-                        d.paste_text(&data)
-                    };
-                    r.map_err(|e| self.cfg.message(e.message()))
-                }
-                Err(_) => Err(self.cfg.message(184)),
-            },
-            PromptKind::SaveBlock | PromptKind::SaveBlockAscii => {
-                let d = &mut self.docs[self.current];
-                match d.block_copy() {
-                    Ok(lines) => {
-                        let data = if kind == PromptKind::SaveBlock {
-                            let prg = Program { source: lines.concat(), ..Program::default() };
-                            prg.save()
-                        } else {
-                            let mut out = Vec::new();
-                            for l in &lines {
-                                out.extend(crate::detok::detok_line(l));
-                                out.push(b'\n');
-                            }
-                            out
-                        };
-                        m.hw.files.write(&s, &data).map_err(|_| self.cfg.message(184))
-                    }
-                    Err(e) => Err(self.cfg.message(e.message())),
-                }
-            }
-            PromptKind::Search => {
-                self.search = text;
-                let s = self.search.clone();
-                self.doc_mut().search(&s, true, true).map_err(|e| self.cfg.message(e.message()))
-            }
-            PromptKind::ReplaceWhat => {
-                self.search = text;
-                let r = self.replace.clone();
-                self.open_prompt(PromptKind::ReplaceWith, 31, &r);
-                Ok(())
-            }
-            PromptKind::ReplaceWith => {
-                self.replace = text;
-                let s = self.search.clone();
-                self.doc_mut().search(&s, true, true).map_err(|e| self.cfg.message(e.message()))
-            }
-            PromptKind::GotoLine => match s.parse::<usize>() {
-                Ok(n) if n > 0 => {
-                    let d = self.doc_mut();
-                    let r = d.goto_row(n - 1);
-                    d.x = 0;
-                    r.map_err(|e| self.cfg.message(e.message()))
-                }
-                _ => Ok(()),
-            },
-            PromptKind::SetTab => {
-                if let Ok(n) = s.parse::<u16>() {
-                    self.cfg.tabs = n.clamp(1, 16);
-                }
-                Ok(())
-            }
-            PromptKind::Confirm(_) => Ok(()),
-        };
-        if let Err(e) = r {
-            self.alert(e);
-        }
-        self.ensure_visible();
     }
 
     // ------------------------------------------------------------------
@@ -1145,7 +993,7 @@ impl Editor {
             }
             return;
         }
-        if pressed & 2 != 0 && self.prompt.is_none() {
+        if pressed & 2 != 0 {
             if let Some(s) = m.hw.screens.get_mut(EC_EDIT) {
                 self.menu.open(s);
                 self.menu.track(&self.menu_root, mx, my);
@@ -1367,7 +1215,7 @@ impl Editor {
             }
         }
         // Cursor (current window only), blinking.
-        if w == self.current && self.prompt.is_none() && (self.blink / 16).is_multiple_of(2) {
+        if w == self.current && (self.blink / 16).is_multiple_of(2) {
             let r = d.cursor_row() as i32 - d.top as i32;
             let c = d.x as i32 - d.left as i32;
             if (0..ty).contains(&r) && (0..tx as i32).contains(&c) {
@@ -1400,16 +1248,6 @@ impl Editor {
         let width = ((sx - 32 - 64) / 8) as usize;
         let y = y0 + 1;
         let cur = w == self.current;
-        if cur && let Some(p) = &self.prompt {
-            let mut line = bytes(&p.title);
-            line.push(b' ');
-            let start = line.len();
-            line.extend_from_slice(&p.text);
-            draw::text_n(s, x0, y, &line, width, col::STATUS_PEN, col::STATUS_PAPER);
-            let cx = x0 + ((start + p.cursor).min(width - 1) as i32) * 8;
-            draw::invert(s, cx, y, cx + 8, y + 8, col::STATUS_PEN, col::STATUS_PAPER);
-            return;
-        }
         if cur && let Some(a) = &self.alert {
             let t = bytes(a);
             draw::fill(s, x0, y, x0 + width as i32 * 8, y + 8, col::ALERT_PAPER);

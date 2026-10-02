@@ -167,6 +167,30 @@ impl Hardware {
         }
     }
 
+    /// Starts the file selector outside a BASIC function (the editor's
+    /// `Ed_File_Selector`): drive it with [`Hardware::fsel_step`] at each
+    /// frame.
+    pub fn fsel_start(
+        &mut self,
+        it: &mut Interp,
+        path: &[u8],
+        def: &[u8],
+        t1: &[u8],
+        t2: &[u8],
+    ) -> R<()> {
+        self.dialogs.fsel = None;
+        self.fs_start(it, path, def, t1, t2)
+    }
+
+    /// One frame of a file selector started with [`Hardware::fsel_start`]:
+    /// the chosen name when it closes (empty when cancelled).
+    pub fn fsel_step(&mut self, it: &mut Interp) -> Option<Vec<u8>> {
+        if self.dialogs.fsel.is_none() {
+            return Some(Vec::new());
+        }
+        self.fs_step(it)
+    }
+
     fn fs_vars(&mut self) -> Option<&mut Vec<DVal>> {
         let i = self.dialogs.channel_index(FSEL_CHANNEL)?;
         Some(&mut self.dialogs.channels[i].vars)
