@@ -79,8 +79,15 @@ pub const PARAM_F: u32 = 128;
 /// (absolute addresses, see `runtime/strings.rs`).
 pub const STR_PTR: u32 = 136;
 pub const STR_END: u32 = 140;
+/// `Fix` (`Interp::fix`) as the `FixFlg` / `ExpFlg` words of the original,
+/// refreshed by the runtime after every operation.
+pub const FIX_FLG: u32 = 144;
+pub const EXP_FLG: u32 = 148;
+/// Scratch buffers of the number formatting helpers (128 bytes each).
+pub const SCR_A: u32 = 192;
+pub const SCR_B: u32 = 320;
 /// Start of the global variables.
-pub const GLOBALS: u32 = 192;
+pub const GLOBALS: u32 = 512;
 
 pub const PAGE: u32 = 65536;
 

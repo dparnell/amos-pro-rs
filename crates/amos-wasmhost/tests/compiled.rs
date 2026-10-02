@@ -422,3 +422,81 @@ fn def_fn_compiled() {
         same_budget(p, 2);
     }
 }
+
+#[test]
+fn number_text_functions() {
+    // Str$ of floats under every Fix, single and double precision.
+    for double in [false, true] {
+        let mut p = String::new();
+        if double {
+            p.push_str("Set Double Precision\n");
+        }
+        p.push_str("Dim V#(11)\nV#(0)=0 : V#(1)=1 : V#(2)=-1.5 : V#(3)=3.14159265 : V#(4)=1/3.0 : V#(5)=123456789.0\n");
+        p.push_str("V#(6)=0.000012345 : V#(7)=-98765.4321 : V#(8)=1E+20 : V#(9)=2.5E-30 : V#(10)=7 : V#(11)=0.1\n");
+        p.push_str(
+            "For F=-17 To 17\nFix F\nFor I=0 To 11 : A$=Str$(V#(I)) : Print A$;\"|\"; : Next\nPrint\nNext F\nFix 16\n",
+        );
+        p.push_str("For I=1 To 300 : X#=I*1.37-150 : X#=X#*X#*X#/97 : Print Str$(X#);Str$(Val(Str$(X#))); : Next\n");
+        assert_eq!(same(&p).end, StopReasonOrError::Stop(StopReason::End), "{p}");
+    }
+    // Val of all kinds of texts.
+    let texts = [
+        "12",
+        " -12",
+        "+7",
+        "1 2 3",
+        "1.5",
+        ".5",
+        "5.",
+        "1e3",
+        "1E-3",
+        "1e",
+        "1e+",
+        "2.5e 2",
+        "- 3.5",
+        "$FF",
+        "$ff",
+        "-$10",
+        "$123456789",
+        "%101",
+        "% 1 0 1",
+        "%",
+        "$",
+        "abc",
+        "",
+        "  ",
+        "99999999999",
+        "2147483647",
+        "-2147483648",
+        "1..2",
+        "3x",
+        "0.000001",
+        "123456789012",
+        "1e40",
+        "1e-50",
+        "12345.678e-2",
+        "0",
+        "-0",
+        "-0.0",
+        "1e0005",
+        "0.5e00001",
+    ];
+    for double in [false, true] {
+        let mut p = String::new();
+        if double {
+            p.push_str("Set Double Precision\n");
+        }
+        for t in texts {
+            p.push_str(&format!("A$=\"{t}\" : V=Val(A$) : W#=Val(A$) : Print Val(A$);V;W#\n"));
+        }
+        same(&p);
+    }
+    // Hex$, Bin$, Repeat$.
+    let p = "For I=-3 To 40\nPrint Hex$(I*123457);Hex$(I*123457,I);Bin$(I*77);Bin$(-I,I)\nNext\nPrint Repeat$(\"ab\",3);Len(Repeat$(\"\",0))\nPrint Repeat$(\"x\",207)";
+    let o = same(p);
+    assert_eq!(o.end, StopReasonOrError::Error(errors::ILLEGAL_FUNCTION_CALL));
+    // Values of Val used as numbers (dynamic type).
+    same(
+        "A=Val(\"3\")+Val(\"2.5\") : B#=Val(\"1e3\")/Val(\"$10\") : Print A;B#;Val(\"7\")*Val(\"7\");Str$(Val(\"4.5\"));Str$(Val(\"4\"))",
+    );
+}

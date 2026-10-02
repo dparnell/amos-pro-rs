@@ -1087,7 +1087,23 @@ fn native_function(t: u16, args: &[Expr]) -> Option<Nf> {
         RIGHT_S if s(0) && num(1) => Nf::Right,
         MID_S if s(0) && num(1) && num(2) => Nf::Mid3,
         MID_S_2 if s(0) && num(1) => Nf::Mid2,
-        STR_S if known(0) => Nf::Str,
+        STR_S if num(0) => Nf::Str,
+        VAL if s(0) => Nf::Val,
+        HEX_S | BIN_S if num(0) && args.len() == 1 => {
+            if t == HEX_S {
+                Nf::Hex
+            } else {
+                Nf::Bin
+            }
+        }
+        HEX_S_2 | BIN_S_2 if num(0) && num(1) && args.len() == 2 => {
+            if t == HEX_S_2 {
+                Nf::Hex
+            } else {
+                Nf::Bin
+            }
+        }
+        REPEAT_S if s(0) && num(1) => Nf::Repeat,
         INSTR if s(0) && s(1) => Nf::Instr2,
         INSTR_2 if s(0) && s(1) && num(2) => Nf::Instr3,
         UPPER_S if s(0) => Nf::Upper,

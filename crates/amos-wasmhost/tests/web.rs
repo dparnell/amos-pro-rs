@@ -90,6 +90,8 @@ async fn compiled(src: &str, budget: usize) -> (String, StopReasonOrError, usize
 }
 
 const PROGRAMS: &[&str] = &[
+    "For F=-17 To 17 : Fix F : Print Str$(3.14159);Str$(-0.00012345);Str$(1E+20) : Next : Fix 16\nFor I=1 To 200 : X#=I*1.37-150 : Print Str$(X#*X#/97);Val(Str$(X#)); : Next\nPrint Val(\"$FF\");Val(\"%101\");Val(\"1 2.5e 2\");Val(\"x\");Hex$(-1,4);Bin$(5);Repeat$(\"a\",2)",
+    "Set Double Precision\nFor F=-17 To 17 : Fix F : Print Str$(3.14159);Str$(-0.00012345);Str$(1E+20) : Next : Fix 16\nFor I=1 To 200 : X#=I*1.37-150 : Print Str$(X#*X#/97);Val(Str$(X#)); : Next\nPrint Val(\"12345.678e-2\");Val(\"1e40\");Val(\"-0.0\")",
     "For I=1 To 300000\nA$=Str$(I)+\"-\"+Upper$(\"abc\")+Space$(I mod 50)\nNext\nPrint A$",
     "Dim S$(300)\nFor I=0 To 300 : S$(I)=\"k\"+Str$(I) : Next\nFor J=1 To 60\nFor I=0 To 300 : T$=S$(I)+String$(\"x\",200) : Next\nNext\nSort S$(0)\nPrint S$(0);S$(300);Match(S$(0),\"k 150\")",
     "R[\"\",10]\nPrint Len(Param$);Left$(Param$,30)\nProcedure R[S$,N]\nT$=S$+Chr$(65+N)\nIf N=0 Then Pop Proc[T$]\nFor I=1 To 300 : G$=T$+Str$(I) : Next\nR[T$,N-1]\nEnd Proc[Param$+T$]",

@@ -58,7 +58,7 @@
         rt.dyn_op(env, mem, op, a, ta, b, tb)
     });
     def!(l, "host" "next_done" |rt, env, mem, p: i32| -> i32 { rt.next_done(env, mem, p) });
-    def!(l, "host" "str_f" |rt, env, mem, x: f64| -> i32 { rt.str_f(env, mem, x) });
+    def!(l, "host" "val_double" |rt, env, mem, a: i32| -> f64 { rt.val_double(mem, a) });
     def!(l, "host" "param_s" |rt, env, mem| -> i32 { rt.param_s(env, mem) });
     def!(l, "rt" "int_f" |rt, env, mem, x: f64| -> f64 { rt.int_f(x) });
     def!(l, "host" "wait" |rt, env, mem, p: i32, n: i32| -> i32 { rt.wait(env, mem, p, n) });

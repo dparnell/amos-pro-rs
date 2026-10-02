@@ -301,6 +301,8 @@ impl Runtime {
         st_i32(mem, layout::DEPTH, fs.len() as i32);
         st_i32(mem, layout::PARAM_E, it.param_e);
         st_f64(mem, layout::PARAM_F, it.param_f);
+        st_i32(mem, layout::FIX_FLG, it.fix.fix_flg() as i32);
+        st_i32(mem, layout::EXP_FLG, it.fix.exp_flg() as i32);
         self.mirror(it, mem);
     }
 
@@ -1614,6 +1616,13 @@ impl Runtime {
     pub fn str_f(&mut self, env: &mut dyn Env, mem: &mut [u8], x: f64) -> i32 {
         let s = env.parts().0.format_float(x);
         self.alloc(mem, astr(s.as_bytes()))
+    }
+
+    /// Double precision value of the float text at `a` (the conversion of
+    /// `tokenise::parse_number`, used by `Val`).
+    pub fn val_double(&self, mem: &mut [u8], a: i32) -> f64 {
+        let t = self.str_bytes(mem, a);
+        crate::tokenise::parse_float_text(&String::from_utf8_lossy(t))
     }
 
     pub fn param_s(&mut self, env: &mut dyn Env, mem: &mut [u8]) -> i32 {

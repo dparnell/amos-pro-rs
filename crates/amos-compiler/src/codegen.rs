@@ -41,6 +41,7 @@ use crate::CompileError;
 use crate::ffp::{self as ffp_helpers, H};
 use crate::ir::*;
 use crate::lower::is_comparison;
+use crate::numfmt::{self as num_helpers, N};
 use crate::strings::{self as string_helpers, S};
 
 macro_rules! vt {
@@ -125,7 +126,7 @@ imports! {
     SortArray = "rt" "sort_array" (i);
     MatchArray = "rt" "match_array" (i) -> i;
     NextDone = "host" "next_done" (i) -> i;
-    StrF = "host" "str_f" (f) -> i;
+    ValDouble = "host" "val_double" (i) -> f;
     ParamS = "host" "param_s" () -> i;
     IntF = "rt" "int_f" (f) -> f;
     Pow = "rt" "pow" (f f) -> f;
@@ -186,6 +187,11 @@ struct Gen<'a> {
     fn_ffp: u32,
     /// Function index of the first string helper.
     fn_str: u32,
+    /// Function index of the first number <-> text helper.
+    fn_num: u32,
+    /// The program uses the number <-> text helpers (their code is large:
+    /// left out of programs that do not).
+    uses_num: bool,
     /// Positions of the string constants (index = slot in the table).
     consts: Vec<usize>,
     /// Position of the instruction being compiled.
@@ -211,6 +217,12 @@ impl<'a> Gen<'a> {
 
     fn call(&mut self, f: Imp) {
         self.w(W::Call(f as u32));
+    }
+
+    /// Calls a number <-> text helper of the module.
+    fn nhelper(&mut self, h: N) {
+        self.uses_num = true;
+        self.w(W::Call(self.fn_num + h as u32));
     }
 
     /// Calls a string helper of the module.
@@ -920,13 +932,59 @@ impl<'a> Gen<'a> {
                 self.check_sentinel(errors::ILLEGAL_FUNCTION_CALL);
             }
             Nf::Str => {
-                if a[0].ty == Ty::Int {
-                    self.expr(&a[0]);
-                    self.shelper(S::StrI);
-                } else {
-                    self.expr(&a[0]);
-                    self.call(Imp::StrF);
+                self.expr(&a[0]);
+                match a[0].ty {
+                    Ty::Int => self.shelper(S::StrI),
+                    Ty::Float => {
+                        self.i32c(self.double as i32);
+                        self.nhelper(N::StrF);
+                    }
+                    _ => {
+                        // Integer or float as known at run time.
+                        let (x, t) = (self.tmp(ValType::F64), self.tmp(ValType::I32));
+                        self.set(t);
+                        self.set(x);
+                        self.get(t);
+                        self.if_(BlockType::Result(ValType::I32));
+                        self.get(x);
+                        self.i32c(self.double as i32);
+                        self.nhelper(N::StrF);
+                        self.else_();
+                        self.get(x);
+                        self.w(W::I32TruncSatF64S);
+                        self.shelper(S::StrI);
+                        self.end();
+                        self.release(x, ValType::F64);
+                        self.release(t, ValType::I32);
+                    }
                 }
+            }
+            Nf::Val => {
+                self.expr(&a[0]);
+                self.i32c(self.double as i32);
+                self.nhelper(N::Val);
+                self.hdr(layout::TAG);
+            }
+            Nf::Hex | Nf::Bin => {
+                self.int_arg(&a[0]);
+                self.i32c((nf == Nf::Hex) as i32);
+                match a.get(1) {
+                    Some(d) => self.int_arg(d),
+                    None => self.i32c(-1),
+                }
+                self.nhelper(N::Radix);
+            }
+            Nf::Repeat => {
+                self.expr(&a[0]);
+                self.int_arg(&a[1]);
+                let t = self.tmp(ValType::I32);
+                self.w(W::LocalTee(t));
+                self.i32c(207);
+                self.w(W::I32GeU);
+                self.raise_if(errors::ILLEGAL_FUNCTION_CALL);
+                self.get(t);
+                self.release(t, ValType::I32);
+                self.nhelper(N::Repeat);
             }
             Nf::Instr2 | Nf::Instr3 => {
                 self.expr(&a[0]);
@@ -2401,6 +2459,10 @@ pub fn module(
         let t = type_of(&mut types, p, r);
         funcs.function(t);
     }
+    for (_, _, p, r) in num_helpers::HELPERS {
+        let t = type_of(&mut types, p, r);
+        funcs.function(t);
+    }
 
     let mut g = Gen {
         prg,
@@ -2419,6 +2481,8 @@ pub fn module(
         fn_idiv: n_imports + 2,
         fn_ffp: n_imports + 3,
         fn_str: n_imports + 3 + ffp_helpers::HELPERS.len() as u32,
+        fn_num: n_imports + 3 + (ffp_helpers::HELPERS.len() + string_helpers::HELPERS.len()) as u32,
+        uses_num: false,
         consts: structure::string_constants(prg),
         pos: 0,
     };
@@ -2438,6 +2502,22 @@ pub fn module(
     let first_str = n_imports + 3 + ffp_helpers::HELPERS.len() as u32;
     for (h, ..) in string_helpers::HELPERS {
         code.function(&string_helpers::body(*h, first_str, Imp::StrChunk as u32));
+    }
+    let ix = num_helpers::Idx {
+        ffp: n_imports + 3,
+        str: first_str,
+        num: first_str + string_helpers::HELPERS.len() as u32,
+        val_double: Imp::ValDouble as u32,
+    };
+    for (h, ..) in num_helpers::HELPERS {
+        if g.uses_num {
+            code.function(&num_helpers::body(*h, &ix, prg.double));
+        } else {
+            let mut f = Function::new([]);
+            f.instruction(&W::Unreachable);
+            f.instruction(&W::End);
+            code.function(&f);
+        }
     }
 
     let mut globals = GlobalSection::new();

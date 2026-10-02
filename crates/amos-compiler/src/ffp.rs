@@ -35,6 +35,7 @@ pub enum H {
     FDiv,
     FCmp,
     I2f,
+    ToLong,
 }
 
 const I: ValType = ValType::I32;
@@ -61,6 +62,7 @@ pub const HELPERS: &[(H, &str, &[ValType], &[ValType])] = &[
     (H::FDiv, "fdiv", &[F, F], &[F]),
     (H::FCmp, "fcmp", &[F, F], &[I]),
     (H::I2f, "i2f", &[I], &[F]),
+    (H::ToLong, "to_long", &[I], &[I]),
 ];
 
 /// Pushes `(r & !0xFF) | b` (`setb`) for locals r, b.
@@ -98,6 +100,7 @@ pub fn body(h: H, base: u32) -> Function {
         H::Div => &[(17, I)],
         H::Cmp => &[(2, I)],
         H::FromLong => &[(3, I)],
+        H::ToLong => &[(3, I)],
         _ => &[],
     };
     let mut f = Function::new(locals.iter().copied());
@@ -420,6 +423,32 @@ pub fn body(h: H, base: u32) -> Function {
             s.local_get(0).i32_const(8).i32_shl();
             s.local_get(2).i32_const(0x40).i32_add().i32_const(0x7F).i32_and().i32_or();
             s.local_get(1).i32_const(7).i32_shl().i32_or();
+        }
+        H::ToLong => {
+            // `ffp_to_long`: truncation toward zero, saturating. x=0; e=1 neg=2 m=3
+            s.local_get(0).i32_const(0x7F).i32_and().i32_const(0x40).i32_sub().local_set(1);
+            s.local_get(0)
+                .i32_eqz()
+                .local_get(1)
+                .i32_const(0)
+                .i32_lt_s()
+                .i32_or()
+                .if_(empty())
+                .i32_const(0)
+                .return_()
+                .end();
+            s.local_get(0).i32_const(0x80).i32_and().local_set(2);
+            s.local_get(1).i32_const(31).i32_gt_s().if_(empty());
+            s.i32_const(i32::MIN).i32_const(i32::MAX).local_get(2).select().return_();
+            s.end();
+            s.local_get(0).i32_const(8).i32_shr_s().i32_const(0xFF_FFFF).i32_and().local_set(3);
+            s.local_get(1).i32_const(24).i32_sub().local_tee(1).i32_const(0).i32_lt_s().if_(empty());
+            s.local_get(3).i32_const(0).local_get(1).i32_sub().i32_shr_s().local_set(3);
+            s.else_();
+            s.local_get(3).local_get(1).i32_shl().local_set(3);
+            s.end();
+            s.local_get(2).if_(empty()).i32_const(0).local_get(3).i32_sub().return_().end();
+            s.local_get(3);
         }
         H::FAdd | H::FSub | H::FMul | H::FDiv => {
             let op = match h {

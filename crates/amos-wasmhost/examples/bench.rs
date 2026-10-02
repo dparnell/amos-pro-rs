@@ -116,6 +116,14 @@ const PROGRAMS: &[(&str, &str)] = &[
         "N=0 : A$=\"The quick brown fox jumps over the lazy dog\"\nFor I=1 To 100000\nB$=Mid$(A$,I mod 40+1,5)\nIf B$>\"m\" Then Inc N\nC$=Left$(A$,10)+Right$(A$,5)-\"o\"\nN=N+Instr(A$,\"o\",I mod 30+1)+Len(C$)+Asc(B$)\nD$=Upper$(B$)+Chr$(65+I mod 26)+Flip$(B$)+String$(\"*\",3)+Space$(2)\nIf D$=B$ Then Inc N\nNext\nPrint N;D$",
     ),
     (
+        "val / str$ / hex$",
+        "S=0 : F#=0\nFor I=1 To 50000\nA$=Str$(I)+\".25\"\nF#=F#+Val(A$)\nS=(S+Val(Str$(I*3))+Len(Hex$(I))+Len(Bin$(I,16))+Val(Hex$(I))) mod 100000\nB$=Str$(F#/7)\nNext\nPrint S;F#;B$",
+    ),
+    (
+        "val / str$ double",
+        "Set Double Precision\nS=0 : F#=0\nFor I=1 To 50000\nA$=Str$(I)+\".25\"\nF#=F#+Val(A$)\nS=(S+Val(Str$(I*3))+Len(Hex$(I,8))) mod 100000\nB$=Str$(F#/7)\nNext\nPrint S;F#;B$",
+    ),
+    (
         "procedures (fib 24)",
         "FIB[24]\nPrint Param\nProcedure FIB[N]\nIf N<2 Then Pop Proc[N]\nFIB[N-1] : A=Param\nFIB[N-2]\nEnd Proc[A+Param]",
     ),
