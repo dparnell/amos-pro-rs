@@ -32,11 +32,11 @@ pub mod layout;
 pub mod runtime;
 pub mod structure;
 
-pub use runtime::{Env, Runtime, ST_CONTINUE, ST_STOP, ST_YIELD};
+pub use runtime::{Env, HeapKind, Runtime, ST_CONTINUE, ST_GROW, ST_STOP, ST_YIELD};
 
 /// Version of the module / runtime interface. A module records the version
 /// it was compiled for (exported global `amos_abi`).
-pub const ABI_VERSION: i32 = 2;
+pub const ABI_VERSION: i32 = 4;
 
 /// Status returned by the module's `run` export.
 pub const RUN_RUNNING: i32 = 1;

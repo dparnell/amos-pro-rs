@@ -25,12 +25,20 @@ use crate::errors;
 use crate::ffp::Ffp;
 use crate::interp::value::{AStr, STRING_MAX, Value, Var, astr, empty_str, float_to_int};
 use crate::interp::verify::{Compiled, GLOBAL};
-use crate::interp::{Ctl, Exc, Host, Interp, OnError, R, StopInfo, StopReason, StopReasonOrError, VarLoc};
+use crate::interp::{
+    Ctl, DataPtr, Exc, Host, Interp, OnError, ProcFrame, R, StopInfo, StopReason, StopReasonOrError, VarLoc,
+};
 use crate::tokens::*;
+
+mod arrays;
+pub use arrays::HeapKind;
 
 pub const ST_CONTINUE: i32 = -1;
 pub const ST_YIELD: i32 = -2;
 pub const ST_STOP: i32 = -3;
+/// `Runtime::dim` needs more memory (`Runtime::grow_bytes`): the host grows
+/// the module memory and calls it again.
+pub const ST_GROW: i32 = -4;
 
 /// The machine a compiled program runs on: the interpreter state (control
 /// stack, events, arrays...) and the rest of the machine.
@@ -110,12 +118,19 @@ pub struct Runtime {
     calls: HashMap<usize, Option<Rc<Call>>>,
     bridge_buf: Vec<u8>,
     stopped: Option<StopInfo>,
+    /// Procedure frames of returned calls, reused (no allocation per call:
+    /// the boxes go back into `Ctl::Proc` as they are).
+    #[allow(clippy::vec_box)]
+    frame_pool: Vec<Box<ProcFrame>>,
+    /// Arrays in linear memory.
+    heap: arrays::Heap,
 }
 
 impl Runtime {
     /// Runtime for the verified program `prg` (the one the interpreter was
-    /// started with); `base` is the address of the module's memory region.
-    pub fn new(prg: Rc<Compiled>, base: u32) -> Runtime {
+    /// started with); `base` is the address of the module's memory region,
+    /// `heap` where arrays are allocated.
+    pub fn new(prg: Rc<Compiled>, base: u32, heap: HeapKind) -> Runtime {
         let instrs = structure::instructions(&prg);
         let layout = Layout::new(&prg);
         let end_pos = structure::end_position(&prg.code);
@@ -146,6 +161,8 @@ impl Runtime {
             calls: HashMap::new(),
             bridge_buf: Vec::new(),
             stopped: None,
+            frame_pool: Vec::new(),
+            heap: arrays::Heap::new(heap, layout.size),
         }
     }
 
@@ -234,6 +251,7 @@ impl Runtime {
                 }
             }
         }
+        self.mark_arrays(mem, &mut mark);
         let mut live = 0;
         for (h, &marked) in mark.iter().enumerate().skip(1) {
             if self.live[h] && !marked && !self.pinned[h] {
@@ -288,6 +306,19 @@ impl Runtime {
             }
             _ => {}
         }
+    }
+
+    /// Address and type of the element `loc` (with an index) of an array in
+    /// linear memory; `None` if the array is kept in the interpreter.
+    fn linear_elem(&self, it: &mut Interp, mem: &mut [u8], loc: &VarLoc) -> Option<(u32, u8)> {
+        let flat = loc.index? as u32;
+        let base_loc = VarLoc { index: None, ..*loc };
+        if matches!(it.var_loc_slot(&base_loc), Var::Array(_)) {
+            return None;
+        }
+        let desc = ld_i32(mem, self.loc_addr(it, &base_loc)) as u32;
+        let (ty, count) = self.array_block(desc)?;
+        (flat < count).then(|| (desc + layout::ARR_DATA + flat * layout::elem_size(ty), ty))
     }
 
     fn is_resident(&self, scope: usize, slot: u16) -> bool {
@@ -347,6 +378,9 @@ impl Runtime {
         st_i32(mem, layout::FP, (self.base + self.layout.frame_base(fs.len())) as i32);
         st_i32(mem, layout::SCOPE, it.scope as i32);
         st_i32(mem, layout::ATT, (it.vbl_pending || self.gc_wanted) as i32);
+        st_i32(mem, layout::DEPTH, fs.len() as i32);
+        st_i32(mem, layout::PARAM_E, it.param_e);
+        st_f64(mem, layout::PARAM_F, it.param_f);
         self.mirror(it, mem);
     }
 
@@ -354,6 +388,7 @@ impl Runtime {
     fn mirror(&mut self, it: &Interp, mem: &mut [u8]) {
         let (mut addr, mut step, mut limit, mut body_point) = (0, 0, 0, 0);
         let (mut lo, mut hi) = (0, i32::MAX);
+        let (mut kind, mut start_pos, mut start_point) = (layout::TOP_OTHER, 0, 0);
         match it.ctl.last() {
             Some(Ctl::For { var, step: s, limit: l, body, exit }) => {
                 lo = *body as i32;
@@ -365,15 +400,36 @@ impl Runtime {
                         step = *s;
                         limit = *l;
                         body_point = bp;
+                        kind = layout::TOP_FOR;
                     }
                 }
             }
             Some(Ctl::Repeat { body, exit } | Ctl::Do { body, exit } | Ctl::While { body, exit, .. }) => {
                 lo = *body as i32;
                 hi = *exit as i32;
+                let bp = self.point_quiet(*body);
+                if bp >= 0 {
+                    body_point = bp;
+                    kind = match it.ctl.last() {
+                        Some(Ctl::Repeat { .. }) => layout::TOP_REPEAT,
+                        Some(Ctl::Do { .. }) => layout::TOP_DO,
+                        _ => layout::TOP_WHILE,
+                    };
+                }
+                if let Some(Ctl::While { start, .. }) = it.ctl.last() {
+                    let sp = self.point_quiet(*start);
+                    if sp < 0 {
+                        kind = layout::TOP_OTHER;
+                    }
+                    start_pos = *start as i32;
+                    start_point = sp;
+                }
             }
             _ => {}
         }
+        st_i32(mem, layout::TOP_KIND, kind);
+        st_i32(mem, layout::TOP_START, start_pos);
+        st_i32(mem, layout::TOP_START_POINT, start_point);
         st_i32(mem, layout::FOR_ADDR, addr);
         st_i32(mem, layout::FOR_STEP, step);
         st_i32(mem, layout::FOR_LIMIT, limit);
@@ -387,6 +443,9 @@ impl Runtime {
         let mut d = 0;
         while d < self.frames.len() && d < fs.len() && self.frames[d] == fs[d] {
             d += 1;
+        }
+        if d < self.frames.len() {
+            self.free_arrays_above(d);
         }
         self.frames.truncate(d);
         let prg = self.prg.clone();
@@ -551,6 +610,7 @@ impl Runtime {
         self.stack.clear();
         self.pending = None;
         st_i32(mem, layout::ERR, 0);
+        Self::settle(it, mem);
         self.sync(it, mem);
         if self.gc_wanted {
             self.gc(it, mem);
@@ -561,9 +621,33 @@ impl Runtime {
 
     /// The time budget of `run` is used: the program continues at `point`
     /// next time.
-    pub fn suspend(&mut self, env: &mut dyn Env, point: i32) {
+    pub fn suspend(&mut self, env: &mut dyn Env, mem: &mut [u8], point: i32) {
         let (it, _) = env.parts();
+        Self::settle(it, mem);
         it.pc = self.instrs.get(point as usize).map_or(self.end_pos, |i| i.pos);
+    }
+
+    /// Does the pop of a While entry a `Wend` of the module left for its
+    /// While instruction (`layout::LAZY_WHILE`), when something else comes
+    /// first: the interpreter's state is then exactly as after Wend.
+    fn settle(it: &mut Interp, mem: &mut [u8]) {
+        if ld_i32(mem, layout::LAZY_WHILE) != 0 {
+            st_i32(mem, layout::LAZY_WHILE, 0);
+            if matches!(it.ctl.last(), Some(Ctl::While { .. })) {
+                it.pop_ctl();
+            }
+        }
+    }
+
+    /// While whose entry was left on the stack by the module's Wend, with a
+    /// false condition: pops it and continues at `exit`.
+    pub fn while_end(&mut self, env: &mut dyn Env, mem: &mut [u8], pos: i32, exit: i32) -> i32 {
+        let (it, hw) = env.parts();
+        it.inst_pos = pos as usize;
+        Self::settle(it, mem);
+        it.pc = exit as usize;
+        let r = Ok(self.point(it, exit as usize));
+        self.result(it, hw, mem, r, pos as usize)
     }
 
     /// End of the program reached; `last` is the position of the last
@@ -580,6 +664,7 @@ impl Runtime {
     /// the instruction at `pos`.
     pub fn raise(&mut self, env: &mut dyn Env, mem: &mut [u8], pos: i32, code: i32) -> i32 {
         let (it, hw) = env.parts();
+        Self::settle(it, mem);
         st_i32(mem, layout::ERR, 0);
         let e = if code > 0 {
             Exc::Error(code as u16)
@@ -1050,6 +1135,22 @@ impl Runtime {
                 1 => st_f64(mem, a, it.int_to_float(v)),
                 _ => return Err(Exc::Error(errors::TYPE_MISMATCH)),
             }
+        } else if let Some((a, ty)) = self.linear_elem(it, mem, &var) {
+            // Element of an array in linear memory.
+            let es = layout::elem_size(ty);
+            let b = self.heap.bytes(mem, self.base, a, es);
+            let cur = if ty == 1 {
+                float_to_int(f64::from_le_bytes(b[..8].try_into().unwrap()))
+            } else {
+                i32::from_le_bytes(b[..4].try_into().unwrap())
+            };
+            v = cur.wrapping_add(step);
+            if ty == 1 {
+                let f = it.int_to_float(v);
+                self.heap.bytes(mem, self.base, a, 8).copy_from_slice(&f.to_le_bytes());
+            } else {
+                self.heap.bytes(mem, self.base, a, 4).copy_from_slice(&v.to_le_bytes());
+            }
         } else {
             let val = it.read_loc(&var, 0);
             let cur = match val {
@@ -1228,6 +1329,178 @@ impl Runtime {
         self.result(it, hw, mem, r, pos)
     }
 
+    /// Label of a computed Goto / Gosub (`Interp::label_target` with an
+    /// expression): a line number or a label name.
+    fn label_by_value(&self, it: &Interp, v: Value) -> R<usize> {
+        let name: Vec<u8> = match v {
+            Value::Int(i) => i.to_string().into_bytes(),
+            Value::Float(f) => float_to_int(f).to_string().into_bytes(),
+            Value::Str(s) => {
+                if s.len() >= 32 {
+                    return Err(Exc::Error(errors::LABEL_NOT_DEFINED));
+                }
+                s.iter().map(|c| c.to_ascii_lowercase()).collect()
+            }
+        };
+        let s = &self.prg.scopes[it.scope];
+        s.by_name.get(&name).map(|&i| s.labels[i].target).ok_or(Exc::Error(errors::LABEL_NOT_DEFINED))
+    }
+
+    /// Computed Goto (`kind` 0) or Gosub (1, returning to `ret`): the label
+    /// value is on the stack; the test point was done before it.
+    pub fn goto_value(&mut self, env: &mut dyn Env, mem: &mut [u8], pos: i32, kind: i32, ret: i32) -> i32 {
+        let (it, hw) = env.parts();
+        let pos = pos as usize;
+        it.inst_pos = pos;
+        let v = self.stack.pop().unwrap_or(Value::Int(0));
+        let r = (|| {
+            let target = self.label_by_value(it, v)?;
+            if kind == 1 {
+                it.push_ctl(Ctl::Gosub { ret: ret as usize })?;
+                it.pc = target;
+            } else {
+                it.pc = target;
+                it.after_jump();
+            }
+            Ok(self.point(it, target))
+        })();
+        self.result(it, hw, mem, r, pos)
+    }
+
+    /// Position of the parameter list of the current `Def Fn` of slot
+    /// `slot` (error 15 when there is none).
+    pub fn fn_def(&mut self, env: &mut dyn Env, mem: &mut [u8], pos: i32, slot: i32) -> i32 {
+        let (it, _) = env.parts();
+        it.inst_pos = pos as usize;
+        match it.var_slot(slot as u16) {
+            Var::Fn(p) => *p as i32,
+            _ => {
+                self.set_pending(mem, Exc::Error(15));
+                0
+            }
+        }
+    }
+
+    /// `Restore` (`idx` -1) or `Restore label`.
+    pub fn restore(&mut self, env: &mut dyn Env, mem: &mut [u8], pos: i32, idx: i32) -> i32 {
+        let (it, hw) = env.parts();
+        let pos = pos as usize;
+        it.inst_pos = pos;
+        let r = if idx < 0 {
+            it.data.line = 0;
+            it.data.item = 0;
+            Ok(ST_CONTINUE)
+        } else {
+            self.label(it, idx).and_then(|target| {
+                if structure::rd(&self.prg.code, target) != TK_DATA {
+                    return Err(Exc::Error(41));
+                }
+                it.data.item = target + 4;
+                it.data.line = self.line_after(target);
+                Ok(ST_CONTINUE)
+            })
+        };
+        self.result(it, hw, mem, r, pos)
+    }
+
+    /// Start of the line following the line containing `p`
+    /// (`Interp::line_after`).
+    fn line_after(&self, p: usize) -> usize {
+        let code = &self.prg.code;
+        let mut line = 0;
+        loop {
+            let next = line + code[line] as usize * 2;
+            if next > p || code[line] == 0 {
+                return next;
+            }
+            line = next;
+        }
+    }
+
+    /// Finds the next Data statement (`Interp::find_data_line`).
+    fn find_data_line(&self, it: &mut Interp) -> R<()> {
+        let code = &self.prg.code;
+        let mut line = if it.data.line == 0 { it.data.base.saturating_sub(2) } else { it.data.line };
+        if it.scope == 0 && it.data.line == 0 {
+            line = 0;
+        }
+        loop {
+            if line + 3 >= code.len() || code[line] == 0 {
+                return Err(Exc::Error(errors::OUT_OF_DATA));
+            }
+            let first = structure::rd(code, line + 2);
+            let next = line + code[line] as usize * 2;
+            if first == TK_END_PROC {
+                return Err(Exc::Error(errors::OUT_OF_DATA));
+            }
+            if first == TK_PROCEDURE
+                && let Some(pr) = self.prg.procs.iter().find(|pr| pr.pos == line + 2)
+            {
+                line = pr.end_line + code[pr.end_line] as usize * 2;
+                continue;
+            }
+            let mut q = line + 2;
+            if first == TK_LAB {
+                q += crate::interp::verify::token_size(code, q);
+            }
+            if structure::rd(code, q) == TK_DATA {
+                it.data.item = q + 4;
+                it.data.line = next;
+                return Ok(());
+            }
+            line = next;
+        }
+    }
+
+    /// Next Data item for a variable of type `ty` (`Interp::next_data`,
+    /// for programs whose Data items are constants), converted for the
+    /// variable, in `RET`.
+    pub fn read_data(&mut self, env: &mut dyn Env, mem: &mut [u8], pos: i32, ty: i32) {
+        let (it, _) = env.parts();
+        it.inst_pos = pos as usize;
+        let ty = ty as u8;
+        let r = (|| {
+            if it.data.item == 0 {
+                self.find_data_line(it)?;
+            }
+            let code = &self.prg.code;
+            let Some((neg, lit, end)) = structure::data_item(code, it.data.item) else {
+                return Err(Exc::Message("Compiled program: Data item is not a constant".into()));
+            };
+            let mut v = match lit {
+                structure::Lit::Empty => Value::zero(ty),
+                structure::Lit::Int(i) => Value::Int(i),
+                structure::Lit::Ffp(b) => Value::Float(crate::number::ffp_to_f64(b)),
+                structure::Lit::Dfl(x) => Value::Float(it.round_float(x)),
+                structure::Lit::Str(q) => {
+                    let n = structure::rd(code, q + 2) as usize;
+                    Value::Str(astr(&code[q + 4..q + 4 + n]))
+                }
+            };
+            if neg {
+                v = match v {
+                    Value::Int(i) => Value::Int(i.wrapping_neg()),
+                    Value::Float(f) => Value::Float(-f),
+                    Value::Str(_) => return Err(Exc::Error(errors::TYPE_MISMATCH)),
+                };
+            }
+            it.data.item = if structure::rd(code, end) == TK_COMMA { end + 2 } else { 0 };
+            if (ty == 2) != v.is_str() {
+                return Err(Exc::Error(errors::TYPE_MISMATCH));
+            }
+            it.convert_for(ty, v)
+        })();
+        match r {
+            Ok(Value::Int(i)) => st_i32(mem, layout::RET, i),
+            Ok(Value::Float(f)) => st_f64(mem, layout::RET, f),
+            Ok(Value::Str(s)) => {
+                let h = self.alloc(mem, s);
+                st_i32(mem, layout::RET, h);
+            }
+            Err(e) => self.set_pending(mem, e),
+        }
+    }
+
     pub fn return_(&mut self, env: &mut dyn Env, mem: &mut [u8], pos: i32) -> i32 {
         let (it, hw) = env.parts();
         let pos = pos as usize;
@@ -1256,18 +1529,147 @@ impl Runtime {
     // Procedures
     // ------------------------------------------------------------------
 
-    /// Calls procedure `index` with `n` parameters from the stack; returns
-    /// to `ret`. The test point was done before the parameters.
-    pub fn call(&mut self, env: &mut dyn Env, mem: &mut [u8], pos: i32, index: i32, ret: i32, n: i32) -> i32 {
+    /// Calls procedure `index` (`Interp::call_proc`), returning to `ret`:
+    /// the module has converted the parameters to their types and written
+    /// them in the `args` area. The frame is pushed on the interpreter's
+    /// control stack as usual (stack limit, events and errors unchanged),
+    /// reusing frames of earlier calls; parameters go straight to memory.
+    pub fn call_native(
+        &mut self,
+        env: &mut dyn Env,
+        mem: &mut [u8],
+        pos: i32,
+        index: i32,
+        ret: i32,
+        nargs: i32,
+    ) -> i32 {
         let (it, hw) = env.parts();
         let pos = pos as usize;
         it.inst_pos = pos;
-        let args = self.stack.split_off(self.stack.len().saturating_sub(n.max(0) as usize));
-        let r = it.call_proc(index as usize, ret as usize, args).map(|_| {
-            let pc = it.pc;
-            self.point(it, pc)
-        });
+        let r = self.call_inner(it, mem, index as usize, ret as usize, nargs.max(0) as usize);
         self.result(it, hw, mem, r, pos)
+    }
+
+    fn call_inner(&mut self, it: &mut Interp, mem: &mut [u8], index: usize, ret: usize, nargs: usize) -> R<i32> {
+        let prg = self.prg.clone();
+        let p = &prg.procs[index];
+        if p.machine_code {
+            return Err(Exc::Message("Machine code procedures are not supported".into()));
+        }
+        let arg = |k: usize| self.layout.args + k as u32 * 8;
+        // Global parameters are assigned before the frame is pushed (only
+        // the parameters given: `On n Proc` gives none).
+        for (k, (&slot, &ty)) in p.params.iter().zip(&p.param_types).enumerate().take(nargs) {
+            if slot & GLOBAL != 0 {
+                if self.is_resident(0, slot) {
+                    let v = self.mem_value(mem, arg(k), ty);
+                    it.globals[(slot & !GLOBAL) as usize] = Var::Scalar(v);
+                } else {
+                    let (from, to) = (arg(k) as usize, self.scalar_addr(slot, 0) as usize);
+                    mem.copy_within(from..from + 8, to);
+                }
+            }
+        }
+        let mut frame = self.frame_pool.pop().unwrap_or_else(|| {
+            Box::new(ProcFrame {
+                proc_index: 0,
+                ret: 0,
+                locals: Vec::new(),
+                data: DataPtr::default(),
+                on_error: OnError::None,
+                error_on: 0,
+                error_pos: 0,
+                scope: 0,
+            })
+        });
+        frame.proc_index = index;
+        frame.ret = ret;
+        frame.locals.clear();
+        frame.locals.resize(p.locals.len(), Var::Unset);
+        frame.data = it.data;
+        frame.on_error = it.on_error;
+        frame.error_on = it.error_on;
+        frame.error_pos = it.error_pos;
+        frame.scope = it.scope;
+        it.push_ctl(Ctl::Proc(frame))?;
+        it.frame_stack.push(it.ctl.len() - 1);
+        it.scope = index + 1;
+        it.data = DataPtr { base: p.body, line: 0, item: 0 };
+        it.on_error = OnError::None;
+        it.pc = p.body;
+        // The frame in memory: cleared, then the local parameters.
+        let depth = it.frame_stack.len();
+        let base = self.layout.frame_base(depth) as usize;
+        let size = p.locals.len() * 8;
+        let Some(b) = mem.get_mut(base..base + size) else {
+            return Err(Exc::Message("Compiled program: procedure frames exhausted".into()));
+        };
+        b.fill(0);
+        for (k, (&slot, &ty)) in p.params.iter().zip(&p.param_types).enumerate().take(nargs) {
+            if slot & GLOBAL != 0 {
+                continue;
+            }
+            if self.is_resident(index + 1, slot) {
+                let v = self.mem_value(mem, arg(k), ty);
+                if let Some(Ctl::Proc(f)) = it.ctl.last_mut() {
+                    f.locals[slot as usize] = Var::Scalar(v);
+                }
+            } else {
+                let from = arg(k) as usize;
+                mem.copy_within(from..from + 8, base + slot as usize * 8);
+            }
+        }
+        // Memory is up to date for this frame.
+        if self.frames.len() > depth - 1 {
+            self.free_arrays_above(depth - 1);
+        }
+        self.frames.truncate(depth - 1);
+        self.frames.push(it.ctl.len() - 1);
+        Ok(self.point(it, p.body))
+    }
+
+    /// End Proc / Pop Proc in a procedure (the test point was done and the
+    /// frame checked): sets Param from `RET` / `RET_TAG`, then returns
+    /// (`Interp::return_proc`, reusing the frame).
+    pub fn proc_end(&mut self, env: &mut dyn Env, mem: &mut [u8], pos: i32) -> i32 {
+        let (it, hw) = env.parts();
+        let pos = pos as usize;
+        it.inst_pos = pos;
+        match ld_i32(mem, layout::RET_TAG) {
+            0 => it.param_e = ld_i32(mem, layout::RET),
+            1 => it.param_f = ld_f64(mem, layout::RET),
+            2 => it.param_s = self.str_of(ld_i32(mem, layout::RET)),
+            _ => {}
+        }
+        let in_error_proc = it.error_proc_depth.is_some() && it.error_proc_depth == Some(it.frame_stack.len());
+        let r = if it.error_on != 0 && in_error_proc { Err(Exc::Error(8)) } else { self.return_inner(it) };
+        self.result(it, hw, mem, r, pos)
+    }
+
+    fn return_inner(&mut self, it: &mut Interp) -> R<i32> {
+        while let Some(c) = it.ctl.last() {
+            if matches!(c, Ctl::Proc(_)) {
+                break;
+            }
+            it.pop_ctl();
+        }
+        let Some(Ctl::Proc(mut f)) = it.pop_ctl() else { return Err(Exc::Error(errors::ILLEGAL_FUNCTION_CALL)) };
+        if it.error_proc_depth == Some(it.frame_stack.len()) {
+            it.error_proc_depth = None;
+        }
+        it.frame_stack.pop();
+        it.data = f.data;
+        it.on_error = f.on_error;
+        it.error_on = f.error_on;
+        it.error_pos = f.error_pos;
+        it.scope = f.scope;
+        it.pc = f.ret;
+        f.locals.clear();
+        if self.frame_pool.len() < 64 {
+            self.frame_pool.push(f);
+        }
+        let pc = it.pc;
+        Ok(self.point(it, pc))
     }
 
     /// Start of End Proc / Pop Proc (after the test point).
@@ -1281,36 +1683,6 @@ impl Runtime {
             Err(Exc::Stop(StopReason::End))
         } else {
             Err(Exc::Error(errors::ILLEGAL_FUNCTION_CALL))
-        };
-        self.result(it, hw, mem, r, pos)
-    }
-
-    pub fn set_param_i(&mut self, env: &mut dyn Env, v: i32) {
-        env.parts().0.param_e = v;
-    }
-
-    pub fn set_param_f(&mut self, env: &mut dyn Env, v: f64) {
-        env.parts().0.param_f = v;
-    }
-
-    pub fn set_param_s(&mut self, env: &mut dyn Env, h: i32) {
-        let s = self.str_of(h);
-        env.parts().0.param_s = s;
-    }
-
-    /// End of End Proc / Pop Proc: returns to the caller.
-    pub fn proc_return(&mut self, env: &mut dyn Env, mem: &mut [u8], pos: i32) -> i32 {
-        let (it, hw) = env.parts();
-        let pos = pos as usize;
-        it.inst_pos = pos;
-        let in_error_proc = it.error_proc_depth.is_some() && it.error_proc_depth == Some(it.frame_stack.len());
-        let r = if it.error_on != 0 && in_error_proc {
-            Err(Exc::Error(8))
-        } else {
-            it.return_proc().map(|_| {
-                let pc = it.pc;
-                self.point(it, pc)
-            })
         };
         self.result(it, hw, mem, r, pos)
     }
@@ -1464,14 +1836,6 @@ impl Runtime {
         let v: Vec<u8> =
             s.iter().map(|&c| if lower == 0 { c.to_ascii_uppercase() } else { c.to_ascii_lowercase() }).collect();
         self.alloc(mem, v.into())
-    }
-
-    pub fn param_i(&mut self, env: &mut dyn Env) -> i32 {
-        env.parts().0.param_e
-    }
-
-    pub fn param_f(&mut self, env: &mut dyn Env) -> f64 {
-        env.parts().0.param_f
     }
 
     pub fn param_s(&mut self, env: &mut dyn Env, mem: &mut [u8]) -> i32 {

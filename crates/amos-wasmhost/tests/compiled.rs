@@ -297,3 +297,128 @@ fn input_waits() {
     assert_eq!(o.text, "NNN\n? ? ? ? \n 42xy-1\n");
     assert!(o.frames >= 3, "{o:?}");
 }
+
+#[test]
+fn linear_arrays() {
+    // Errors: index range (23), not dimensioned (27), Dim checks.
+    same("Dim A(3)\nI=1 : B=A(I,I)");
+    assert_eq!(run_err("Dim A(3)\nI=4 : A(I)=1"), StopReasonOrError::Error(errors::ILLEGAL_FUNCTION_CALL));
+    assert_eq!(run_err("Dim A(3)\nI=-1 : Print A(I)"), StopReasonOrError::Error(errors::ILLEGAL_FUNCTION_CALL));
+    assert_eq!(
+        run_err("Gosub D : Print A(1) : End\nD: Return : Dim A(3)"),
+        StopReasonOrError::Error(errors::NON_DIMENSIONED_ARRAY)
+    );
+    assert_eq!(run_err("N=-1 : Dim A(N)"), StopReasonOrError::Error(errors::ILLEGAL_FUNCTION_CALL));
+    assert_eq!(run_err("N=300 : Dim A(N,N,2)"), StopReasonOrError::Error(errors::ILLEGAL_FUNCTION_CALL));
+    // The last dimension is not counted (quirk of the original).
+    assert_eq!(run("N=2 : Dim A(N,20000) : A(2,20000)=5 : Print A(2,20000)"), " 5\n");
+    // Multi dimensional, floats, strings.
+    let p = "Dim A(2,3,4),F#(3),S$(3)\nFor I=0 To 2 : For J=0 To 3 : For K=0 To 4 : A(I,J,K)=I*100+J*10+K : Next : Next : Next\nF#(1)=1.5 : F#(2)=F#(1)*3 : S$(1)=\"ab\" : S$(2)=S$(1)+S$(1)\nPrint A(2,3,4);A(1,0,2);F#(2);S$(2);S$(0);\"|\"";
+    assert_eq!(run(p), " 234 102 4.5abab|\n");
+    // Inc, Add, Swap on elements.
+    let p = "Dim A(3),F#(2),S$(2)\nA(1)=5 : Inc A(1) : Dec A(2) : Add A(1),10 : Add A(3),5,0 To 3\nF#(1)=2.5 : Inc F#(1) : Add F#(2),2\nS$(0)=\"x\" : S$(1)=\"y\" : Swap S$(0),S$(1) : Swap A(1),A(2)\nPrint A(1);A(2);A(3);F#(1);F#(2);S$(0);S$(1)";
+    assert_eq!(run(p), "-1 16 0 3.5 2yx\n");
+    // Sort and Match.
+    let p = "Dim A(9),S$(4),F#(3)\nFor I=0 To 9 : A(I)=(I*7) mod 10 : Next\nSort A(0)\nFor I=0 To 9 : Print A(I); : Next : Print\nPrint Match(A(0),7);Match(A(0),11)\nS$(0)=\"d\" : S$(1)=\"b\" : S$(2)=\"a\" : S$(3)=\"c\" : S$(4)=\"\"\nSort S$(0) : Print S$(0);S$(1);S$(2);S$(4);Match(S$(0),\"c\")\nF#(0)=2.5 : F#(1)=-1 : Sort F#(0) : Print F#(0);F#(3);Match(F#(0),2.5)";
+    same(p);
+    // Local arrays in recursive procedures are separate and freed.
+    let p =
+        "R[5]\nPrint Param\nProcedure R[N]\nDim L(N+1)\nL(N)=N\nIf N>0 Then R[N-1] : L(N)=L(N)+Param\nEnd Proc[L(N)]";
+    assert_eq!(run(p), " 15\n");
+    let p = "For K=1 To 300 : P[K] : Next : Print Param\nProcedure P[N]\nDim BIG(2000),S$(100)\nBIG(2000)=N : S$(100)=Str$(N)\nEnd Proc[BIG(2000)+Len(S$(100))]";
+    assert_eq!(run(p), " 304\n");
+    // Big arrays: the memory grows.
+    let p = "Dim A(60000),B#(60000),C(60000)\nA(60000)=1 : B#(60000)=2 : C(60000)=3\nPrint A(60000)+B#(60000)+C(60000)";
+    assert_eq!(run(p), " 6\n");
+    // Strings in arrays survive garbage collection.
+    let p =
+        "Dim S$(200)\nFor I=1 To 30000 : S$(I mod 200)=\"v\"+Str$(I) : T$=Str$(I)+\"x\" : Next\nPrint S$(0);S$(199);T$";
+    assert_eq!(run(p), "v 30000v 29999 30000x\n");
+}
+
+#[test]
+fn resident_and_linear_arrays_mix() {
+    // An array used by an interpreted instruction (Input, Read with an
+    // expression, Varptr...) stays in the interpreter.
+    let p = "Dim A(3),B(3)\nFor I=0 To 3 : Read A(I) : B(I)=A(I)*2 : Next\nSort A(0)\nPrint A(0);A(3);B(3);Match(A(0),4)\nData 4,3,2,1";
+    assert_eq!(run(p), " 1 4 2 3\n");
+    let p = "Dim A(3)\nA(1)=7\nV=Varptr(A(1)) : Print V>0;A(1)\nInc A(1) : Swap A(1),A(2) : Print A(1);A(2)";
+    same(p);
+    let p = "Dim A(2)\nDef Fn F(X)=A(X)*10\nA(1)=4 : Print Fn F(1)";
+    assert_eq!(run(p), " 40\n");
+    let o = same_with("Dim N(2)\nInput N(1),N(2)\nPrint N(1)+N(2);Match(N(0),5)", &["2,5"]);
+    assert_eq!(o.text, "? \n 7 2\n");
+}
+
+#[test]
+fn loop_fast_paths_keep_the_control_stack_exact() {
+    let progs = [
+        // Error in a While condition evaluated after Wend, handled; Resume
+        // evaluates it again.
+        "On Error Goto H\nI=0\nWhile 10/(3-I)>0\nInc I\nWend\nPrint I\nEnd\nH: Print \"e\";I; : I=4 : Resume",
+        "On Error Goto H\nI=0\nWhile 10/(3-I)>0\nInc I\nWend\nPrint I\nEnd\nH: Print \"e\";I; : Resume Next",
+        // Error with Trap, and a handler that leaves through Gosub / Return.
+        "I=0\nWhile I<5\nInc I\nTrap A=10/(I-3)\nWend\nPrint I;Errtrap",
+        "Gosub S : Print \"back\" : End\nS: On Error Goto H\nI=0\nWhile 10/(2-I)>0\nInc I\nWend\nReturn\nH: Print \"h\"; : Return",
+        // Nested loops of every kind with Exit and Goto out of them.
+        "For A=1 To 3\nI=0\nWhile I<3\nInc I : J=0\nRepeat\nInc J : If J=2 Then Exit 2\nUntil J>5\nWend\nK=0\nDo\nInc K : If K=3 Then Goto OUT\nLoop\nOUT: Print A;I;J;K;\nNext",
+        "C=0\nEvery 1 Gosub E\nI=0\nWhile I<20000 : Inc I : Wend\nRepeat : Dec I : Until I=0\nEvery Off\nPrint C>0;I\nEnd\nE: Inc C : Every On : Return",
+    ];
+    for p in progs {
+        same(p);
+        // (With a few instructions per frame an Every handler never ends.)
+        let budgets: &[usize] = if p.contains("Every") { &[40, 97] } else { &[1, 2, 3, 5, 9] };
+        for &budget in budgets {
+            same_budget(p, budget);
+        }
+    }
+}
+
+#[test]
+fn native_jumps_data_and_loops_on_elements() {
+    let progs = [
+        // On n Goto / Gosub / Proc, including out of range and procedures
+        // with parameters (left unset by On ... Proc).
+        "For I=0 To 4\nOn I Goto A,B,C\nPrint \"none\";I;\nNX: Next\nEnd\nA: Print \"a\"; : Goto NX\nB: Print \"b\"; : Goto NX\nC: Print \"c\"; : Goto NX",
+        "For I=0 To 3 : On I Gosub A,B : Print I; : Next : End\nA: Print \"a\"; : Return\nB: Print \"b\"; : Return",
+        "Global G\nFor I=1 To 3 : On I Proc P1,P2,P3 : Next\nPrint G\nProcedure P1\nG=G+1\nEnd Proc\nProcedure P2[X]\nG=G+X+10\nEnd Proc\nProcedure P3[Global G]\nPrint \"p3\";G\nEnd Proc",
+        // Computed Goto / Gosub.
+        "For I=1 To 3\nL$=\"L\"+Str$(I)-\" \"\nGosub L$\nNext\nGoto 100\nL1: Print 1; : Return\nL2: Print 2; : Return\nL3: Print 3; : Return\n100 Print \"end\"",
+        "N=20 : Goto N*2\n20 Print \"no\"\n40 Print \"forty\"",
+        "Goto \"NOWHERE\"",
+        // Read / Restore with constants (signs, floats, strings, empty).
+        "Dim A(5),N$(2)\nFor I=0 To 5 : Read A(I) : Next\nRead X#,Y,N$(1),Z#\nRestore D2 : Read Q\nPrint A(0);A(5);X#;Y;N$(1);Z#;Q\nData 1,-2,$10,%11,-1.5,2\nD2: Data 7,3.9,\"txt\",,8",
+        "Read A$\nData 5",
+        "Read A,B\nData 1",
+        "P\nRead X : Print X\nProcedure P\nRead A,B : Print A;B\nData 3,4\nEnd Proc\nData 9",
+        // For on array elements (in memory and kept in the interpreter).
+        "Dim A(3)\nFor A(2)=1 To 5 Step 2 : Print A(2); : Next\nPrint A(2)",
+        "Dim F#(3)\nFor F#(1)=1 To 3 : Print F#(1); : Next",
+        "Dim A(3)\nV=Varptr(A(0))\nFor A(1)=3 To 1 Step -1 : Print A(1); : Next",
+        "Dim A(3)\nI=1 : For A(I)=1 To 3 : Inc I : Next",
+    ];
+    for p in progs {
+        same(p);
+        for budget in [1, 3, 7] {
+            same_budget(p, budget);
+        }
+    }
+}
+
+#[test]
+fn def_fn_compiled() {
+    let progs = [
+        "Def Fn SQ(X)=X*X\nPrint Fn SQ(4);Fn SQ(1.5)",
+        "Def Fn F(X,Y)=X*10+Y\nA=3 : Print Fn F(A,4);Fn F(1,2);X;Y",
+        "Def Fn S$(A$)=A$+A$\nPrint Fn S$(\"ab\")",
+        "Print Fn G(1)\nDef Fn G(X)=X",
+        "For A=1 To 0 Step -1\nIf A\nDef Fn H(X)=X+1\nElse\nDef Fn H(X)=X*2.5\nEnd If\nPrint Fn H(3);\nNext",
+        "Def Fn D(X)=10/X\nPrint Fn D(5) : Print Fn D(0)",
+        "Dim T(3) : T(2)=7\nDef Fn E(I)=T(I)*2\nPrint Fn E(2)",
+        "P[2]\nProcedure P[N]\nDef Fn Q(X)=X+N\nPrint Fn Q(1)\nEnd Proc",
+    ];
+    for p in progs {
+        same(p);
+        same_budget(p, 2);
+    }
+}

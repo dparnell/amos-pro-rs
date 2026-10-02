@@ -4,7 +4,8 @@
 // and the module memory).
 {
     def!(l, "host" "enter" |rt, env, mem| -> i32 { rt.enter(env, mem) });
-    def!(l, "host" "suspend" |rt, env, mem, p: i32| { rt.suspend(env, p) });
+    def!(l, "host" "suspend" |rt, env, mem, p: i32| { rt.suspend(env, mem, p) });
+    def!(l, "host" "while_end" |rt, env, mem, p: i32, x: i32| -> i32 { rt.while_end(env, mem, p, x) });
     def!(l, "host" "end_program" |rt, env, mem, last: i32| -> i32 { rt.end_program(env, last) });
     def!(l, "host" "raise" |rt, env, mem, p: i32, c: i32| -> i32 { rt.raise(env, mem, p, c) });
     def!(l, "host" "test_point" |rt, env, mem, p: i32| -> i32 { rt.test_point(env, mem, p) });
@@ -46,19 +47,18 @@
     def!(l, "host" "goto_label" |rt, env, mem, p: i32, i: i32| -> i32 { rt.goto_label(env, mem, p, i) });
     def!(l, "host" "gosub_label" |rt, env, mem, p: i32, i: i32, r: i32| -> i32 { rt.gosub_label(env, mem, p, i, r) });
     def!(l, "host" "return" |rt, env, mem, p: i32| -> i32 { rt.return_(env, mem, p) });
-    def!(l, "host" "call" |rt, env, mem, p: i32, i: i32, r: i32, n: i32| -> i32 { rt.call(env, mem, p, i, r, n) });
+    def!(l, "host" "call_proc" |rt, env, mem, p: i32, i: i32, r: i32, n: i32| -> i32 { rt.call_native(env, mem, p, i, r, n) });
+    def!(l, "host" "goto_value" |rt, env, mem, p: i32, k: i32, r: i32| -> i32 { rt.goto_value(env, mem, p, k, r) });
+    def!(l, "host" "fn_def" |rt, env, mem, p: i32, s: i32| -> i32 { rt.fn_def(env, mem, p, s) });
+    def!(l, "host" "restore" |rt, env, mem, p: i32, i: i32| -> i32 { rt.restore(env, mem, p, i) });
+    def!(l, "host" "read_data" |rt, env, mem, p: i32, t: i32| { rt.read_data(env, mem, p, t) });
     def!(l, "host" "proc_check" |rt, env, mem, p: i32, pop: i32| -> i32 { rt.proc_check(env, mem, p, pop) });
-    def!(l, "host" "set_param_i" |rt, env, mem, v: i32| { rt.set_param_i(env, v) });
-    def!(l, "host" "set_param_f" |rt, env, mem, v: f64| { rt.set_param_f(env, v) });
-    def!(l, "host" "set_param_s" |rt, env, mem, v: i32| { rt.set_param_s(env, v) });
-    def!(l, "host" "proc_return" |rt, env, mem, p: i32| -> i32 { rt.proc_return(env, mem, p) });
+    def!(l, "host" "proc_end" |rt, env, mem, p: i32| -> i32 { rt.proc_end(env, mem, p) });
     def!(l, "host" "dyn_op" |rt, env, mem, op: i32, a: f64, ta: i32, b: f64, tb: i32| -> f64 {
         rt.dyn_op(env, mem, op, a, ta, b, tb)
     });
     def!(l, "host" "next_done" |rt, env, mem, p: i32| -> i32 { rt.next_done(env, mem, p) });
     def!(l, "host" "str_f" |rt, env, mem, x: f64| -> i32 { rt.str_f(env, mem, x) });
-    def!(l, "host" "param_i" |rt, env, mem| -> i32 { rt.param_i(env) });
-    def!(l, "host" "param_f" |rt, env, mem| -> f64 { rt.param_f(env) });
     def!(l, "host" "param_s" |rt, env, mem| -> i32 { rt.param_s(env, mem) });
     def!(l, "rt" "str_len" |rt, env, mem, h: i32| -> i32 { rt.str_len(h) });
     def!(l, "rt" "str_asc" |rt, env, mem, h: i32| -> i32 { rt.str_asc(h) });
@@ -70,15 +70,12 @@
     def!(l, "rt" "change_case" |rt, env, mem, h: i32, lw: i32| -> i32 { rt.change_case(mem, h, lw) });
     def!(l, "rt" "int_f" |rt, env, mem, x: f64| -> f64 { rt.int_f(x) });
     def!(l, "host" "wait" |rt, env, mem, p: i32, n: i32| -> i32 { rt.wait(env, mem, p, n) });
+    def!(l, "host" "match_resident" |rt, env, mem, p: i32, s: i32| -> i32 { rt.match_resident(env, mem, p, s) });
+    def!(l, "rt" "sort_array" |rt, env, mem, a: i32| { rt.sort_array(mem, a) });
+    def!(l, "rt" "match_array" |rt, env, mem, a: i32| -> i32 { rt.match_array(mem, a) });
     def!(l, "rt" "str_const" |rt, env, mem, p: i32| -> i32 { rt.str_const(mem, p) });
     def!(l, "rt" "str_concat" |rt, env, mem, a: i32, b: i32| -> i32 { rt.str_concat(mem, a, b) });
     def!(l, "rt" "str_minus" |rt, env, mem, a: i32, b: i32| -> i32 { rt.str_minus(mem, a, b) });
     def!(l, "rt" "str_cmp" |rt, env, mem, a: i32, b: i32| -> i32 { rt.str_cmp(a, b) });
-    def!(l, "rt" "i2f" |rt, env, mem, v: i32| -> f64 { rt.i2f(v) });
-    def!(l, "rt" "fadd" |rt, env, mem, a: f64, b: f64| -> f64 { rt.fadd(a, b) });
-    def!(l, "rt" "fsub" |rt, env, mem, a: f64, b: f64| -> f64 { rt.fsub(a, b) });
-    def!(l, "rt" "fmul" |rt, env, mem, a: f64, b: f64| -> f64 { rt.fmul(a, b) });
-    def!(l, "rt" "fdiv" |rt, env, mem, a: f64, b: f64| -> f64 { rt.fdiv(a, b) });
-    def!(l, "rt" "fcmp" |rt, env, mem, a: f64, b: f64| -> i32 { rt.fcmp(a, b) });
     def!(l, "rt" "pow" |rt, env, mem, a: f64, b: f64| -> f64 { rt.pow(a, b) });
 }

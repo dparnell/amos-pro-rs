@@ -3,7 +3,7 @@
 use std::ptr::NonNull;
 use std::rc::Rc;
 
-use amos_core::compiled::{Env, RUN_RUNNING, RUN_STOPPED, Runtime};
+use amos_core::compiled::{Env, HeapKind, RUN_RUNNING, RUN_STOPPED, Runtime, ST_GROW};
 use amos_core::interp::verify::Compiled;
 use amos_core::interp::{RunState, StopInfo, StopReason, StopReasonOrError};
 use amos_core::{Machine, Program};
@@ -59,7 +59,7 @@ impl CompiledProgram {
     pub fn new(wasm: &[u8], prg: Rc<Compiled>) -> Result<CompiledProgram, String> {
         let engine = engine();
         let module = Module::new(engine, wasm).map_err(|e| e.to_string())?;
-        let rt = Runtime::new(prg, 0);
+        let rt = Runtime::new(prg, 0, HeapKind::Linear);
         let pages = rt.layout.pages;
         let mut store = Store::new(engine, Ctx { rt, env: None, mem: None });
         let memory = Memory::new(&mut store, MemoryType::new(pages, None)).map_err(|e| e.to_string())?;
@@ -149,6 +149,22 @@ impl CompiledProgram {
 
     fn define_imports(l: &mut Linker<Ctx>) -> Result<(), String> {
         include!("imports.rs");
+        // Dim may need the memory to grow (arrays live in the module's
+        // memory, after the procedure frames).
+        l.func_wrap("host", "dim", |mut c: Caller<'_, Ctx>, p: i32, s: i32, t: i32, n: i32, r: i32| -> i32 {
+            loop {
+                let st = with(&mut c, |rt, env, mem| rt.dim(env, mem, p, s, t, n, r));
+                if st != ST_GROW {
+                    return st;
+                }
+                let bytes = c.data().rt.grow_bytes() as u64;
+                let mem = c.data().mem.expect("memory");
+                if mem.grow(&mut c, bytes.div_ceil(65536)).is_err() {
+                    return with(&mut c, |rt, env, mem| rt.grow_failed(env, mem, p));
+                }
+            }
+        })
+        .map_err(|e| e.to_string())?;
         Ok(())
     }
 }

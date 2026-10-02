@@ -6,6 +6,8 @@
 //!
 //! * A small header of words shared by the module and the runtime.
 //! * Global variables: 8 bytes per slot of `Compiled::globals`.
+//! * Parameters of the procedure being called: 8 bytes each, converted
+//!   to the parameter types by the module.
 //! * Procedure frames: one block of `frame_size` bytes per procedure
 //!   depth; slot `i` of the frame at depth `d` (1 = first call) is at
 //!   `locals + (d - 1) * frame_size + i * 8`.
@@ -45,11 +47,36 @@ pub const FOR_BODY: u32 = 48;
 /// loop of the current routine, or everything.
 pub const LOOP_LO: u32 = 52;
 pub const LOOP_HI: u32 = 56;
+/// Kind of the top entry: `TOP_*`; `FOR_BODY` holds the point of its body.
+pub const TOP_KIND: u32 = 60;
+pub const TOP_OTHER: i32 = 0;
+pub const TOP_FOR: i32 = 1;
+pub const TOP_REPEAT: i32 = 2;
+pub const TOP_DO: i32 = 3;
+pub const TOP_WHILE: i32 = 4;
+/// Top While loop: position and point of its While instruction.
+pub const TOP_START: u32 = 116;
+pub const TOP_START_POINT: u32 = 120;
+/// Set by a `Wend` done by the module: the While entry, which the
+/// interpreter pops at Wend and pushes again at While, was left on the
+/// control stack for the While instruction (executed next) to reuse. The
+/// runtime pops it if anything else happens first (error, suspension).
+pub const LAZY_WHILE: u32 = 112;
 /// Indices of an array element (8 `i32`), written by the module before
 /// calling `host.aref`.
 pub const IDX: u32 = 64;
+/// Value of `End Proc[value]` (`i32` or `f64`), written by the module.
+pub const RET: u32 = 96;
+/// Type of `RET`: -1 none, 0 integer, 1 float, 2 string handle.
+pub const RET_TAG: u32 = 104;
+/// Number of procedure frames (`Interp::frame_stack`).
+pub const DEPTH: u32 = 108;
+/// `Param` and `Param#` (`Interp::param_e` / `param_f`), refreshed by the
+/// runtime after every operation.
+pub const PARAM_E: u32 = 124;
+pub const PARAM_F: u32 = 128;
 /// Start of the global variables.
-pub const GLOBALS: u32 = 128;
+pub const GLOBALS: u32 = 192;
 
 pub const PAGE: u32 = 65536;
 
@@ -57,6 +84,8 @@ pub const PAGE: u32 = 65536;
 pub struct Layout {
     pub globals: u32,
     pub n_globals: u32,
+    /// Parameters of a procedure call.
+    pub args: u32,
     pub locals: u32,
     pub frame_size: u32,
     pub max_frames: u32,
@@ -69,7 +98,9 @@ pub struct Layout {
 impl Layout {
     pub fn new(c: &Compiled) -> Layout {
         let n_globals = c.globals.len() as u32;
-        let locals = (GLOBALS + n_globals.max(1) * 8).next_multiple_of(16);
+        let args = (GLOBALS + n_globals.max(1) * 8).next_multiple_of(16);
+        let max_params = c.procs.iter().map(|p| p.params.len() as u32).max().unwrap_or(0).max(1);
+        let locals = (args + max_params * 8).next_multiple_of(16);
         let max_locals = c.procs.iter().map(|p| p.locals.len() as u32).max().unwrap_or(0).max(1);
         let frame_size = max_locals * 8;
         // The control stack limit of the interpreter (`Interp::start`)
@@ -78,11 +109,28 @@ impl Layout {
         let max_frames = stack_limit / 42 + 2;
         let size = locals + frame_size * max_frames;
         let pages = size.div_ceil(PAGE).max(1);
-        Layout { globals: GLOBALS, n_globals, locals, frame_size, max_frames, size, pages }
+        Layout { globals: GLOBALS, n_globals, args, locals, frame_size, max_frames, size, pages }
     }
 
     /// Start of the frame of procedure depth `depth` (globals for 0).
     pub fn frame_base(&self, depth: usize) -> u32 {
         if depth == 0 { self.globals } else { self.locals + (depth as u32 - 1) * self.frame_size }
     }
+}
+
+/// Arrays in linear memory: a block with this header, then the elements
+/// (`i32` integers, `f64` floats, `i32` string handles). A variable slot
+/// holding an array contains the absolute address of its block (0: not
+/// dimensioned).
+pub const ARR_NDIMS: u32 = 0;
+pub const ARR_TYPE: u32 = 4;
+/// Number of elements.
+pub const ARR_COUNT: u32 = 8;
+/// Maximum index of each dimension (`Dim A(10)` gives 10), 8 `u32`.
+pub const ARR_DIMS: u32 = 16;
+pub const ARR_DATA: u32 = 48;
+
+/// Size of an element of type `ty` (0 int, 1 float, 2 string).
+pub fn elem_size(ty: u8) -> u32 {
+    if ty == 1 { 8 } else { 4 }
 }

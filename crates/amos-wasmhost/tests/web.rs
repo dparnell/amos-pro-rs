@@ -102,6 +102,9 @@ const PROGRAMS: &[&str] = &[
     "Gosub L : Print \"b\" : End\nL: Print \"a\" : Return",
     "A=Val(\"2.5\")*2 : Print A;Val(\"3\")+1",
     "N=0\nFor I=1 To 20000\nA$=Str$(I)+\"-\"\nIf Len(A$)>2 Then Inc N\nNext\nPrint N",
+    "For K=1 To 200 : P[K] : Next : Print Param\nProcedure P[N]\nDim BIG(2000),S$(100)\nBIG(2000)=N : S$(100)=Str$(N)\nEnd Proc[BIG(2000)+Len(S$(100))]",
+    "Dim S$(4),A(9)\nS$(0)=\"d\" : S$(1)=\"b\" : S$(2)=\"a\"\nSort S$(0) : Print S$(2);S$(3);S$(4);Match(S$(0),\"b\")\nFor I=0 To 9 : A(I)=9-I : Next : Sort A(0) : Inc A(3) : Swap A(0),A(9) : Print A(0);A(3);Match(A(0),5)",
+    "Dim A(60000),B#(60000)\nA(60000)=1 : B#(60000)=2.5 : Print A(60000)+B#(60000)",
 ];
 
 #[wasm_bindgen_test]

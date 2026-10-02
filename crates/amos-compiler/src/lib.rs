@@ -8,6 +8,7 @@
 //! `rt.*` / `host.*`), hosted natively by `amos-wasmhost` (wasmtime).
 
 pub mod codegen;
+pub mod ffp;
 pub mod ir;
 pub mod lower;
 
@@ -64,8 +65,52 @@ pub fn compile_verified(c: &Compiled) -> Result<Output, CompileError> {
     let instrs = structure::instructions(c);
     check_supported(c, &instrs)?;
     let (stmts, interpreted) = lower::lower_all(c, &instrs);
-    let wasm = codegen::module(c, &instrs, &stmts)?;
+    let resident = resident_arrays(c, &instrs, &stmts);
+    let wasm = codegen::module(c, &instrs, &stmts, &resident)?;
     Ok(Output { wasm, instructions: instrs.len(), interpreted })
+}
+
+/// Arrays the interpreter must see: those used by an instruction it runs
+/// (with the Def Fn / Data statements such an instruction may evaluate).
+/// They stay in the interpreter; the other arrays live in linear memory.
+fn resident_arrays(c: &Compiled, instrs: &[structure::Instr], stmts: &[ir::Stmt]) -> Vec<(usize, u16)> {
+    use amos_core::interp::verify::token_size;
+    use amos_core::program::var_flags;
+    use amos_core::tokens::{TK_DATA, TK_VAR, tk};
+    let code = &c.code;
+    let arrays_in = |a: usize, b: usize, scope: usize, out: &mut Vec<(usize, u16)>| {
+        let mut p = a;
+        while p < b {
+            if structure::rd(code, p) == TK_VAR && code[p + 5] & var_flags::ARRAY != 0 {
+                out.push(structure::var_key(scope, structure::rd(code, p + 2)));
+            }
+            p += token_size(code, p);
+        }
+    };
+    let mut out = Vec::new();
+    for (ins, st) in instrs.iter().zip(stmts) {
+        if !matches!(st, ir::Stmt::Interp) {
+            continue;
+        }
+        arrays_in(ins.pos, ins.end, ins.scope, &mut out);
+        let mut p = ins.pos;
+        let (mut uses_fn, mut uses_read) = (false, false);
+        while p < ins.end {
+            let t = structure::rd(code, p);
+            uses_fn |= t == tk::FN;
+            uses_read |= t == tk::READ;
+            p += token_size(code, p);
+        }
+        for other in instrs.iter().filter(|o| o.scope == ins.scope) {
+            let t = structure::rd(code, other.pos);
+            if (uses_fn && t == tk::DEF_FN) || (uses_read && t == TK_DATA) {
+                arrays_in(other.pos, other.end, ins.scope, &mut out);
+            }
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
 }
 
 /// Constructs that even the interpreter fallback cannot run in a compiled
@@ -92,8 +137,16 @@ mod tests {
             "A=1 : B#=2.5 : C$=\"x\"+Str$(A)\nDim T(10)\nFor I=0 To 10 : T(I)=I*I : Next\nWhile A<10 : Inc A : Wend\nIf A=10 Then Print C$ Else Print B#\nP[A]\nProcedure P[N]\nEnd Proc[N*2]",
         );
         let interpreted: Vec<_> = o.interpreted.iter().map(|x| x.1).collect();
-        // Only Dim is left to the interpreter.
-        assert_eq!(interpreted, ["core instruction"]);
+        assert!(interpreted.is_empty(), "{interpreted:?}");
+    }
+
+    #[test]
+    fn statements_of_milestone_4_are_native() {
+        let o = compile_src(
+            "Dim A(3),S$(2)\nOn A(0)+1 Gosub L1 : On 2 Goto L1,L2\nL1: Gosub \"L\"+\"2\"\nL2: Read A(1),S$(0) : Restore\nFor A(2)=1 To 3 : Swap A(1),A(3) : Inc A(1) : Add A(2),0 : Next\nSort A(0) : X=Match(A(0),2)\nOn 1 Proc P\nData 1,\"x\"\nProcedure P\nEnd Proc",
+        );
+        let interpreted: Vec<_> = o.interpreted.iter().map(|x| x.1).collect();
+        assert!(interpreted.is_empty(), "{interpreted:?}");
     }
 
     #[test]

@@ -22,6 +22,9 @@ type Res<T> = Result<T, Unsupported>;
 pub struct Lower<'a> {
     pub prg: &'a Compiled,
     code: &'a [u8],
+    instrs: &'a [Instr],
+    /// Scope of the instruction being lowered.
+    scope: std::cell::Cell<usize>,
     /// Variables kept in the interpreter (`structure::resident_vars`).
     resident: Vec<(usize, u16)>,
 }
@@ -260,8 +263,14 @@ fn compat(a: Ty, b: Ty) -> Ty {
 }
 
 impl<'a> Lower<'a> {
-    pub fn new(prg: &'a Compiled, instrs: &[Instr]) -> Self {
-        Lower { prg, code: &prg.code, resident: structure::resident_vars(prg, instrs) }
+    pub fn new(prg: &'a Compiled, instrs: &'a [Instr]) -> Self {
+        Lower {
+            prg,
+            code: &prg.code,
+            instrs,
+            scope: std::cell::Cell::new(0),
+            resident: structure::resident_vars(prg, instrs),
+        }
     }
 
     /// True if the instruction uses a variable kept in the interpreter.
@@ -432,9 +441,112 @@ impl<'a> Lower<'a> {
         }
     }
 
+    /// `Fn name(args)` (`Interp::call_fn`).
+    fn fn_call(&self, p: usize) -> Res<(Expr, usize)> {
+        let q = p + 2;
+        if self.rd(q) != TK_VAR {
+            return Err("syntax");
+        }
+        let slot = self.rd(q + 2);
+        let mut r = q + token_size(self.code, q);
+        let mut args = Vec::new();
+        if self.rd(r) == TK_PAR1 {
+            r += 2;
+            loop {
+                let (e, nq) = self.expr(r)?;
+                args.push(e);
+                r = nq;
+                match self.rd(r) {
+                    TK_COMMA => r += 2,
+                    TK_PAR2 => {
+                        r += 2;
+                        break;
+                    }
+                    _ => return Err("syntax"),
+                }
+            }
+        }
+        let scope = self.scope.get();
+        let mut defs = Vec::new();
+        for d in self.instrs.iter().filter(|i| i.scope == scope && self.rd(i.pos) == tk::DEF_FN) {
+            let v = d.pos + 2;
+            if self.rd(v) != TK_VAR || self.rd(v + 2) != slot {
+                continue;
+            }
+            if self.uses_resident(d) {
+                return Err("variable mapped to memory");
+            }
+            // Its expression is compiled here: no Fn inside (recursion).
+            let mut t = v;
+            while t < d.end {
+                if self.rd(t) == tk::FN {
+                    return Err("Fn inside Def Fn");
+                }
+                t += token_size(self.code, t);
+            }
+            let after = v + token_size(self.code, v);
+            let mut q = after;
+            let mut params = Vec::new();
+            if self.rd(q) == TK_PAR1 {
+                q += 2;
+                loop {
+                    let (lv, nq) = self.var_ref(q)?;
+                    if !matches!(lv, LValue::Scalar { .. }) {
+                        return Err("Def Fn parameter");
+                    }
+                    params.push(lv);
+                    q = nq;
+                    match self.rd(q) {
+                        TK_COMMA => q += 2,
+                        TK_PAR2 => {
+                            q += 2;
+                            break;
+                        }
+                        _ => return Err("syntax"),
+                    }
+                }
+            }
+            if params.len() != args.len() || params.iter().zip(&args).any(|(p, a)| (p.ty() == 2) != (a.ty == Ty::Str)) {
+                return Err("Fn parameters");
+            }
+            let q = self.expect(q, tk::OP_EQ)?;
+            let (body, _) = self.expr(q)?;
+            defs.push((after, params, body));
+        }
+        if defs.is_empty() {
+            return Err("Fn without Def Fn");
+        }
+        // The value is what the expression gives: a type known statically
+        // when all definitions agree.
+        let tys: Vec<Ty> = defs.iter().map(|d| d.2.ty).collect();
+        let ty = if tys.iter().all(|&t| t == tys[0]) {
+            tys[0]
+        } else if tys.iter().all(|t| t.is_num()) {
+            Ty::Dyn
+        } else {
+            return Err("Fn types");
+        };
+        Ok((Expr::new(ExprKind::FnCall { slot, args, defs }, ty), r))
+    }
+
     /// A function call, evaluated through the keyword bridge.
     fn function(&self, p: usize) -> Res<(Expr, usize)> {
         let t = self.rd(p);
+        if t == tk::FN {
+            return self.fn_call(p);
+        }
+        if t == tk::MATCH {
+            // Match(a(...), value)
+            let q = self.expect(p + 2, TK_PAR1)?;
+            let (slot, ty, idx, q) = self.array_ref(q)?;
+            let q = self.expect(q, TK_COMMA)?;
+            let (value, q) = self.expr(q)?;
+            let q = self.expect(q, TK_PAR2)?;
+            if (ty == 2) != (value.ty == Ty::Str) {
+                return Err("type mismatch");
+            }
+            return Ok((Expr::new(ExprKind::Match { slot, ty, idx, value: Box::new(value) }, Ty::Int), q));
+        }
         if t == tk::VARPTR || t == tk::ARRAY {
             return Err("Varptr / Array");
         }
@@ -510,6 +622,7 @@ impl<'a> Lower<'a> {
     pub fn stmt(&self, ins: &Instr) -> Res<Stmt> {
         let p = ins.pos;
         let t = self.rd(p);
+        self.scope.set(ins.scope);
         if self.uses_resident(ins) {
             return Err("variable mapped to memory");
         }
@@ -531,9 +644,6 @@ impl<'a> Lower<'a> {
                 let (lv, q) = self.var_ref(p + 4)?;
                 if lv.ty() == 2 {
                     return Err("type mismatch");
-                }
-                if !matches!(lv, LValue::Scalar { .. }) {
-                    return Err("For on an array element");
                 }
                 let q = self.expect(q, tk::OP_EQ)?;
                 let (start, q) = self.num_expr(q)?;
@@ -584,17 +694,86 @@ impl<'a> Lower<'a> {
             TK_IF => self.if_stmt(p)?,
             TK_ELSE | TK_ELSE_IF => Stmt::Jump(self.prg.else_exit.get(&p).copied().unwrap_or(p + 4)),
             tk::END_IF => Stmt::Nop,
-            tk::GOTO => match self.rd(p + 2) {
-                TK_LGO => Stmt::Goto(self.rd(p + 4)),
-                _ => return Err("computed Goto"),
-            },
-            tk::GOSUB => match self.rd(p + 2) {
+            tk::GOTO | tk::GOSUB => match self.rd(p + 2) {
+                TK_LGO if t == tk::GOTO => Stmt::Goto(self.rd(p + 4)),
                 TK_LGO => {
                     let ret = p + 2 + token_size(self.code, p + 2);
                     Stmt::Gosub { label: self.rd(p + 4), ret }
                 }
-                _ => return Err("computed Gosub"),
+                _ => {
+                    let (e, q) = self.expr(p + 2)?;
+                    self.check_end(q, ins)?;
+                    Stmt::GotoExpr { e, gosub: t == tk::GOSUB, ret: q }
+                }
             },
+            TK_ON => {
+                // `Interp::exec_on`: list length and count in the inline data.
+                let len = self.rd(p + 2) as usize;
+                let count = self.rd(p + 4) as usize;
+                let (n, q) = self.num_expr(p + 6)?;
+                let kind = self.rd(q);
+                if kind != tk::GOTO && kind != tk::GOSUB && kind != tk::PROC {
+                    return Err("On");
+                }
+                let after = q + 2 + len;
+                let mut r = q + 2;
+                let mut targets = Vec::new();
+                for i in 0..count {
+                    let e = self.rd(r);
+                    let ok = if kind == tk::PROC { e == TK_PRO || e == TK_VAR } else { e == TK_LGO };
+                    if !ok {
+                        return Err("On with computed targets");
+                    }
+                    targets.push(self.rd(r + 2));
+                    r += token_size(self.code, r);
+                    if i + 1 < count {
+                        r = self.expect(r, TK_COMMA)?;
+                    }
+                }
+                if r != after || after != ins.end {
+                    return Err("instruction boundaries");
+                }
+                if kind == tk::PROC
+                    && targets.iter().any(|&t| self.prg.procs.get(t as usize).is_none_or(|p| p.machine_code))
+                {
+                    return Err("procedure");
+                }
+                Stmt::On { n, kind, targets, after }
+            }
+            tk::RESTORE => match self.rd(p + 2) {
+                t2 if structure::is_end(t2) => Stmt::Restore(None),
+                TK_LGO => {
+                    self.check_end(p + 2 + token_size(self.code, p + 2), ins)?;
+                    Stmt::Restore(Some(self.rd(p + 4)))
+                }
+                _ => return Err("computed Restore"),
+            },
+            tk::READ => {
+                // Natively only when every Data item of the scope is a
+                // constant (Data expressions are evaluated by the interpreter).
+                let constant = self
+                    .instrs
+                    .iter()
+                    .filter(|o| o.scope == ins.scope && self.rd(o.pos) == TK_DATA)
+                    .all(|o| structure::data_is_constant(self.code, o.pos));
+                if !constant {
+                    return Err("Read with Data expressions");
+                }
+                let mut q = p + 2;
+                let mut lvs = Vec::new();
+                loop {
+                    let (lv, nq) = self.var_ref(q)?;
+                    lvs.push(lv);
+                    q = nq;
+                    if self.rd(q) == TK_COMMA {
+                        q += 2;
+                    } else {
+                        break;
+                    }
+                }
+                self.check_end(q, ins)?;
+                Stmt::Read(lvs)
+            }
             tk::RETURN => Stmt::Return,
             tk::PROC => self.proc_call(p + 2, ins)?,
             TK_PROCEDURE => {
@@ -614,18 +793,17 @@ impl<'a> Lower<'a> {
             }
             TK_DATA | tk::SHARED | tk::GLOBAL => Stmt::Nop,
             tk::PRINT => self.print(p + 2, ins)?,
-            tk::INC | tk::DEC => match self.var_ref(p + 2)? {
-                (LValue::Scalar { slot, ty }, q) if ty != 2 => {
-                    self.check_end(q, ins)?;
-                    Stmt::IncDec { slot, ty, inc: t == tk::INC }
+            tk::INC | tk::DEC => {
+                let (lv, q) = self.var_ref(p + 2)?;
+                if lv.ty() == 2 {
+                    return Err("Inc / Dec");
                 }
-                _ => return Err("Inc / Dec"),
-            },
+                self.check_end(q, ins)?;
+                Stmt::IncDec { lv, inc: t == tk::INC }
+            }
             tk::ADD | tk::ADD_2 => {
-                let (LValue::Scalar { slot, ty }, q) = self.var_ref(p + 2)? else {
-                    return Err("Add on an array element");
-                };
-                if ty == 2 {
+                let (lv, q) = self.var_ref(p + 2)?;
+                if lv.ty() == 2 {
                     return Err("type mismatch");
                 }
                 let q = self.expect(q, TK_COMMA)?;
@@ -639,7 +817,23 @@ impl<'a> Lower<'a> {
                     q = nq;
                 }
                 self.check_end(q, ins)?;
-                Stmt::Add { slot, ty, n, range }
+                Stmt::Add { lv, n, range }
+            }
+            tk::SWAP => {
+                let (a, q) = self.var_ref(p + 2)?;
+                let q = self.expect(q, TK_COMMA)?;
+                let (b, q) = self.var_ref(q)?;
+                if a.ty() != b.ty() {
+                    return Err("type mismatch");
+                }
+                self.check_end(q, ins)?;
+                Stmt::Swap(a, b)
+            }
+            tk::DIM => self.dim(p + 2, ins)?,
+            tk::SORT => {
+                let (slot, _, idx, q) = self.array_ref(p + 2)?;
+                self.check_end(q, ins)?;
+                Stmt::Sort { slot, idx }
             }
             tk::WAIT => {
                 let (n, q) = self.num_expr(p + 2)?;
@@ -654,6 +848,70 @@ impl<'a> Lower<'a> {
             _ => self.keyword(p, ins)?,
         };
         Ok(st)
+    }
+
+    /// `Interp::array_ref`: an array variable, its indices (evaluated and
+    /// ignored by the interpreter). Returns slot, type, indices, end.
+    fn array_ref(&self, p: usize) -> Res<(u16, u8, Vec<Expr>, usize)> {
+        if self.rd(p) != TK_VAR {
+            return Err("syntax");
+        }
+        let (slot, ty) = (self.rd(p + 2), self.code[p + 5] & 3);
+        let mut q = p + token_size(self.code, p);
+        let mut idx = Vec::new();
+        if self.rd(q) == TK_PAR1 {
+            q += 2;
+            loop {
+                let (e, nq) = self.expr(q)?;
+                if !e.ty.is_num() {
+                    return Err("type mismatch");
+                }
+                idx.push(e);
+                q = nq;
+                match self.rd(q) {
+                    TK_COMMA => q += 2,
+                    TK_PAR2 => break,
+                    _ => return Err("syntax"),
+                }
+            }
+            q += 2;
+        }
+        Ok((slot, ty, idx, q))
+    }
+
+    /// `Dim` (`Interp::dim`).
+    fn dim(&self, mut q: usize, ins: &Instr) -> Res<Stmt> {
+        let mut arrays = Vec::new();
+        loop {
+            if self.rd(q) != TK_VAR {
+                return Err("syntax");
+            }
+            let (slot, ty) = (self.rd(q + 2), self.code[q + 5] & 3);
+            q = self.expect(q + token_size(self.code, q), TK_PAR1)?;
+            let mut dims = Vec::new();
+            loop {
+                let (e, nq) = self.num_expr(q)?;
+                dims.push(e);
+                q = nq;
+                match self.rd(q) {
+                    TK_COMMA => q += 2,
+                    TK_PAR2 => break,
+                    _ => return Err("syntax"),
+                }
+            }
+            q += 2;
+            if dims.len() > 8 {
+                return Err("more than 8 dimensions");
+            }
+            arrays.push((slot, ty, dims));
+            if self.rd(q) == TK_COMMA {
+                q += 2;
+            } else {
+                break;
+            }
+        }
+        self.check_end(q, ins)?;
+        Ok(Stmt::Dim(arrays))
     }
 
     fn check_end(&self, q: usize, ins: &Instr) -> Res<()> {
@@ -689,6 +947,12 @@ impl<'a> Lower<'a> {
             }
         }
         self.check_end(q, ins)?;
+        // A string for a number (or the reverse) fails in `call_proc`.
+        if args.len() != pr.param_types.len()
+            || args.iter().zip(&pr.param_types).any(|(a, &t)| (a.ty == Ty::Str) != (t == 2))
+        {
+            return Err("parameter types");
+        }
         Ok(Stmt::Call { proc, args, ret: q })
     }
 

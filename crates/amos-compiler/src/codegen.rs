@@ -38,6 +38,7 @@ use wasm_encoder::{
 };
 
 use crate::CompileError;
+use crate::ffp::{self as ffp_helpers, H};
 use crate::ir::*;
 use crate::lower::is_comparison;
 
@@ -106,18 +107,22 @@ imports! {
     GotoLabel = "host" "goto_label" (i i) -> i;
     GosubLabel = "host" "gosub_label" (i i i) -> i;
     Return = "host" "return" (i) -> i;
-    Call = "host" "call" (i i i i) -> i;
+    CallProc = "host" "call_proc" (i i i i) -> i;
+    GotoValue = "host" "goto_value" (i i i) -> i;
+    Restore = "host" "restore" (i i) -> i;
+    ReadData = "host" "read_data" (i i);
     ProcCheck = "host" "proc_check" (i i) -> i;
-    SetParamI = "host" "set_param_i" (i);
-    SetParamF = "host" "set_param_f" (f);
-    SetParamS = "host" "set_param_s" (i);
-    ProcReturn = "host" "proc_return" (i) -> i;
+    ProcEnd = "host" "proc_end" (i) -> i;
     DynOp = "host" "dyn_op" (i f i f i) -> f;
     Wait = "host" "wait" (i i) -> i;
+    FnDef = "host" "fn_def" (i i) -> i;
+    WhileEnd = "host" "while_end" (i i) -> i;
+    Dim = "host" "dim" (i i i i i) -> i;
+    MatchResident = "host" "match_resident" (i i) -> i;
+    SortArray = "rt" "sort_array" (i);
+    MatchArray = "rt" "match_array" (i) -> i;
     NextDone = "host" "next_done" (i) -> i;
     StrF = "host" "str_f" (f) -> i;
-    ParamI = "host" "param_i" () -> i;
-    ParamF = "host" "param_f" () -> f;
     ParamS = "host" "param_s" () -> i;
     StrLen = "rt" "str_len" (i) -> i;
     StrAsc = "rt" "str_asc" (i) -> i;
@@ -132,18 +137,22 @@ imports! {
     StrConcat = "rt" "str_concat" (i i) -> i;
     StrMinus = "rt" "str_minus" (i i) -> i;
     StrCmp = "rt" "str_cmp" (i i) -> i;
-    I2f = "rt" "i2f" (i) -> f;
-    Fadd = "rt" "fadd" (f f) -> f;
-    Fsub = "rt" "fsub" (f f) -> f;
-    Fmul = "rt" "fmul" (f f) -> f;
-    Fdiv = "rt" "fdiv" (f f) -> f;
-    Fcmp = "rt" "fcmp" (f f) -> i;
     Pow = "rt" "pow" (f f) -> f;
 }
 
 /// Sentinels returned by the integer helpers.
 const OVF: i64 = 1 << 32;
 const DIV0: i64 = 1 << 33;
+
+/// A variable or element whose indices were evaluated.
+enum Place {
+    Scalar(u16),
+    /// Element of a linear array: local holding its address.
+    Linear(u32),
+    /// Element of an array kept in the interpreter: slot, local holding
+    /// the flat index.
+    Resident(u16, u32),
+}
 
 /// Branch targets of the structured control flow.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -166,6 +175,13 @@ const N_FIXED: u32 = 6;
 
 struct Gen<'a> {
     prg: &'a Compiled,
+    layout: Layout,
+    /// Arrays kept in the interpreter (`structure::var_key`s, sorted).
+    resident_arrays: &'a [(usize, u16)],
+    /// Scope of the instruction being compiled.
+    scope: usize,
+    /// Point number of the instruction being compiled.
+    k: u32,
     instrs: &'a [Instr],
     double: bool,
     code: Vec<W<'static>>,
@@ -175,6 +191,8 @@ struct Gen<'a> {
     free: Vec<(u32, ValType)>,
     fn_imul: u32,
     fn_idiv: u32,
+    /// Function index of the first single precision helper.
+    fn_ffp: u32,
     /// Position of the instruction being compiled.
     pos: usize,
 }
@@ -198,6 +216,11 @@ impl<'a> Gen<'a> {
 
     fn call(&mut self, f: Imp) {
         self.w(W::Call(f as u32));
+    }
+
+    /// Calls a single precision helper of the module.
+    fn helper(&mut self, h: H) {
+        self.w(W::Call(self.fn_ffp + h as u32));
     }
 
     fn get(&mut self, l: u32) {
@@ -282,9 +305,30 @@ impl<'a> Gen<'a> {
         self.br(Lbl::Status);
     }
 
+    /// Continues at `point`: a direct branch when it is a later instruction
+    /// (its block encloses this code), else through the dispatcher.
     fn jump_point(&mut self, point: u32) {
-        self.i32c(point as i32);
-        self.status_jump();
+        if point > self.k {
+            self.br(Lbl::Point(point));
+        } else {
+            self.i32c(point as i32);
+            self.status_jump();
+        }
+    }
+
+    /// A status on the stack, usually `expected` (a point): a direct branch
+    /// for it when it is a later instruction, the dispatcher otherwise.
+    fn status_jump_expect(&mut self, expected: Option<u32>) {
+        match expected {
+            Some(pt) if pt > self.k => {
+                self.w(W::LocalTee(L_ST));
+                self.i32c(pt as i32);
+                self.w(W::I32Eq);
+                self.br_if(Lbl::Point(pt));
+                self.br(Lbl::Status);
+            }
+            _ => self.status_jump(),
+        }
     }
 
     /// Branches to `$raise` if a runtime function left a pending error.
@@ -384,6 +428,173 @@ impl<'a> Gen<'a> {
         t
     }
 
+    /// True if array `slot` is in linear memory (not kept in the
+    /// interpreter).
+    fn is_linear(&self, slot: u16) -> bool {
+        self.resident_arrays.binary_search(&structure::var_key(self.scope, slot)).is_err()
+    }
+
+    /// Evaluates the indices of an element of the linear array `slot` and
+    /// returns a local holding its absolute address (`Interp::var_ref`:
+    /// indices first, then error 27 for a non dimensioned array, 23 for a
+    /// bad index).
+    fn elem_addr(&mut self, slot: u16, ty: u8, idx: &[Expr]) -> u32 {
+        let mut temps = Vec::new();
+        for (i, e) in idx.iter().enumerate() {
+            self.expr(e);
+            self.as_int(e.ty);
+            if i < 8 {
+                let t = self.tmp(ValType::I32);
+                self.set(t);
+                temps.push(t);
+            } else {
+                self.w(W::Drop);
+            }
+        }
+        let d = self.tmp(ValType::I32);
+        self.load_var(slot, Ty::Int);
+        self.w(W::LocalTee(d));
+        self.w(W::I32Eqz);
+        self.if_(BlockType::Empty);
+        self.raise(errors::NON_DIMENSIONED_ARRAY);
+        self.end();
+        self.get(d);
+        self.w(W::I32Load(mem32(layout::ARR_NDIMS)));
+        self.i32c(temps.len() as i32);
+        self.w(W::I32Ne);
+        self.if_(BlockType::Empty);
+        self.raise(errors::ILLEGAL_FUNCTION_CALL);
+        self.end();
+        let (flat, m) = (self.tmp(ValType::I32), self.tmp(ValType::I32));
+        self.i32c(0);
+        self.set(flat);
+        for (j, &t) in temps.iter().enumerate() {
+            self.get(d);
+            self.w(W::I32Load(mem32(layout::ARR_DIMS + j as u32 * 4)));
+            self.w(W::LocalTee(m));
+            self.get(t);
+            self.w(W::I32LtU);
+            self.if_(BlockType::Empty);
+            self.raise(errors::ILLEGAL_FUNCTION_CALL);
+            self.end();
+            self.get(flat);
+            self.get(m);
+            self.i32c(1);
+            self.w(W::I32Add);
+            self.w(W::I32Mul);
+            self.get(t);
+            self.w(W::I32Add);
+            self.set(flat);
+            self.release(t, ValType::I32);
+        }
+        self.get(d);
+        self.get(flat);
+        self.i32c(layout::elem_size(ty) as i32);
+        self.w(W::I32Mul);
+        self.w(W::I32Add);
+        self.i32c(layout::ARR_DATA as i32);
+        self.w(W::I32Add);
+        self.set(d);
+        self.release(flat, ValType::I32);
+        self.release(m, ValType::I32);
+        d
+    }
+
+    /// Locates a variable or element (evaluating its indices).
+    fn place(&mut self, lv: &LValue) -> Place {
+        match lv {
+            LValue::Scalar { slot, .. } => Place::Scalar(*slot),
+            LValue::Elem { slot, ty, idx } => {
+                if self.is_linear(*slot) {
+                    Place::Linear(self.elem_addr(*slot, *ty, idx))
+                } else {
+                    Place::Resident(*slot, self.aref(*slot, idx))
+                }
+            }
+        }
+    }
+
+    fn load_place(&mut self, p: &Place, ty: u8) {
+        match *p {
+            Place::Scalar(slot) => self.load_var(slot, Ty::of_var(ty)),
+            Place::Linear(a) => {
+                self.get(a);
+                self.w(if ty == 1 { W::F64Load(mem64(0)) } else { W::I32Load(mem32(0)) });
+            }
+            Place::Resident(slot, f) => {
+                self.i32c(slot as i32);
+                self.get(f);
+                self.call(match ty {
+                    0 => Imp::AgetI,
+                    1 => Imp::AgetF,
+                    _ => Imp::AgetS,
+                });
+            }
+        }
+    }
+
+    /// Pushes what a store to `p` needs before the value; returns the
+    /// memory offset for `store_place`.
+    fn store_prefix(&mut self, p: &Place) -> u32 {
+        match *p {
+            Place::Scalar(slot) => self.var_addr(slot),
+            Place::Linear(a) => {
+                self.get(a);
+                0
+            }
+            Place::Resident(slot, f) => {
+                self.i32c(slot as i32);
+                self.get(f);
+                0
+            }
+        }
+    }
+
+    /// Stores the value (of the variable's type) on the stack.
+    fn store_place(&mut self, p: &Place, off: u32, ty: u8) {
+        match p {
+            Place::Scalar(_) | Place::Linear(_) => self.store(off, ty),
+            Place::Resident(..) => {
+                self.call(match ty {
+                    0 => Imp::AsetI,
+                    1 => Imp::AsetF,
+                    _ => Imp::AsetS,
+                });
+                self.err_check();
+            }
+        }
+    }
+
+    fn release_place(&mut self, p: Place) {
+        if let Place::Linear(l) | Place::Resident(_, l) = p {
+            self.release(l, ValType::I32);
+        }
+    }
+
+    /// Loads the descriptor of linear array `slot`, error 27 if it is not
+    /// dimensioned; returns the local holding it.
+    fn array_desc(&mut self, slot: u16) -> u32 {
+        let d = self.tmp(ValType::I32);
+        self.load_var(slot, Ty::Int);
+        self.w(W::LocalTee(d));
+        self.w(W::I32Eqz);
+        self.if_(BlockType::Empty);
+        self.raise(errors::NON_DIMENSIONED_ARRAY);
+        self.end();
+        d
+    }
+
+    /// Evaluates expressions for their effects only (`Interp::array_ref`).
+    fn exprs_dropped(&mut self, es: &[Expr]) {
+        for e in es {
+            self.expr(e);
+            self.w(W::Drop);
+            if e.ty == Ty::Dyn {
+                self.w(W::Drop);
+            }
+        }
+    }
+
     // ------------------------------------------------------------------
     // Conversions
     // ------------------------------------------------------------------
@@ -403,7 +614,7 @@ impl<'a> Gen<'a> {
         if self.double {
             self.w(W::F64ConvertI32S);
         } else {
-            self.call(Imp::I2f);
+            self.helper(H::I2f);
         }
     }
 
@@ -474,14 +685,96 @@ impl<'a> Gen<'a> {
             }
             ExprKind::Var(slot) => self.load_var(*slot, e.ty),
             ExprKind::Elem(slot, idx) => {
-                let t = self.aref(*slot, idx);
+                let ty = match e.ty {
+                    Ty::Float => 1,
+                    Ty::Str => 2,
+                    _ => 0,
+                };
+                let lv = LValue::Elem { slot: *slot, ty, idx: idx.clone() };
+                let p = self.place(&lv);
+                self.load_place(&p, ty);
+                self.release_place(p);
+            }
+            ExprKind::FnCall { slot, args, defs } => {
+                // Arguments first, then the current definition
+                // (`Interp::call_fn`), whose parameters get the arguments
+                // before its expression is evaluated.
+                let mut temps = Vec::new();
+                for a in args {
+                    self.expr(a);
+                    let ts = match a.ty {
+                        Ty::Float => vec![(self.tmp(ValType::F64), ValType::F64)],
+                        Ty::Dyn => vec![(self.tmp(ValType::F64), ValType::F64), (self.tmp(ValType::I32), ValType::I32)],
+                        _ => vec![(self.tmp(ValType::I32), ValType::I32)],
+                    };
+                    for &(l, _) in ts.iter().rev() {
+                        self.set(l);
+                    }
+                    temps.push(ts);
+                }
+                let dp = self.tmp(ValType::I32);
+                self.i32c(self.pos as i32);
                 self.i32c(*slot as i32);
-                self.get(t);
-                self.release(t, ValType::I32);
-                match e.ty {
-                    Ty::Float => self.call(Imp::AgetF),
-                    Ty::Str => self.call(Imp::AgetS),
-                    _ => self.call(Imp::AgetI),
+                self.call(Imp::FnDef);
+                self.set(dp);
+                self.err_check();
+                let rs: Vec<(u32, ValType)> = match e.ty {
+                    Ty::Float => vec![(self.tmp(ValType::F64), ValType::F64)],
+                    Ty::Dyn => vec![(self.tmp(ValType::F64), ValType::F64), (self.tmp(ValType::I32), ValType::I32)],
+                    _ => vec![(self.tmp(ValType::I32), ValType::I32)],
+                };
+                let done = self.block();
+                for (after, params, body) in defs {
+                    self.get(dp);
+                    self.i32c(*after as i32);
+                    self.w(W::I32Eq);
+                    self.if_(BlockType::Empty);
+                    for ((p, ts), a) in params.iter().zip(&temps).zip(args) {
+                        let pl = self.place(p);
+                        let off = self.store_prefix(&pl);
+                        for &(l, _) in ts {
+                            self.get(l);
+                        }
+                        self.convert_for(a.ty, p.ty());
+                        self.store_place(&pl, off, p.ty());
+                        self.release_place(pl);
+                    }
+                    self.expr(body);
+                    if e.ty == Ty::Dyn {
+                        self.as_dyn(body.ty);
+                    }
+                    for &(l, _) in rs.iter().rev() {
+                        self.set(l);
+                    }
+                    self.br(done);
+                    self.end();
+                }
+                self.raise(15);
+                self.end();
+                for &(l, _) in &rs {
+                    self.get(l);
+                }
+                for (l, t) in rs.into_iter().chain(temps.into_iter().flatten()) {
+                    self.release(l, t);
+                }
+                self.release(dp, ValType::I32);
+            }
+            ExprKind::Match { slot, ty, idx, value } => {
+                self.exprs_dropped(idx);
+                self.get(L_BASE);
+                self.expr(value);
+                self.convert_for(value.ty, *ty);
+                self.store(layout::RET, *ty);
+                if self.is_linear(*slot) {
+                    let d = self.array_desc(*slot);
+                    self.get(d);
+                    self.release(d, ValType::I32);
+                    self.call(Imp::MatchArray);
+                } else {
+                    self.i32c(self.pos as i32);
+                    self.i32c(*slot as i32);
+                    self.call(Imp::MatchResident);
+                    self.err_check();
                 }
             }
             ExprKind::Neg(a) => match a.ty {
@@ -694,8 +987,12 @@ impl<'a> Gen<'a> {
             }
             Nf::True => self.i32c(-1),
             Nf::False => self.i32c(0),
-            Nf::Param => self.call(Imp::ParamI),
-            Nf::ParamF => self.call(Imp::ParamF),
+            // Mirrored in the header by the runtime.
+            Nf::Param => self.hdr(layout::PARAM_E),
+            Nf::ParamF => {
+                self.get(L_BASE);
+                self.w(W::F64Load(mem64(layout::PARAM_F)));
+            }
             Nf::ParamS => self.call(Imp::ParamS),
             Nf::Pi => {
                 let pi = if self.double {
@@ -827,7 +1124,7 @@ impl<'a> Gen<'a> {
                     if self.double {
                         self.float_cmp(op);
                     } else {
-                        self.call(Imp::Fcmp);
+                        self.helper(H::FCmp);
                         self.i32c(0);
                         self.cmp_i32(op);
                     }
@@ -907,11 +1204,11 @@ impl<'a> Gen<'a> {
                         _ => W::F64Div,
                     });
                 } else {
-                    self.call(match op {
-                        OP_PLUS => Imp::Fadd,
-                        OP_MINUS => Imp::Fsub,
-                        OP_MUL => Imp::Fmul,
-                        _ => Imp::Fdiv,
+                    self.helper(match op {
+                        OP_PLUS => H::FAdd,
+                        OP_MINUS => H::FSub,
+                        OP_MUL => H::FMul,
+                        _ => H::FDiv,
                     });
                 }
             }
@@ -967,28 +1264,12 @@ impl<'a> Gen<'a> {
     // ------------------------------------------------------------------
 
     fn assign(&mut self, lv: &LValue, e: &Expr) {
-        match lv {
-            LValue::Scalar { slot, ty } => {
-                let off = self.var_addr(*slot);
-                self.expr(e);
-                self.convert_for(e.ty, *ty);
-                self.store(off, *ty);
-            }
-            LValue::Elem { slot, ty, idx } => {
-                let t = self.aref(*slot, idx);
-                self.i32c(*slot as i32);
-                self.get(t);
-                self.release(t, ValType::I32);
-                self.expr(e);
-                self.convert_for(e.ty, *ty);
-                self.call(match ty {
-                    0 => Imp::AsetI,
-                    1 => Imp::AsetF,
-                    _ => Imp::AsetS,
-                });
-                self.err_check();
-            }
-        }
+        let p = self.place(lv);
+        let off = self.store_prefix(&p);
+        self.expr(e);
+        self.convert_for(e.ty, lv.ty());
+        self.store_place(&p, off, lv.ty());
+        self.release_place(p);
     }
 
     /// Pushes 1 if `target` is in the range of the top loop (no loop to
@@ -1008,6 +1289,7 @@ impl<'a> Gen<'a> {
     /// no loop is dropped; the runtime otherwise. Always leaves.
     fn goto_label(&mut self, k: usize, idx: u16) -> Result<(), CompileError> {
         let scope = self.instrs[k].scope;
+        let mut expected = None;
         if let Some(l) = self.prg.scopes.get(scope).and_then(|s| s.labels.get(idx as usize)) {
             let target = l.target;
             let pt = self.point_of(target)?;
@@ -1022,11 +1304,12 @@ impl<'a> Gen<'a> {
             self.if_(BlockType::Empty);
             self.jump_point(pt);
             self.end();
+            expected = Some(pt);
         }
         self.i32c(self.pos as i32);
         self.i32c(idx as i32);
         self.call(Imp::GotoLabel);
-        self.status_jump();
+        self.status_jump_expect(expected);
         Ok(())
     }
 
@@ -1099,18 +1382,37 @@ impl<'a> Gen<'a> {
                         self.i32c(pos);
                         self.i32c(*false_target as i32);
                         self.call(Imp::GotoPos);
-                        self.status_jump();
+                        self.status_jump_expect(Some(pt));
                     }
                 }
                 self.end();
             }
             Stmt::For { lv, start, limit, step, body, exit } => {
-                // (For on an array element is left to the interpreter.)
-                let LValue::Scalar { .. } = lv else {
-                    return Err(CompileError::Internal("For on an array element".into()));
-                };
-                self.assign(lv, start);
-                let flat: Option<u32> = None;
+                // The variable is located once (`Interp::var_ref`), then
+                // assigned the start value.
+                let ty = lv.ty();
+                let p = self.place(lv);
+                let off = self.store_prefix(&p);
+                self.expr(start);
+                self.convert_for(start.ty, ty);
+                self.store_place(&p, off, ty);
+                // Flat index of an element (-1 for a scalar).
+                let flat = self.tmp(ValType::I32);
+                match p {
+                    Place::Scalar(_) => self.i32c(-1),
+                    Place::Resident(_, f) => self.get(f),
+                    Place::Linear(a) => {
+                        self.get(a);
+                        self.load_var(lv.slot(), Ty::Int);
+                        self.w(W::I32Sub);
+                        self.i32c(layout::ARR_DATA as i32);
+                        self.w(W::I32Sub);
+                        self.i32c(layout::elem_size(ty) as i32);
+                        self.w(W::I32DivU);
+                    }
+                }
+                self.set(flat);
+                self.release_place(p);
                 let lim = self.tmp(ValType::I32);
                 self.expr(limit);
                 self.as_int(limit.ty);
@@ -1126,13 +1428,14 @@ impl<'a> Gen<'a> {
                 self.set(stp);
                 self.i32c(pos);
                 self.i32c(lv.slot() as i32);
-                self.i32c(flat.map_or(-1, |f| f as i32));
+                self.get(flat);
                 self.get(lim);
                 self.get(stp);
                 self.i32c(*body as i32);
                 self.i32c(*exit as i32);
                 self.call(Imp::ForPush);
                 self.status_check();
+                self.release(flat, ValType::I32);
                 self.release(lim, ValType::I32);
                 self.release(stp, ValType::I32);
             }
@@ -1194,30 +1497,106 @@ impl<'a> Gen<'a> {
                 let exit_point = self.point_of(*exit)?;
                 self.expr(cond);
                 self.as_int(cond.ty);
+                let c = self.tmp(ValType::I32);
+                self.set(c);
+                // Did this program's Wend leave our entry on the stack?
+                let reuse = self.tmp(ValType::I32);
+                self.hdr(layout::LAZY_WHILE);
+                self.hdr(layout::TOP_KIND);
+                self.i32c(layout::TOP_WHILE);
+                self.w(W::I32Eq);
+                self.w(W::I32And);
+                self.hdr(layout::TOP_START);
+                self.i32c(pos);
+                self.w(W::I32Eq);
+                self.w(W::I32And);
+                self.set(reuse);
+                self.get(c);
                 self.w(W::I32Eqz);
                 self.if_(BlockType::Empty);
-                self.jump_point(exit_point);
+                {
+                    self.get(reuse);
+                    self.if_(BlockType::Empty);
+                    self.i32c(pos);
+                    self.i32c(*exit as i32);
+                    self.call(Imp::WhileEnd);
+                    self.status_jump_expect(Some(exit_point));
+                    self.end();
+                    self.jump_point(exit_point);
+                }
                 self.end();
-                self.i32c(pos);
-                self.i32c(*body as i32);
-                self.i32c(*exit as i32);
-                self.call(Imp::WhilePush);
-                self.status_check();
+                self.get(reuse);
+                self.if_(BlockType::Empty);
+                {
+                    // Same entry as the interpreter pushes again: keep it.
+                    self.get(L_BASE);
+                    self.i32c(0);
+                    self.w(W::I32Store(mem32(layout::LAZY_WHILE)));
+                }
+                self.else_();
+                {
+                    self.i32c(pos);
+                    self.i32c(*body as i32);
+                    self.i32c(*exit as i32);
+                    self.call(Imp::WhilePush);
+                    self.status_check();
+                }
+                self.end();
+                self.release(c, ValType::I32);
+                self.release(reuse, ValType::I32);
             }
             Stmt::Until(cond) => {
                 self.test_point();
-                self.i32c(pos);
                 self.expr(cond);
                 self.as_int(cond.ty);
+                let c = self.tmp(ValType::I32);
+                self.set(c);
+                // Fast path: top is a Repeat and the condition is false.
+                self.hdr(layout::TOP_KIND);
+                self.i32c(layout::TOP_REPEAT);
+                self.w(W::I32Eq);
+                self.get(c);
+                self.w(W::I32Eqz);
+                self.w(W::I32And);
+                self.if_(BlockType::Empty);
+                self.hdr(layout::FOR_BODY);
+                self.status_jump();
+                self.end();
+                self.i32c(pos);
+                self.get(c);
+                self.release(c, ValType::I32);
                 self.call(Imp::Until);
                 self.status_check();
             }
             Stmt::Wend => {
+                self.hdr(layout::ATT);
+                self.w(W::I32Eqz);
+                self.hdr(layout::TOP_KIND);
+                self.i32c(layout::TOP_WHILE);
+                self.w(W::I32Eq);
+                self.w(W::I32And);
+                self.if_(BlockType::Empty);
+                self.get(L_BASE);
+                self.i32c(1);
+                self.w(W::I32Store(mem32(layout::LAZY_WHILE)));
+                self.hdr(layout::TOP_START_POINT);
+                self.status_jump();
+                self.end();
                 self.i32c(pos);
                 self.call(Imp::Wend);
                 self.status_jump();
             }
             Stmt::Loop => {
+                self.hdr(layout::ATT);
+                self.w(W::I32Eqz);
+                self.hdr(layout::TOP_KIND);
+                self.i32c(layout::TOP_DO);
+                self.w(W::I32Eq);
+                self.w(W::I32And);
+                self.if_(BlockType::Empty);
+                self.hdr(layout::FOR_BODY);
+                self.status_jump();
+                self.end();
                 self.i32c(pos);
                 self.call(Imp::LoopEnd);
                 self.status_jump();
@@ -1232,7 +1611,8 @@ impl<'a> Gen<'a> {
                 self.i32c(*frames as i32);
                 self.i32c(*target as i32);
                 self.call(Imp::Exit);
-                self.status_jump();
+                let pt = self.point_of(*target)?;
+                self.status_jump_expect(Some(pt));
                 if cond.is_some() {
                     self.end();
                 }
@@ -1243,7 +1623,84 @@ impl<'a> Gen<'a> {
                 self.i32c(*label as i32);
                 self.i32c(*ret as i32);
                 self.call(Imp::GosubLabel);
+                let pt = self
+                    .prg
+                    .scopes
+                    .get(self.scope)
+                    .and_then(|s| s.labels.get(*label as usize))
+                    .map(|l| l.target)
+                    .and_then(|t| self.point_of(t).ok());
+                self.status_jump_expect(pt);
+            }
+            Stmt::On { n, kind, targets, after } => {
+                // `Interp::exec_on`: out of range continues after the list;
+                // otherwise a test point, then the jump.
+                let after_pt = self.point_of(*after)?;
+                self.expr(n);
+                self.as_int(n.ty);
+                let nt = self.tmp(ValType::I32);
+                self.set(nt);
+                for (i, &t) in targets.iter().enumerate() {
+                    self.get(nt);
+                    self.i32c(i as i32 + 1);
+                    self.w(W::I32Eq);
+                    self.if_(BlockType::Empty);
+                    match *kind {
+                        tk::GOTO => self.goto_label(k, t)?,
+                        tk::GOSUB => {
+                            self.i32c(pos);
+                            self.i32c(t as i32);
+                            self.i32c(*after as i32);
+                            self.call(Imp::GosubLabel);
+                            self.status_jump();
+                        }
+                        _ => {
+                            self.test_point();
+                            self.i32c(pos);
+                            self.i32c(t as i32);
+                            self.i32c(*after as i32);
+                            self.i32c(0);
+                            self.call(Imp::CallProc);
+                            self.status_jump();
+                        }
+                    }
+                    self.end();
+                }
+                self.release(nt, ValType::I32);
+                if after_pt != next {
+                    self.jump_point(after_pt);
+                }
+            }
+            Stmt::GotoExpr { e, gosub, ret } => {
+                self.test_point();
+                self.expr(e);
+                self.push_value(e.ty);
+                self.i32c(pos);
+                self.i32c(*gosub as i32);
+                self.i32c(*ret as i32);
+                self.call(Imp::GotoValue);
                 self.status_jump();
+            }
+            Stmt::Restore(label) => {
+                self.i32c(pos);
+                self.i32c(label.map_or(-1, |l| l as i32));
+                self.call(Imp::Restore);
+                self.status_check();
+            }
+            Stmt::Read(lvs) => {
+                for lv in lvs {
+                    let ty = lv.ty();
+                    let p = self.place(lv);
+                    let off = self.store_prefix(&p);
+                    self.i32c(pos);
+                    self.i32c(ty as i32);
+                    self.call(Imp::ReadData);
+                    self.err_check();
+                    self.get(L_BASE);
+                    self.w(if ty == 1 { W::F64Load(mem64(layout::RET)) } else { W::I32Load(mem32(layout::RET)) });
+                    self.store_place(&p, off, ty);
+                    self.release_place(p);
+                }
             }
             Stmt::Return => {
                 self.i32c(pos);
@@ -1252,81 +1709,116 @@ impl<'a> Gen<'a> {
             }
             Stmt::Call { proc, args, ret } => {
                 self.test_point();
-                for a in args {
+                // Parameters converted to their types, in the `args` area.
+                let types = self.prg.procs[*proc].param_types.clone();
+                for (k, (a, &ty)) in args.iter().zip(&types).enumerate() {
+                    self.get(L_BASE);
                     self.expr(a);
-                    self.push_value(a.ty);
+                    self.convert_for(a.ty, ty);
+                    self.store(self.layout.args + k as u32 * 8, ty);
                 }
                 self.i32c(pos);
                 self.i32c(*proc as i32);
                 self.i32c(*ret as i32);
                 self.i32c(args.len() as i32);
-                self.call(Imp::Call);
-                self.status_jump();
+                self.call(Imp::CallProc);
+                let body = self.point_of(self.prg.procs[*proc].body)?;
+                self.status_jump_expect(Some(body));
             }
             Stmt::EndProc { pop, value } => {
                 self.test_point();
+                // No procedure running (only possible after odd jumps).
+                self.hdr(layout::DEPTH);
+                self.w(W::I32Eqz);
+                self.if_(BlockType::Empty);
                 self.i32c(pos);
                 self.i32c(*pop as i32);
                 self.call(Imp::ProcCheck);
-                self.status_check();
-                if let Some(e) = value {
-                    self.expr(e);
-                    match e.ty {
-                        Ty::Int => self.call(Imp::SetParamI),
-                        Ty::Float => self.call(Imp::SetParamF),
-                        Ty::Str => self.call(Imp::SetParamS),
-                        Ty::Dyn => {
-                            let tag = self.tmp(ValType::I32);
-                            let x = self.tmp(ValType::F64);
-                            self.set(tag);
-                            self.set(x);
-                            self.get(tag);
-                            self.if_(BlockType::Empty);
-                            self.get(x);
-                            self.call(Imp::SetParamF);
-                            self.else_();
-                            self.get(x);
-                            self.w(W::I32TruncSatF64S);
-                            self.call(Imp::SetParamI);
-                            self.end();
-                            self.release(tag, ValType::I32);
-                            self.release(x, ValType::F64);
+                self.status_jump();
+                self.end();
+                let tag = match value {
+                    None => -1,
+                    Some(e) => {
+                        self.get(L_BASE);
+                        self.expr(e);
+                        match e.ty {
+                            Ty::Int => {
+                                self.w(W::I32Store(mem32(layout::RET)));
+                                0
+                            }
+                            Ty::Str => {
+                                self.w(W::I32Store(mem32(layout::RET)));
+                                2
+                            }
+                            Ty::Float => {
+                                self.w(W::F64Store(mem64(layout::RET)));
+                                1
+                            }
+                            Ty::Dyn => {
+                                // Integer or float as known at run time.
+                                let (t, x, a) =
+                                    (self.tmp(ValType::I32), self.tmp(ValType::F64), self.tmp(ValType::I32));
+                                self.set(t);
+                                self.set(x);
+                                self.set(a);
+                                self.get(t);
+                                self.if_(BlockType::Empty);
+                                self.get(a);
+                                self.get(x);
+                                self.w(W::F64Store(mem64(layout::RET)));
+                                self.else_();
+                                self.get(a);
+                                self.get(x);
+                                self.w(W::I32TruncSatF64S);
+                                self.w(W::I32Store(mem32(layout::RET)));
+                                self.end();
+                                self.get(L_BASE);
+                                self.get(t);
+                                self.w(W::I32Store(mem32(layout::RET_TAG)));
+                                for (l, vt) in [(t, ValType::I32), (x, ValType::F64), (a, ValType::I32)] {
+                                    self.release(l, vt);
+                                }
+                                -2
+                            }
                         }
                     }
+                };
+                if tag != -2 {
+                    self.get(L_BASE);
+                    self.i32c(tag);
+                    self.w(W::I32Store(mem32(layout::RET_TAG)));
                 }
                 self.i32c(pos);
-                self.call(Imp::ProcReturn);
+                self.call(Imp::ProcEnd);
                 self.status_jump();
             }
-            Stmt::IncDec { slot, ty, inc } => {
-                let off = self.var_addr(*slot);
-                let off2 = self.var_addr(*slot);
-                debug_assert_eq!(off, off2);
-                if *ty == 1 {
-                    self.w(W::F64Load(mem64(off)));
+            Stmt::IncDec { lv, inc } => {
+                let ty = lv.ty();
+                let p = self.place(lv);
+                let off = self.store_prefix(&p);
+                self.load_place(&p, ty);
+                if ty == 1 {
+                    // `f + 1.0` without rounding, as the interpreter.
                     self.w(W::F64Const(1f64.into()));
                     self.w(if *inc { W::F64Add } else { W::F64Sub });
-                    self.w(W::F64Store(mem64(off)));
                 } else {
-                    self.w(W::I32Load(mem32(off)));
                     self.i32c(1);
                     self.w(if *inc { W::I32Add } else { W::I32Sub });
-                    self.w(W::I32Store(mem32(off)));
                 }
+                self.store_place(&p, off, ty);
+                self.release_place(p);
             }
-            Stmt::Add { slot, ty, n, range } => {
-                let off = self.var_addr(*slot);
+            Stmt::Add { lv, n, range } => {
+                let ty = lv.ty();
+                let p = self.place(lv);
+                let off = self.store_prefix(&p);
                 self.expr(n);
                 self.as_int(n.ty);
                 let nt = self.tmp(ValType::I32);
                 self.set(nt);
-                let off2 = self.var_addr(*slot);
-                debug_assert_eq!(off, off2);
-                if *ty == 1 {
-                    self.w(W::F64Load(mem64(off)));
+                self.load_place(&p, ty);
+                if ty == 1 {
                     self.w(W::I32TruncSatF64S);
-                } else {
-                    self.w(W::I32Load(mem32(off)));
                 }
                 self.get(nt);
                 self.w(W::I32Add);
@@ -1356,10 +1848,94 @@ impl<'a> Gen<'a> {
                     self.release(tb, ValType::I32);
                 }
                 self.release(nt, ValType::I32);
-                if *ty == 1 {
+                if ty == 1 {
                     self.int_to_float();
                 }
-                self.store(off, *ty);
+                self.store_place(&p, off, ty);
+                self.release_place(p);
+            }
+            Stmt::Swap(a, b) => {
+                let ty = a.ty();
+                let vt = if ty == 1 { ValType::F64 } else { ValType::I32 };
+                let pa = self.place(a);
+                let pb = self.place(b);
+                let (va, vb) = (self.tmp(vt), self.tmp(vt));
+                self.load_place(&pa, ty);
+                self.set(va);
+                self.load_place(&pb, ty);
+                self.set(vb);
+                let off = self.store_prefix(&pa);
+                self.get(vb);
+                self.store_place(&pa, off, ty);
+                let off = self.store_prefix(&pb);
+                self.get(va);
+                self.store_place(&pb, off, ty);
+                self.release(va, vt);
+                self.release(vb, vt);
+                self.release_place(pa);
+                self.release_place(pb);
+            }
+            Stmt::Dim(arrays) => {
+                for (slot, ty, dims) in arrays {
+                    // Each maximum index is checked as soon as it is known,
+                    // the element count after each comma (`Interp::dim`).
+                    let count = self.tmp(ValType::I32);
+                    self.i32c(1);
+                    self.set(count);
+                    let mut temps = Vec::new();
+                    for (j, e) in dims.iter().enumerate() {
+                        self.expr(e);
+                        self.as_int(e.ty);
+                        let t = self.tmp(ValType::I32);
+                        self.w(W::LocalTee(t));
+                        self.i32c(0xFFFF);
+                        self.w(W::I32GeU);
+                        self.if_(BlockType::Empty);
+                        self.raise(errors::ILLEGAL_FUNCTION_CALL);
+                        self.end();
+                        if j + 1 < dims.len() {
+                            self.get(count);
+                            self.get(t);
+                            self.i32c(1);
+                            self.w(W::I32Add);
+                            self.w(W::I32Mul);
+                            self.w(W::LocalTee(count));
+                            self.i32c(0x10000);
+                            self.w(W::I32GeU);
+                            self.if_(BlockType::Empty);
+                            self.raise(errors::ILLEGAL_FUNCTION_CALL);
+                            self.end();
+                        }
+                        temps.push(t);
+                    }
+                    for (j, t) in temps.into_iter().enumerate() {
+                        self.get(L_BASE);
+                        self.get(t);
+                        self.w(W::I32Store(mem32(layout::IDX + j as u32 * 4)));
+                        self.release(t, ValType::I32);
+                    }
+                    self.release(count, ValType::I32);
+                    self.i32c(pos);
+                    self.i32c(*slot as i32);
+                    self.i32c(*ty as i32);
+                    self.i32c(dims.len() as i32);
+                    self.i32c(!self.is_linear(*slot) as i32);
+                    self.call(Imp::Dim);
+                    self.status_check();
+                }
+            }
+            Stmt::Sort { slot, idx } => {
+                if self.is_linear(*slot) {
+                    self.exprs_dropped(idx);
+                    let d = self.array_desc(*slot);
+                    self.get(d);
+                    self.release(d, ValType::I32);
+                    self.call(Imp::SortArray);
+                } else {
+                    self.i32c(pos);
+                    self.call(Imp::Interp);
+                    self.status_jump();
+                }
             }
             Stmt::Wait(n) => {
                 self.i32c(pos);
@@ -1453,6 +2029,8 @@ impl<'a> Gen<'a> {
         for (k, s) in stmts.iter().enumerate() {
             self.end(); // $p[k]
             self.pos = self.instrs[k].pos;
+            self.scope = self.instrs[k].scope;
+            self.k = k as u32;
             self.budget(k as u32);
             self.i32c(self.pos as i32);
             self.set(L_EXCPOS);
@@ -1596,7 +2174,12 @@ fn idiv_function() -> Function {
 }
 
 /// Builds the module.
-pub fn module(prg: &Compiled, instrs: &[Instr], stmts: &[Stmt]) -> Result<Vec<u8>, CompileError> {
+pub fn module(
+    prg: &Compiled,
+    instrs: &[Instr],
+    stmts: &[Stmt],
+    resident_arrays: &[(usize, u16)],
+) -> Result<Vec<u8>, CompileError> {
     let lay = Layout::new(prg);
     let mut types = TypeSection::new();
     let mut type_ids: Vec<(Vec<ValType>, Vec<ValType>)> = Vec::new();
@@ -1626,9 +2209,17 @@ pub fn module(prg: &Compiled, instrs: &[Instr], stmts: &[Stmt]) -> Result<Vec<u8
     funcs.function(run_type);
     funcs.function(helper_type);
     funcs.function(helper_type);
+    for (_, _, p, r) in ffp_helpers::HELPERS {
+        let t = type_of(&mut types, p, r);
+        funcs.function(t);
+    }
 
     let mut g = Gen {
         prg,
+        layout: lay,
+        resident_arrays,
+        scope: 0,
+        k: 0,
         instrs,
         double: prg.double,
         code: Vec::new(),
@@ -1638,6 +2229,7 @@ pub fn module(prg: &Compiled, instrs: &[Instr], stmts: &[Stmt]) -> Result<Vec<u8
         free: Vec::new(),
         fn_imul: n_imports + 1,
         fn_idiv: n_imports + 2,
+        fn_ffp: n_imports + 3,
         pos: 0,
     };
     // Locals 1..N_FIXED are the fixed ones; temporaries follow.
@@ -1650,6 +2242,9 @@ pub fn module(prg: &Compiled, instrs: &[Instr], stmts: &[Stmt]) -> Result<Vec<u8
     code.function(&run);
     code.function(&imul_function());
     code.function(&idiv_function());
+    for (h, ..) in ffp_helpers::HELPERS {
+        code.function(&ffp_helpers::body(*h, n_imports + 3));
+    }
 
     let mut globals = GlobalSection::new();
     let gt = GlobalType { val_type: ValType::I32, mutable: false, shared: false };

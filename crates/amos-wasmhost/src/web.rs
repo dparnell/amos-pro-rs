@@ -9,7 +9,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use amos_core::compiled::{Env, RUN_RUNNING, RUN_STOPPED, Runtime};
+use amos_core::compiled::{Env, HeapKind, RUN_RUNNING, RUN_STOPPED, Runtime};
 use amos_core::interp::verify::Compiled;
 use amos_core::interp::{RunState, StopInfo, StopReason, StopReasonOrError};
 use amos_core::{Machine, Program};
@@ -69,6 +69,8 @@ fn js_err(e: JsValue) -> String {
 
 fn define_imports(l: &mut Imports) -> Result<(), String> {
     include!("imports.rs");
+    // Arrays are separate allocations of the runtime: no memory to grow.
+    def!(l, "host" "dim" |rt, env, mem, p: i32, s: i32, t: i32, n: i32, r: i32| -> i32 { rt.dim(env, mem, p, s, t, n, r) });
     Ok(())
 }
 
@@ -96,8 +98,12 @@ impl CompiledProgram {
         let size = amos_core::compiled::layout::Layout::new(&prg).size as usize;
         let block: *mut [u8] = Box::into_raw(vec![0u8; size].into_boxed_slice());
         let base = block as *mut u8 as usize as u32;
-        let ctx: Shared =
-            Rc::new(RefCell::new(Ctx { rt: Runtime::new(prg, base), env: None, mem: block as *mut u8, len: size }));
+        let ctx: Shared = Rc::new(RefCell::new(Ctx {
+            rt: Runtime::new(prg, base, HeapKind::Owned),
+            env: None,
+            mem: block as *mut u8,
+            len: size,
+        }));
         let result = Self::instantiate(wasm, &ctx, base).await;
         let (run, abi, hash) = match result {
             Ok(v) => v,

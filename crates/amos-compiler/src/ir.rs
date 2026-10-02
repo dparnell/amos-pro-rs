@@ -52,6 +52,22 @@ pub enum ExprKind {
     /// Core function compiled natively (same semantics as
     /// `Interp::core_function`).
     Native(Nf, Vec<Expr>),
+    /// `Fn name(args)`: the Fn slot, the arguments, and each `Def Fn` of
+    /// the scope that may be current: (position of its parameter list,
+    /// parameters, expression).
+    FnCall {
+        slot: u16,
+        args: Vec<Expr>,
+        defs: Vec<(usize, Vec<LValue>, Expr)>,
+    },
+    /// `Match(a(i..), value)`: array slot and type, the (ignored) indices,
+    /// the value.
+    Match {
+        slot: u16,
+        ty: u8,
+        idx: Vec<Expr>,
+        value: Box<Expr>,
+    },
 }
 
 /// Natively compiled core functions.
@@ -174,6 +190,24 @@ pub enum Stmt {
         ret: usize,
     },
     Return,
+    /// `On n Goto/Gosub/Proc a,b,...`: the keyword token, the label numbers
+    /// (or procedure numbers), the position after the list.
+    On {
+        n: Expr,
+        kind: u16,
+        targets: Vec<u16>,
+        after: usize,
+    },
+    /// `Goto expr` / `Gosub expr` (label name or line number at run time).
+    GotoExpr {
+        e: Expr,
+        gosub: bool,
+        ret: usize,
+    },
+    /// `Restore` / `Restore label`.
+    Restore(Option<u16>),
+    /// `Read a,b...` (all the Data items of the scope are constants).
+    Read(Vec<LValue>),
     Call {
         proc: usize,
         args: Vec<Expr>,
@@ -184,16 +218,22 @@ pub enum Stmt {
         value: Option<Expr>,
     },
     IncDec {
-        slot: u16,
-        ty: u8,
+        lv: LValue,
         inc: bool,
     },
-    /// `Add v,n` / `Add v,n,a To b` on a scalar.
+    /// `Add v,n` / `Add v,n,a To b`.
     Add {
-        slot: u16,
-        ty: u8,
+        lv: LValue,
         n: Expr,
         range: Option<(Expr, Expr)>,
+    },
+    Swap(LValue, LValue),
+    /// `Dim a(..), b(..)`: slot, type and maximum indices of each array.
+    Dim(Vec<(u16, u8, Vec<Expr>)>),
+    /// `Sort a(..)`: slot, (ignored) indices.
+    Sort {
+        slot: u16,
+        idx: Vec<Expr>,
     },
     /// `Wait n` / `Wait Vbl` (None).
     Wait(Option<Expr>),

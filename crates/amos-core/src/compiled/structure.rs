@@ -569,6 +569,61 @@ pub fn fallback_vars(c: &Compiled, instrs: &[Instr], resident: &[(usize, u16)], 
     out
 }
 
+/// A constant Data item (what `Interp::eval` reads for it).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Lit {
+    /// Nothing before the comma / end of line: the zero of the variable.
+    Empty,
+    Int(i32),
+    /// Single precision constant (`TK_FL` bits).
+    Ffp(u32),
+    /// Double precision constant (`TK_DFL`, rounded at run time).
+    Dfl(f64),
+    /// String constant: position of its token.
+    Str(usize),
+}
+
+/// The Data item at `p` if it is a constant (with any number of signs
+/// before it: one negation, `Interp::operand`): (negated, value, position
+/// after the item). `None` for an expression.
+pub fn data_item(code: &[u8], p: usize) -> Option<(bool, Lit, usize)> {
+    let t = rd(code, p);
+    if t == TK_COMMA || t == TK_EOL {
+        return Some((false, Lit::Empty, p));
+    }
+    let mut q = p;
+    let mut neg = false;
+    while rd(code, q) & 0x8000 != 0 {
+        q += 2;
+        neg = true;
+    }
+    let lit = match rd(code, q) {
+        TK_ENT | TK_HEX | TK_BIN => Lit::Int(crate::program::read_u32(code, q + 2) as i32),
+        TK_FL => Lit::Ffp(crate::program::read_u32(code, q + 2)),
+        TK_DFL => {
+            let mut b = [0u8; 8];
+            b.copy_from_slice(&code[q + 2..q + 10]);
+            Lit::Dfl(f64::from_be_bytes(b))
+        }
+        TK_CH1 | TK_CH2 => Lit::Str(q),
+        _ => return None,
+    };
+    let end = q + token_size(code, q);
+    matches!(rd(code, end), TK_COMMA | TK_EOL).then_some((neg, lit, end))
+}
+
+/// True if every item of the Data instruction at `p` is a constant.
+pub fn data_is_constant(code: &[u8], p: usize) -> bool {
+    let mut q = p + 2 + inline_data_size(TK_DATA);
+    loop {
+        let Some((_, _, end)) = data_item(code, q) else { return false };
+        match rd(code, end) {
+            TK_COMMA => q = end + 2,
+            _ => return true,
+        }
+    }
+}
+
 /// FNV-1a hash of the verified code: a compiled module records the hash of
 /// the program it was compiled from.
 pub fn code_hash(code: &[u8]) -> u32 {
