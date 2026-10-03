@@ -148,13 +148,22 @@ pub fn interpret(src: &str, input: &[&str], budget: usize) -> Outcome {
     panic!("interpreted program did not end")
 }
 
-/// Runs compiled.
+/// Runs compiled; also split in functions of 2 instructions (the
+/// code generation for large programs): the same outcome.
 pub fn run_compiled(src: &str, input: &[&str], budget: usize) -> Outcome {
+    let a = run_compiled_with(src, input, budget, &amos_compiler::Options::default());
+    let split = amos_compiler::Options { split_min: 1, split_size: 2 };
+    let b = run_compiled_with(src, input, budget, &split);
+    assert_eq!(a, b, "split in functions, budget {budget}:\n{src}");
+    a
+}
+
+fn run_compiled_with(src: &str, input: &[&str], budget: usize, options: &amos_compiler::Options) -> Outcome {
     let (mut m, prg) = match text_machine(src, input) {
         Ok(m) => m,
         Err(e) => return Outcome { text: String::new(), end: e, frames: 0 },
     };
-    let out = amos_compiler::compile_full(&prg).unwrap_or_else(|e| panic!("compile error: {e}"));
+    let out = amos_compiler::compile_with(&prg, options).unwrap_or_else(|e| panic!("compile error: {e}"));
     validate(&out.wasm);
     let mut cp = CompiledProgram::new(&out.wasm, m.interp.prg.clone().unwrap()).expect("instantiate");
     for f in 0..MAX_FRAMES {

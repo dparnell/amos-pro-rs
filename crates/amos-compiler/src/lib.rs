@@ -58,17 +58,41 @@ pub fn compile(program: &Program) -> Result<Vec<u8>, CompileError> {
 }
 
 pub fn compile_full(program: &Program) -> Result<Output, CompileError> {
+    compile_with(program, &Options::default())
+}
+
+/// Code generation choices (they do not change what programs do).
+#[derive(Clone, Copy, Debug)]
+pub struct Options {
+    /// Programs of at least this many instructions are split in several
+    /// functions (compiled in parallel, and each faster to compile)...
+    pub split_min: u32,
+    /// ...of about this many instructions.
+    pub split_size: u32,
+}
+
+impl Default for Options {
+    fn default() -> Self {
+        Options { split_min: 250, split_size: 125 }
+    }
+}
+
+pub fn compile_with(program: &Program, options: &Options) -> Result<Output, CompileError> {
     let c = Verifier::verify(&program.source, program.math_flags).map_err(CompileError::Test)?;
-    compile_verified(&c)
+    compile_verified_with(&c, options)
 }
 
 /// Compiles an already verified program.
 pub fn compile_verified(c: &Compiled) -> Result<Output, CompileError> {
+    compile_verified_with(c, &Options::default())
+}
+
+pub fn compile_verified_with(c: &Compiled, options: &Options) -> Result<Output, CompileError> {
     let instrs = structure::instructions(c);
     check_supported(c, &instrs)?;
     let (stmts, interpreted) = lower::lower_all(c, &instrs);
     let resident = resident_arrays(c, &instrs, &stmts);
-    let wasm = codegen::module(c, &instrs, &stmts, &resident)?;
+    let wasm = codegen::module(c, &instrs, &stmts, &resident, options)?;
     Ok(Output { wasm, instructions: instrs.len(), interpreted })
 }
 

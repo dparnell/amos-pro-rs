@@ -9,7 +9,7 @@ license.workspace = true
 amos-core = { version = "0.1.0", path = "../amos-core" }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-wasmtime = { version = "49.0.1", default-features = false, features = ["cranelift", "runtime", "std"] }
+wasmtime = { version = "49.0.1", default-features = false, features = ["cranelift", "runtime", "std", "parallel-compilation"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 js-sys = "0.3.106"

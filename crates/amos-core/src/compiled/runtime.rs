@@ -107,6 +107,26 @@ impl Hasher for PosHasher {
 
 type PosHash = BuildHasherDefault<PosHasher>;
 
+/// Everything `Runtime::mirror` reads: the length of the control stack,
+/// its top entry, the frames (and the procedure of a For loop's local).
+/// The module changes the mirror words only for its own Gosubs and calls,
+/// which are on the control stack (flushed) or popped (words restored)
+/// before the runtime looks again, so equal keys mean equal words.
+#[derive(Clone, Copy, PartialEq)]
+struct MirrorKey {
+    len: usize,
+    top: MirrorTop,
+    frames: usize,
+    frame_top: Option<usize>,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum MirrorTop {
+    Other,
+    For { var: VarLoc, step: i32, limit: i32, body: usize, exit: usize, proc: Option<usize> },
+    Loop { kind: u8, start: usize, body: usize, exit: usize },
+}
+
 /// A call site of the keyword bridge: the call, and its token stream (the
 /// keyword with the parameter values as constants) kept for the next call:
 /// numbers of the same types are written over the previous ones.
@@ -155,6 +175,9 @@ pub struct Runtime {
     sites: Vec<Site>,
     /// Parameters of a bridge call read from memory (`layout::BRIDGE_SLOT`).
     margs: Vec<Value>,
+    /// What the control stack mirror was last made from (`mirror`): the
+    /// words are only written again when it changes.
+    mirror_key: Option<MirrorKey>,
     stopped: Option<StopInfo>,
     /// Procedure frames of returned calls, reused (no allocation per call:
     /// the boxes go back into `Ctl::Proc` as they are).
@@ -195,6 +218,7 @@ impl Runtime {
             site_at: HashMap::default(),
             sites: Vec::new(),
             margs: Vec::new(),
+            mirror_key: None,
             stopped: None,
             frame_pool: Vec::new(),
             heap: arrays::Heap::new(heap, layout.size),
@@ -348,7 +372,35 @@ impl Runtime {
         st_i32(mem, layout::FIX_FLG, it.fix.fix_flg() as i32);
         st_i32(mem, layout::EXP_FLG, it.fix.exp_flg() as i32);
         st_i32(mem, layout::ERR_PROC, it.error_proc_depth.map_or(-1, |d| d as i32));
-        self.mirror(it, mem);
+        let key = Self::mirror_key(it);
+        if self.mirror_key != Some(key) {
+            self.mirror(it, mem);
+            self.mirror_key = Some(key);
+        }
+    }
+
+    fn mirror_key(it: &Interp) -> MirrorKey {
+        let fs = &it.frame_stack;
+        let top = match it.ctl.last() {
+            Some(Ctl::For { var, step, limit, body, exit }) => {
+                let proc = if var.slot & GLOBAL != 0 || fs.is_empty() {
+                    None
+                } else {
+                    match it.ctl.get(fs[var.frame.min(fs.len() - 1)]) {
+                        Some(Ctl::Proc(pf)) => Some(pf.proc_index),
+                        _ => None,
+                    }
+                };
+                MirrorTop::For { var: *var, step: *step, limit: *limit, body: *body, exit: *exit, proc }
+            }
+            Some(Ctl::Repeat { body, exit }) => MirrorTop::Loop { kind: 0, start: 0, body: *body, exit: *exit },
+            Some(Ctl::Do { body, exit }) => MirrorTop::Loop { kind: 1, start: 0, body: *body, exit: *exit },
+            Some(Ctl::While { start, body, exit }) => {
+                MirrorTop::Loop { kind: 2, start: *start, body: *body, exit: *exit }
+            }
+            _ => MirrorTop::Other,
+        };
+        MirrorKey { len: it.ctl.len(), top, frames: fs.len(), frame_top: fs.last().copied() }
     }
 
     /// Refreshes the mirror of the top of the control stack.
@@ -662,19 +714,20 @@ impl Runtime {
         self.result(it, hw, mem, r, pos as usize)
     }
 
-    /// End of the program reached; `last` is the position of the last
-    /// instruction executed (-1 if unknown).
+    /// End of the program reached; `last` is the point of the last
+    /// instruction started (-1 if none).
     pub fn end_program(&mut self, env: &mut dyn Env, last: i32) -> i32 {
         let (it, _) = env.parts();
-        if last >= 0 {
-            it.inst_pos = last as usize;
+        if let Some(i) = usize::try_from(last).ok().and_then(|p| self.instrs.get(p)) {
+            it.inst_pos = i.pos;
         }
         self.stop(it, Exc::Stop(StopReason::End))
     }
 
     /// Raises the error `code` (> 0) or the pending exception (`code` 0) for
-    /// the instruction at `pos`.
-    pub fn raise(&mut self, env: &mut dyn Env, mem: &mut [u8], pos: i32, code: i32) -> i32 {
+    /// the instruction at `point`.
+    pub fn raise(&mut self, env: &mut dyn Env, mem: &mut [u8], point: i32, code: i32) -> i32 {
+        let pos = self.instrs.get(point as usize).map_or(self.end_pos, |i| i.pos) as i32;
         let (it, hw) = env.parts();
         Self::settle(it, mem);
         st_i32(mem, layout::ERR, 0);

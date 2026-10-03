@@ -151,6 +151,8 @@ enum Lbl {
     Dispatch,
     Status,
     Raise,
+    /// Raise the error left pending by a runtime function (code 0).
+    Pending,
     Point(u32),
     /// The `loop` of a loop region starting at a point (`Gen::regions`).
     Region(u32),
@@ -192,6 +194,8 @@ struct Gen<'a> {
     fn_str: u32,
     /// Function index of the first number <-> text helper.
     fn_num: u32,
+    /// Function index of the first part of a split program.
+    fn_chunk: u32,
     /// The program uses the number <-> text helpers (their code is large:
     /// left out of programs that do not).
     uses_num: bool,
@@ -206,6 +210,12 @@ struct Gen<'a> {
     /// wasm `loop` with their own dispatch, so that jumps back inside them
     /// branch directly instead of going through the dispatcher.
     regions: Vec<(u32, u32)>,
+    /// Point range of the function being compiled when the program is
+    /// split in several functions (`None`: all in `run`).
+    chunk: Option<(u32, u32)>,
+    /// Parameters of the function being compiled (locals before them).
+    nparams: u32,
+    options: crate::Options,
 }
 
 fn mem32(offset: u32) -> MemArg {
@@ -279,8 +289,8 @@ impl<'a> Gen<'a> {
             return self.free.swap_remove(i).0;
         }
         self.locals.push(t);
-        // Local 0 is the parameter.
-        self.locals.len() as u32
+        // (The parameters come first.)
+        self.nparams + self.locals.len() as u32 - 1
     }
 
     fn release(&mut self, l: u32, t: ValType) {
@@ -352,7 +362,10 @@ impl<'a> Gen<'a> {
     /// block encloses this code) or back inside a loop region containing
     /// both, else through the dispatcher.
     fn jump_point(&mut self, point: u32) {
-        if point > self.k {
+        if !self.in_chunk(point) {
+            self.i32c(point as i32);
+            self.status_jump();
+        } else if point > self.k {
             self.branch_forward(point);
         } else if let Some(r) = self.common_region(self.k, point) {
             self.i32c(point as i32);
@@ -362,6 +375,11 @@ impl<'a> Gen<'a> {
             self.i32c(point as i32);
             self.status_jump();
         }
+    }
+
+    /// True if point `p` is compiled in the function being compiled.
+    fn in_chunk(&self, p: u32) -> bool {
+        self.chunk.is_none_or(|(a, b)| a <= p && p <= b)
     }
 
     /// Branches to the later point `p`: the block of the unit containing it
@@ -428,7 +446,7 @@ impl<'a> Gen<'a> {
     /// dispatcher otherwise.
     fn status_jump_expect(&mut self, expected: Option<u32>) {
         match expected {
-            Some(pt) if pt > self.k || self.common_region(self.k, pt).is_some() => {
+            Some(pt) if self.in_chunk(pt) && (pt > self.k || self.common_region(self.k, pt).is_some()) => {
                 self.w(W::LocalTee(L_ST));
                 self.i32c(pt as i32);
                 self.w(W::I32Eq);
@@ -441,10 +459,10 @@ impl<'a> Gen<'a> {
         }
     }
 
-    /// Branches to `$raise` if a runtime function left a pending error.
+    /// Raises the error a runtime function left pending, if any.
     fn err_check(&mut self) {
         self.hdr(layout::ERR);
-        self.br_if(Lbl::Raise);
+        self.br_if(Lbl::Pending);
     }
 
     fn raise(&mut self, code: u16) {
@@ -2788,12 +2806,18 @@ impl<'a> Gen<'a> {
         self.if_(BlockType::Empty);
         self.i32c(point as i32);
         self.call(Imp::Suspend);
-        self.i32c(amos_core::compiled::RUN_RUNNING);
+        if self.chunk.is_some() {
+            // Back to `run`, which returns "running".
+            self.i32c(amos_core::compiled::ST_YIELD);
+            self.get(L_BUDGET);
+            self.get(L_EXCPOS);
+        } else {
+            self.i32c(amos_core::compiled::RUN_RUNNING);
+        }
         self.w(W::Return);
         self.end();
     }
 
-    /// The `run` function.
     /// The loop regions of the program: For / Repeat / Do / While loops (to
     /// their last instruction) and backward Gotos, made properly nested
     /// (crossing ranges are merged).
@@ -2888,11 +2912,11 @@ impl<'a> Gen<'a> {
                 self.pos = self.instrs[k].pos;
                 self.scope = self.instrs[k].scope;
                 self.k = k as u32;
-                self.budget(k as u32);
-                self.i32c(self.pos as i32);
+                // The instruction started (its point, for errors and the
+                // end), then the time budget (`Interp::run`): yields here.
+                self.i32c(k as i32);
                 self.set(L_EXCPOS);
-                self.i32c(0);
-                self.set(L_EXCODE);
+                self.budget(k as u32);
                 self.stmt(k, &stmts[k])?;
             }
         }
@@ -2929,7 +2953,154 @@ impl<'a> Gen<'a> {
         Ok(())
     }
 
-    fn run_function(&mut self, stmts: &[Stmt]) -> Result<(), CompileError> {
+    /// The functions of the program: `run`, then (for large programs, see
+    /// `Options::split_min`) the functions of consecutive top level units
+    /// (loop regions are not cut; larger ones are left out), which
+    /// `run` calls with the point to continue at. Each: (number of
+    /// parameters, locals after them, code).
+    fn functions(&mut self, stmts: &[Stmt]) -> Result<Vec<Function>, CompileError> {
+        self.regions = self.loop_regions(stmts)?;
+        let n = self.instrs.len() as u32;
+        if n >= self.options.split_min {
+            // A region is compiled in one function: the large ones would
+            // keep the program from being split.
+            let max = self.options.split_size;
+            self.regions.retain(|&(a, b)| b + 1 - a <= max);
+        }
+        let units = self.units(None);
+        let mut chunks: Vec<(u32, u32)> = Vec::new();
+        if n >= self.options.split_min {
+            for u in &units {
+                match chunks.last_mut() {
+                    Some(c) if c.1 + 1 - c.0 < self.options.split_size => c.1 = u.1,
+                    _ => chunks.push((u.0, u.1)),
+                }
+            }
+        }
+        let mut out = Vec::new();
+        // `run` first (its index is the first function).
+        self.start_function(None, 1);
+        self.run_function(stmts, &units, &chunks)?;
+        out.push(self.finish_function());
+        for &c in &chunks {
+            self.start_function(Some(c), 4);
+            self.chunk_function(stmts, c)?;
+            out.push(self.finish_function());
+        }
+        Ok(out)
+    }
+
+    fn start_function(&mut self, chunk: Option<(u32, u32)>, nparams: u32) {
+        self.chunk = chunk;
+        self.nparams = nparams;
+        self.code.clear();
+        self.labels.clear();
+        self.free.clear();
+        // The fixed locals after the parameters (up to `L_BASE`).
+        self.locals = vec![ValType::I32; (N_FIXED - nparams) as usize];
+    }
+
+    fn finish_function(&mut self) -> Function {
+        let mut f = Function::new(self.locals.iter().map(|&t| (1, t)));
+        for i in &self.code {
+            f.instruction(i);
+        }
+        f
+    }
+
+    /// The dispatch of a function: from `$status` (in the dispatch loop,
+    /// `L_POINT` set) to its end. `units` are the top level units compiled
+    /// here; `end` is the point after them, where `end_code` continues.
+    fn dispatch(
+        &mut self,
+        stmts: &[Stmt],
+        units: &[(u32, u32, Option<usize>)],
+        end: u32,
+        end_code: impl FnOnce(&mut Self),
+    ) -> Result<(), CompileError> {
+        self.w(W::Block(BlockType::Empty));
+        self.labels.push(Lbl::Status);
+        self.w(W::Block(BlockType::Empty));
+        self.labels.push(Lbl::Raise);
+        self.w(W::Block(BlockType::Empty));
+        self.labels.push(Lbl::Pending);
+        self.w(W::Block(BlockType::Empty));
+        self.labels.push(Lbl::Point(end));
+        for u in units.iter().rev() {
+            self.w(W::Block(BlockType::Empty));
+            self.labels.push(Lbl::Point(u.0));
+        }
+        self.get(L_POINT);
+        let first = units.first().map_or(end, |u| u.0);
+        let targets: Vec<u32> =
+            (first..end).map(|p| units.iter().position(|u| u.0 <= p && p <= u.1).expect("unit") as u32).collect();
+        if first > 0 {
+            self.i32c(first as i32);
+            self.w(W::I32Sub);
+        }
+        self.w(W::BrTable(Cow::Owned(targets), units.len() as u32));
+        self.emit_units(units, stmts)?;
+        self.end(); // $end
+        end_code(self);
+        self.end(); // $pending
+        self.i32c(0);
+        self.set(L_EXCODE);
+        self.end(); // $raise
+        self.get(L_EXCPOS);
+        self.get(L_EXCODE);
+        self.call(Imp::Raise);
+        self.status_jump();
+        self.end(); // $status
+        Ok(())
+    }
+
+    /// The status loop of a function: returns (`run`: running / stopped;
+    /// a part: back to `run`) for negative statuses and, in a part, points
+    /// outside it.
+    fn status_loop(&mut self) {
+        self.w(W::Loop(BlockType::Empty));
+        self.labels.push(Lbl::Dispatch);
+        match self.chunk {
+            None => {
+                self.get(L_ST);
+                self.i32c(0);
+                self.w(W::I32LtS);
+                self.if_(BlockType::Empty);
+                self.get(L_ST);
+                self.i32c(amos_core::compiled::ST_YIELD);
+                self.w(W::I32Eq);
+                self.if_(BlockType::Empty);
+                self.i32c(amos_core::compiled::RUN_RUNNING);
+                self.w(W::Return);
+                self.end();
+                self.i32c(amos_core::compiled::RUN_STOPPED);
+                self.w(W::Return);
+                self.end();
+            }
+            Some((a, b)) => {
+                self.get(L_ST);
+                self.i32c(a as i32);
+                self.w(W::I32Sub);
+                self.i32c((b - a + 1) as i32);
+                self.w(W::I32GeU);
+                self.if_(BlockType::Empty);
+                self.get(L_ST);
+                self.get(L_BUDGET);
+                self.get(L_EXCPOS);
+                self.w(W::Return);
+                self.end();
+            }
+        }
+        self.get(L_ST);
+        self.set(L_POINT);
+    }
+
+    fn run_function(
+        &mut self,
+        stmts: &[Stmt],
+        units: &[(u32, u32, Option<usize>)],
+        chunks: &[(u32, u32)],
+    ) -> Result<(), CompileError> {
         let n = self.instrs.len() as u32;
         self.w(W::GlobalGet(0));
         self.set(L_BASE);
@@ -2937,56 +3108,66 @@ impl<'a> Gen<'a> {
         self.set(L_EXCPOS);
         self.call(Imp::Enter);
         self.set(L_ST);
-        self.w(W::Loop(BlockType::Empty));
-        self.labels.push(Lbl::Dispatch);
-        // Status handling.
-        self.get(L_ST);
-        self.i32c(0);
-        self.w(W::I32LtS);
-        self.if_(BlockType::Empty);
-        self.get(L_ST);
-        self.i32c(amos_core::compiled::ST_YIELD);
-        self.w(W::I32Eq);
-        self.if_(BlockType::Empty);
-        self.i32c(amos_core::compiled::RUN_RUNNING);
-        self.w(W::Return);
-        self.end();
-        self.i32c(amos_core::compiled::RUN_STOPPED);
-        self.w(W::Return);
-        self.end();
-        self.get(L_ST);
-        self.set(L_POINT);
-        // Dispatch.
-        self.regions = self.loop_regions(stmts)?;
-        self.w(W::Block(BlockType::Empty));
-        self.labels.push(Lbl::Status);
-        self.w(W::Block(BlockType::Empty));
-        self.labels.push(Lbl::Raise);
-        self.w(W::Block(BlockType::Empty));
-        self.labels.push(Lbl::Point(n));
-        let units = self.units(None);
-        for u in units.iter().rev() {
+        self.status_loop();
+        let end_code = |g: &mut Self| {
+            // `Interp::run` checks the budget before finding the end.
+            g.budget(n);
+            // The last instruction started (`Interp::inst_pos` at the end).
+            g.get(L_EXCPOS);
+            g.call(Imp::EndProgram);
+            g.status_jump();
+        };
+        if chunks.is_empty() {
+            self.dispatch(stmts, units, n, end_code)?;
+        } else {
+            // Each point to the function of its part.
             self.w(W::Block(BlockType::Empty));
-            self.labels.push(Lbl::Point(u.0));
+            self.labels.push(Lbl::Status);
+            let end = self.block();
+            for _ in chunks.iter().rev() {
+                self.w(W::Block(BlockType::Empty));
+                self.labels.push(Lbl::Anon(u32::MAX));
+            }
+            self.get(L_POINT);
+            let targets: Vec<u32> =
+                (0..n).map(|p| chunks.iter().position(|c| c.0 <= p && p <= c.1).expect("part") as u32).collect();
+            self.w(W::BrTable(Cow::Owned(targets), chunks.len() as u32));
+            for i in 0..chunks.len() {
+                self.end();
+                self.get(L_BUDGET);
+                self.get(L_POINT);
+                self.get(L_POINT);
+                self.get(L_EXCPOS);
+                self.w(W::Call(self.fn_chunk + i as u32));
+                self.set(L_EXCPOS);
+                self.set(L_BUDGET);
+                self.set(L_ST);
+                self.br(Lbl::Status);
+            }
+            self.end(); // end of the program
+            let _ = end;
+            end_code(self);
+            self.end(); // $status
         }
-        self.get(L_POINT);
-        let targets: Vec<u32> =
-            (0..n).map(|p| units.iter().position(|u| u.0 <= p && p <= u.1).expect("unit") as u32).collect();
-        self.w(W::BrTable(Cow::Owned(targets), units.len() as u32));
-        self.emit_units(&units, stmts)?;
-        self.end(); // $end
-        // `Interp::run` checks the budget before finding the end.
-        self.budget(n);
-        // The last instruction started (`Interp::inst_pos` at the end).
-        self.get(L_EXCPOS);
-        self.call(Imp::EndProgram);
-        self.status_jump();
-        self.end(); // $raise
-        self.get(L_EXCPOS);
-        self.get(L_EXCODE);
-        self.call(Imp::Raise);
-        self.set(L_ST);
-        self.end(); // $status
+        self.br(Lbl::Dispatch);
+        self.end(); // $dispatch
+        self.w(W::Unreachable);
+        self.w(W::End);
+        Ok(())
+    }
+
+    /// The function of the part `c` of a split program: (budget, point,
+    /// status, last instruction) -> (status, budget, last instruction).
+    fn chunk_function(&mut self, stmts: &[Stmt], c: (u32, u32)) -> Result<(), CompileError> {
+        self.w(W::GlobalGet(0));
+        self.set(L_BASE);
+        self.status_loop();
+        let units: Vec<_> = self.units(None).into_iter().filter(|u| c.0 <= u.0 && u.1 <= c.1).collect();
+        // Past the last unit: continue in `run`.
+        self.dispatch(stmts, &units, c.1 + 1, |g| {
+            g.i32c((c.1 + 1) as i32);
+            g.status_jump();
+        })?;
         self.br(Lbl::Dispatch);
         self.end(); // $dispatch
         self.w(W::Unreachable);
@@ -3115,6 +3296,7 @@ pub fn module(
     instrs: &[Instr],
     stmts: &[Stmt],
     resident_arrays: &[(usize, u16)],
+    options: &crate::Options,
 ) -> Result<Vec<u8>, CompileError> {
     let lay = Layout::new(prg);
     let mut types = TypeSection::new();
@@ -3177,20 +3359,21 @@ pub fn module(
         fn_ffp: n_imports + 3,
         fn_str: n_imports + 3 + ffp_helpers::HELPERS.len() as u32,
         fn_num: n_imports + 3 + (ffp_helpers::HELPERS.len() + string_helpers::HELPERS.len()) as u32,
+        fn_chunk: n_imports
+            + 3
+            + (ffp_helpers::HELPERS.len() + string_helpers::HELPERS.len() + num_helpers::HELPERS.len()) as u32,
         uses_num: false,
         consts: structure::string_constants(prg),
         pos: 0,
         bridge_top: 0,
         regions: Vec::new(),
+        chunk: None,
+        nparams: 1,
+        options: *options,
     };
-    // Locals 1..N_FIXED are the fixed ones; temporaries follow.
-    g.run_function(stmts)?;
-    let mut run = Function::new(g.locals.iter().map(|&t| (1, t)));
-    for i in &g.code {
-        run.instruction(i);
-    }
+    let fns = g.functions(stmts)?;
     let mut code = CodeSection::new();
-    code.function(&run);
+    code.function(&fns[0]);
     code.function(&imul_function());
     code.function(&idiv_function());
     for (h, ..) in ffp_helpers::HELPERS {
@@ -3213,6 +3396,12 @@ pub fn module(
         }
     }
 
+    // The functions of the parts (after the helpers).
+    let chunk_type = type_of(&mut types, &[ValType::I32; 4], &[ValType::I32; 3]);
+    for f in &fns[1..] {
+        funcs.function(chunk_type);
+        code.function(f);
+    }
     let mut globals = GlobalSection::new();
     let gt = GlobalType { val_type: ValType::I32, mutable: false, shared: false };
     globals.global(gt, &ConstExpr::i32_const(amos_core::compiled::ABI_VERSION));
