@@ -323,9 +323,11 @@ pub struct Call {
     pub end: usize,
 }
 
-/// Functions of the machine whose handler leaves the input state and the
-/// timer alone (`layout::IN_VALID`): reading them keeps the module's input
-/// mirror valid.
+/// Functions of the machine whose handler leaves alone what the module's
+/// input mirror holds (`layout::IN_VALID`: the mouse, keys, joysticks,
+/// timer, and the screens, zones and palettes its caches depend on):
+/// reading them keeps the mirror valid. (Scancode, Mouse Click and Choice
+/// change state the mirror does not hold.)
 pub fn input_read_only(token: u16) -> bool {
     use crate::tokens::tk::*;
     matches!(
@@ -353,6 +355,19 @@ pub fn input_read_only(token: u16) -> bool {
             | DEEK
             | LEEK
             | COLOUR_2
+            | X_SCREEN
+            | X_SCREEN_2
+            | Y_SCREEN
+            | Y_SCREEN_2
+            | X_HARD
+            | X_HARD_2
+            | Y_HARD
+            | Y_HARD_2
+            | POINT
+            | CHOICE
+            | CHOICE_2
+            | MOUSE_CLICK
+            | SCANCODE
     )
 }
 
@@ -393,6 +408,15 @@ pub fn int_function(token: u16) -> bool {
             | DEEK
             | LEEK
             | COLOUR_2
+            | X_SCREEN
+            | X_SCREEN_2
+            | Y_SCREEN
+            | Y_SCREEN_2
+            | X_HARD
+            | X_HARD_2
+            | Y_HARD
+            | Y_HARD_2
+            | POINT
     )
 }
 

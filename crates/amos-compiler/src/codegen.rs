@@ -921,7 +921,9 @@ impl<'a> Gen<'a> {
         let fused: Vec<Option<i32>> = args
             .iter()
             .map(|a| match &a.kind {
-                ExprKind::Call(fp, inner) if inner.is_empty() => self
+                // (Not the ones the module reads from the input mirror: the
+                // call then gets integers, `runtime/direct.rs`.)
+                ExprKind::Call(fp, inner) if inner.is_empty() && self.input_fn(*fp, inner, a.ty).is_none() => self
                     .plain_call(*fp, true, 0)
                     .filter(|&(_, mask)| mask as u32 >> structure::PLAIN_SLOTS_SHIFT == 0)
                     .map(|(token, _)| token),
