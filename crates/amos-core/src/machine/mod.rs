@@ -10,6 +10,7 @@
 //! do not handle.
 
 mod dispatch;
+pub use dispatch::plain_args;
 pub mod frame;
 pub mod inst_banks;
 pub mod inst_copper;

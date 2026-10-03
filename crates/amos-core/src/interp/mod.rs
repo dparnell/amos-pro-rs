@@ -241,6 +241,9 @@ pub struct Interp {
     /// Main library instruction tokens handled by the host (learnt as they
     /// are met): 1 instruction, 2 reserved variable assignment, 0 unknown.
     host_inst: Vec<u8>,
+    /// Parameters of the next `inst_args` / `func_args` call, already
+    /// evaluated by compiled code (`preset_args`).
+    preset: Option<Vec<Option<Value>>>,
 }
 
 impl Default for Interp {
@@ -287,6 +290,7 @@ impl Interp {
             prog_len: 0,
             not_core: Vec::new(),
             host_inst: Vec::new(),
+            preset: None,
         }
     }
 

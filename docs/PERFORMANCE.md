@@ -161,3 +161,22 @@ interpreted instructions, load independent):
   as `operand_value` computes it (`core_function` for main-library keywords,
   else `hw.function`). `operand_value` itself now uses it for main-library
   tokens.
+* `Interp::preset_args(&[Option<Value>])` (interp/params.rs): parameters of
+  the next `inst_args` / `func_args` call, already evaluated (`None` =
+  omitted). They are converted per signature as `args` does (same
+  conversions, degrees for type 5, first type error first; fewer values =
+  Syntax error after the last one, more values = Syntax error once the
+  signature is converted). Used by the next call only, also when it fails.
+* `machine::plain_args(kw)` (machine/dispatch.rs): keywords whose handler
+  reads its parameters only through one `inst_args` / `func_args` call and
+  never looks at the token stream: Plot, Draw / Draw To, Ellipse, Circle,
+  Bar, Box, Paint, Gr Locate, Text, Ink, Point, Locate, Pen, Paper, Curs
+  Pen, Home, Curs On/Off, Mouse Zone, Cls, Colour, Screen Display / Offset,
+  Scin, X/Y Hard, X/Y Screen, Bob, Sprite, Paste Bob / Icon, X/Y/I Bob,
+  X/Y/I Sprite, X/Y Mouse, Mouse Key, Mouse Click, Joy / Jup... / Fire,
+  Key State, Timer, Inkey$ (all overloads). Keywords without parameters
+  are called without a preset; reserved variables only when read.
+  Tests: every plain keyword with parameters gives the same `Args` from a
+  preset as from the tokens (all values, each one omitted, two value
+  sets), and calling every plain handler with presets (pc elsewhere) gives
+  the same result, log and display as the statement in a program.

@@ -142,16 +142,65 @@ impl Interp {
         Ok(out)
     }
 
-    /// Reads the parameters of the instruction `kw` (pc after the token).
+    /// Reads the parameters of the instruction `kw` (pc after the token),
+    /// or takes the ones given to [`Interp::preset_args`].
     pub fn inst_args(&mut self, hw: &mut dyn Host, kw: Keyword) -> R<Args> {
         let sig = kw.def().map_or("", |d| d.param_types());
+        if let Some(values) = self.preset.take() {
+            return Ok(Args(self.preset_to_args(sig, &values)?));
+        }
         Ok(Args(self.args(hw, sig)?))
     }
 
-    /// Reads the parameters of the function `kw` (pc after the token).
+    /// Reads the parameters of the function `kw` (pc after the token), or
+    /// takes the ones given to [`Interp::preset_args`].
     pub fn func_args(&mut self, hw: &mut dyn Host, kw: Keyword) -> R<Args> {
         let sig = kw.def().map_or("", |d| d.param_types());
+        if let Some(values) = self.preset.take() {
+            return Ok(Args(self.preset_to_args(sig, &values)?));
+        }
         Ok(Args(self.fn_args(hw, sig)?))
+    }
+
+    /// Gives the parameters of the next `inst_args` / `func_args` call,
+    /// already evaluated (compiled code calling a keyword handler without a
+    /// token stream). `None` is an omitted parameter (`Ink ,2`). The values
+    /// are converted to the signature exactly as `args` converts what it
+    /// evaluates; the preset is used by the next call only (also when that
+    /// call fails). Only for keywords where [`plain_args`] is true and that
+    /// have parameters (a handler without parameters may never read them).
+    ///
+    /// [`plain_args`]: crate::machine::plain_args
+    pub fn preset_args(&mut self, args: &[Option<Value>]) {
+        self.preset = Some(args.to_vec());
+    }
+
+    /// `args(sig)` on values already evaluated: the same conversions and
+    /// errors in the same order. Fewer values than the signature is the
+    /// missing separator of the token path (Syntax error after the last
+    /// value given); more values, the separator left unread, is reported
+    /// once the signature's values are converted.
+    fn preset_to_args(&self, sig: &str, values: &[Option<Value>]) -> R<ArgVec> {
+        let sig = sig.as_bytes();
+        let mut out = ArgVec::default();
+        let mut i = 0;
+        let mut k = 0;
+        while i < sig.len() {
+            let v = match values.get(k).cloned().flatten() {
+                None => Value::Int(ENT_NUL),
+                Some(v) => self.convert_param(sig[i], v)?,
+            };
+            out.push(v);
+            k += 1;
+            if sig.get(i + 1).is_some() && k >= values.len() {
+                return err(errors::SYNTAX_ERROR);
+            }
+            i += 2;
+        }
+        if k < values.len() {
+            return err(errors::SYNTAX_ERROR);
+        }
+        Ok(out)
     }
 
     pub fn convert_param(&self, ty: u8, v: Value) -> R<Value> {
@@ -171,5 +220,249 @@ impl Interp {
             },
             _ => v,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::stmt::InputState;
+    use super::super::{Exc, RunState};
+    use super::*;
+    use crate::tokenise::tokenise_program;
+
+    /// Text of a parameter of type `ty` (number `k` of the list) and the
+    /// value the token path evaluates it to (before conversion).
+    fn param(ty: u8, k: usize, set: usize) -> (String, Value) {
+        let ints = [[1, 20, 30, 1, 2, 3, 4, 5], [2, 10, 100, 90, 1, 1, 7, 9]];
+        match ty {
+            b'2' => ("\"Hi\"".into(), Value::str(b"Hi")),
+            // 1.5 and 2.25 are exact in single and double precision.
+            b'1' | b'5' => {
+                let f = if set == 0 { 1.5 } else { 2.25 };
+                (format!("{f}"), Value::Float(f))
+            }
+            _ => {
+                let n = ints[set][k % 8];
+                (n.to_string(), Value::Int(n))
+            }
+        }
+    }
+
+    /// Records, for each keyword call, the parameters read from the tokens
+    /// and the same values given with `preset_args`.
+    #[derive(Default)]
+    struct Capture {
+        preset: Vec<Option<Value>>,
+        seen: Vec<(u16, String, String)>,
+    }
+
+    impl Capture {
+        fn both(&mut self, it: &mut Interp, kw: Keyword, func: bool) -> R<()> {
+            let tokens = if func {
+                it.func_args(self, kw)
+            } else {
+                it.inst_args(self, kw)
+            };
+            let p = std::mem::take(&mut self.preset);
+            it.preset_args(&p);
+            let preset = if func {
+                it.func_args(self, kw)
+            } else {
+                it.inst_args(self, kw)
+            };
+            let show = |r: R<Args>| format!("{:?}", r.map(|a| a.0.to_vec()));
+            self.seen.push((kw.token, show(tokens), show(preset)));
+            Ok(())
+        }
+    }
+
+    impl Host for Capture {
+        fn instruction(&mut self, it: &mut Interp, kw: Keyword) -> R<()> {
+            self.both(it, kw, false)
+        }
+        fn function(&mut self, it: &mut Interp, kw: Keyword) -> R<Value> {
+            self.both(it, kw, true)?;
+            Ok(Value::Int(0))
+        }
+        fn reserved_assign(&mut self, _: &mut Interp, _: Keyword) -> R<()> {
+            Ok(())
+        }
+        fn test_point(&mut self, _: &mut Interp) -> R<()> {
+            Ok(())
+        }
+        fn take_break(&mut self) -> bool {
+            false
+        }
+        fn print(&mut self, _: &mut Interp, _: &[u8]) -> R<()> {
+            Ok(())
+        }
+        fn read_line(&mut self, _: &mut Interp, _: &mut InputState) -> R<Option<Vec<u8>>> {
+            Ok(None)
+        }
+    }
+
+    /// Runs `src` (one call of a keyword with parameters) with the preset
+    /// values; returns what the host saw, None if the line is not valid.
+    fn capture(src: &str, preset: Vec<Option<Value>>) -> Option<Vec<(u16, String, String)>> {
+        let prg = tokenise_program(src.as_bytes()).ok()?;
+        let mut it = Interp::new();
+        it.load(&prg).ok()?;
+        let mut host = Capture {
+            preset,
+            ..Default::default()
+        };
+        it.vbl();
+        match it.run(&mut host, 1000) {
+            RunState::Stopped(_) => Some(host.seen),
+            s => panic!("{src}: {s:?}"),
+        }
+    }
+
+    #[test]
+    fn preset_matches_the_token_path_for_plain_keywords() {
+        let mut checked = 0;
+        for slot_table in [crate::tokens::MAIN] {
+            for d in slot_table.iter() {
+                let kw = Keyword {
+                    slot: 0,
+                    token: d.token,
+                };
+                if !crate::machine::plain_args(kw) {
+                    continue;
+                }
+                let sig = d.param_types().as_bytes();
+                if sig.is_empty() {
+                    continue;
+                }
+                let func = !matches!(d.kind(), TokenKind::Instruction);
+                let n = sig.len().div_ceil(2);
+                let name = d.name.split_whitespace().map(|w| {
+                    let mut c = w.chars();
+                    c.next()
+                        .map(|f| f.to_uppercase().collect::<String>() + c.as_str())
+                        .unwrap_or_default()
+                });
+                let name: Vec<String> = name.collect();
+                let name = name.join(" ");
+                // Every parameter given (two value sets), then each one
+                // omitted in turn.
+                let mut variants: Vec<Vec<Option<usize>>> = vec![(0..n).map(Some).collect()];
+                for skip in 0..n {
+                    variants.push((0..n).map(|k| (k != skip).then_some(k)).collect());
+                }
+                for (vi, var) in variants.iter().enumerate() {
+                    for set in 0..2 {
+                        let mut text = String::new();
+                        let mut values = Vec::new();
+                        for (k, p) in var.iter().enumerate() {
+                            if k > 0 {
+                                text += if sig[2 * k - 1] == b't' { " To " } else { "," };
+                            }
+                            match p {
+                                Some(k) => {
+                                    let (t, v) = param(sig[2 * k], *k, set);
+                                    text += &t;
+                                    values.push(Some(v));
+                                }
+                                None => values.push(None),
+                            }
+                        }
+                        let call = if func {
+                            let dollar = if d.params.starts_with('2') { "$" } else { "" };
+                            format!("Degree\nA{dollar}={name}({text})\n")
+                        } else {
+                            format!("Degree\n{name} {text}\n")
+                        };
+                        let Some(seen) = capture(&call, values) else {
+                            assert!(vi > 0, "{call} is not valid");
+                            continue;
+                        };
+                        assert_eq!(seen.len(), 1, "{call}");
+                        if seen[0].0 != d.token {
+                            // Omitting the only parameter chose another
+                            // overload (`Cls`).
+                            assert!(vi > 0, "{call}");
+                            continue;
+                        }
+                        assert_eq!(seen[0].1, seen[0].2, "{call}");
+                        checked += 1;
+                    }
+                }
+            }
+        }
+        assert!(checked > 100, "{checked}");
+    }
+
+    #[test]
+    fn preset_conversions_and_errors() {
+        let mut it = Interp::new();
+        let i = |n| Some(Value::Int(n));
+        let f = |x| Some(Value::Float(x));
+        let s = || Some(Value::str(b"x"));
+        let show = |r: R<ArgVec>| format!("{:?}", r.map(|a| a.to_vec()));
+        // Conversions as `convert_param`, omitted values as ENT_NUL.
+        assert_eq!(
+            show(it.preset_to_args("0,1,5,2,3", &[f(2.7), i(3), i(90), s(), None])),
+            format!(
+                "{:?}",
+                Ok::<_, Exc>(vec![
+                    Value::Int(2),
+                    Value::Float(3.0),
+                    Value::Float(90.0),
+                    Value::str(b"x"),
+                    Value::Int(ENT_NUL)
+                ])
+            )
+        );
+        it.degrees = true;
+        let r = it.preset_to_args("5", &[i(90)]).unwrap();
+        assert_eq!(
+            format!("{:?}", r[0]),
+            format!("{:?}", it.convert_param(b'5', Value::Int(90)).unwrap())
+        );
+        // Wrong types: the first one met is the error.
+        let e = |n: u16| format!("{:?}", Err::<Vec<Value>, _>(Exc::Error(n)));
+        assert_eq!(
+            show(it.preset_to_args("0,2", &[s(), i(1)])),
+            e(errors::TYPE_MISMATCH)
+        );
+        assert_eq!(
+            show(it.preset_to_args("0,2", &[i(1), i(1)])),
+            e(errors::TYPE_MISMATCH)
+        );
+        // Fewer values: the missing separator (after converting the last
+        // value: a type error comes first).
+        assert_eq!(
+            show(it.preset_to_args("0,0", &[i(1)])),
+            e(errors::SYNTAX_ERROR)
+        );
+        assert_eq!(
+            show(it.preset_to_args("0,0", &[s()])),
+            e(errors::TYPE_MISMATCH)
+        );
+        assert_eq!(show(it.preset_to_args("0,0", &[])), e(errors::SYNTAX_ERROR));
+        assert!(it.preset_to_args("0", &[]).is_ok());
+        // More values than the signature.
+        assert_eq!(
+            show(it.preset_to_args("0", &[i(1), i(2)])),
+            e(errors::SYNTAX_ERROR)
+        );
+        assert_eq!(
+            show(it.preset_to_args("", &[i(1)])),
+            e(errors::SYNTAX_ERROR)
+        );
+        // The preset is used once, also when it fails.
+        let mut host = Capture::default();
+        let kw = Keyword {
+            slot: 0,
+            token: crate::tokens::tk::LOCATE,
+        };
+        it.preset_args(&[s(), i(1)]);
+        assert!(it.inst_args(&mut host, kw).is_err());
+        assert!(it.preset.is_none());
+        it.preset_args(&[i(3), None]);
+        let a = it.inst_args(&mut host, kw).unwrap();
+        assert_eq!((a.int(0), a.opt(1)), (3, None));
+        assert!(it.preset.is_none());
     }
 }
