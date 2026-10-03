@@ -110,6 +110,38 @@ pub fn plain_args(kw: Keyword) -> bool {
                 | KEY_STATE
                 | TIMER
                 | INKEY_S
+                | SCANCODE
+                | LIMIT_MOUSE
+                | LIMIT_MOUSE_2
+                | LIMIT_MOUSE_3
+                // More screens and zones (inst_screen.rs, inst_text.rs).
+                | SCREEN_2
+                | SCREEN_TO_FRONT
+                | SCREEN_TO_FRONT_2
+                | SCREEN_TO_BACK
+                | SCREEN_TO_BACK_2
+                | SCREEN_HIDE
+                | SCREEN_HIDE_2
+                | SCREEN_SHOW
+                | SCREEN_SHOW_2
+                | ZONE
+                | ZONE_2
+                | HZONE
+                | HZONE_2
+                // Menus and dialogs (inst_menus.rs, inst_dialogs.rs: Dialog
+                // checks which program runs before reading its parameter,
+                // from `Interp::prg`, not from the code).
+                | CHOICE
+                | CHOICE_2
+                | DIALOG
+                // Memory (inst_banks.rs). Varptr'd variables are mapped
+                // through the interpreter's variables (`var_maps`).
+                | PEEK
+                | DEEK
+                | LEEK
+                | POKE
+                | DOKE
+                | LOKE
         )
 }
 

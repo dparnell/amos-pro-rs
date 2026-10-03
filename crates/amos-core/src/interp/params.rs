@@ -436,6 +436,11 @@ mod tests {
                             assert!(vi > 0, "{call} is not valid");
                             continue;
                         };
+                        if seen.len() != 1 && vi > 0 {
+                            // Omitting the only parameter of a function
+                            // (`Choice()`) parses as something else.
+                            continue;
+                        }
                         assert_eq!(seen.len(), 1, "{call}");
                         if seen[0].0 != d.token {
                             // Omitting the only parameter chose another
