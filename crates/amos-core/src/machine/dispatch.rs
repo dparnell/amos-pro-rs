@@ -228,12 +228,12 @@ impl Hardware {
     /// Function handler number `h` (1-based), in the order of the chain.
     fn function_by(&mut self, h: u8, it: &mut Interp, kw: Keyword) -> R<Option<Value>> {
         match h {
-            1 => self.screen_function(it, kw),
-            2 => self.text_function(it, kw),
-            3 => self.draw_function(it, kw),
-            4 => self.sprites_function(it, kw),
-            5 => self.sound_function(it, kw),
-            6 => self.input_function(it, kw),
+            1 => self.input_function(it, kw),
+            2 => self.screen_function(it, kw),
+            3 => self.text_function(it, kw),
+            4 => self.draw_function(it, kw),
+            5 => self.sprites_function(it, kw),
+            6 => self.sound_function(it, kw),
             7..=HANDLERS => LATE_FUNCTION_HANDLERS[(h - FIRST_DIRECT) as usize](self, it, kw),
             _ => Ok(None),
         }
@@ -273,7 +273,13 @@ impl Host for Hardware {
     }
 
     fn function(&mut self, it: &mut Interp, kw: Keyword) -> R<Value> {
-        // As `instruction`.
+        // As `instruction`. The input functions come first: Mouse Key, X
+        // Mouse, Inkey$... are by far the most called (busy waiting loops).
+        // (No keyword is accepted by two handlers: the order only changes
+        // the speed, see `every_keyword_has_at_most_one_handler`.)
+        if let Some(v) = self.input_function(it, kw)? {
+            return Ok(v);
+        }
         if let Some(v) = self.screen_function(it, kw)? {
             return Ok(v);
         }
@@ -287,9 +293,6 @@ impl Host for Hardware {
             return Ok(v);
         }
         if let Some(v) = self.sound_function(it, kw)? {
-            return Ok(v);
-        }
-        if let Some(v) = self.input_function(it, kw)? {
             return Ok(v);
         }
         let known = self.dispatch.get(kw, true);
@@ -493,6 +496,73 @@ Ink 5 : Circle 8,8,6 : Get Bob 2,0,0 To 16,16\nReserve Zone 5 : Set Zone 1,0,0 T
             }
         }
         None
+    }
+
+    /// Handlers (1-based, chain order) that accept `kw` (`probe` without
+    /// stopping at the first).
+    fn acceptors(kw: Keyword, func: bool, dir: &std::path::Path) -> Vec<u8> {
+        let prg = crate::tokenise::tokenise_program(b"").unwrap();
+        let mut m = Machine::new();
+        m.hw.files.set_native_root(dir);
+        m.run_program(&prg).unwrap();
+        m.vbl();
+        let sig = kw.def().map_or("", |d| d.param_types()).as_bytes();
+        let values: Vec<Option<Value>> = sig
+            .iter()
+            .step_by(2)
+            .map(|t| match t {
+                b'2' => Some(Value::str(b"")),
+                b'1' | b'5' => Some(Value::Float(1.0)),
+                _ => Some(Value::Int(1)),
+            })
+            .collect();
+        let mut out = Vec::new();
+        for h in 1..=HANDLERS {
+            if !values.is_empty() {
+                m.interp.preset_args(&values);
+            }
+            let (hw, it) = (&mut m.hw, &mut m.interp);
+            let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                if func {
+                    matches!(hw.function_by(h, it, kw), Ok(None))
+                } else {
+                    matches!(hw.instruction_by(h, it, kw), Ok(false))
+                }
+            }))
+            .unwrap_or(false);
+            if !refused {
+                out.push(h);
+            }
+        }
+        out
+    }
+
+    /// No keyword is accepted by two subsystem handlers, as an instruction
+    /// or as a function: the order of the chain only changes its speed.
+    #[test]
+    fn every_keyword_has_at_most_one_handler() {
+        let dir = std::env::temp_dir().join(format!("amos-dispatch-one-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let prev_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let mut checked = 0;
+        for (slot, table) in crate::tokens::EXTENSIONS.iter().enumerate() {
+            for d in table.iter() {
+                let kw = Keyword {
+                    slot: slot as u8,
+                    token: d.token,
+                };
+                for func in [false, true] {
+                    let a = acceptors(kw, func, &dir);
+                    let name = d.name;
+                    assert!(a.len() <= 1, "{name} {kw:?} (function: {func}): {a:?}");
+                    checked += a.len();
+                }
+            }
+        }
+        std::panic::set_hook(prev_hook);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(checked > 700, "{checked}");
     }
 
     /// The dispatch cache relies on every subsystem accepting or refusing a
