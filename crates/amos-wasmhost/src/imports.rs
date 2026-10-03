@@ -36,6 +36,9 @@
     def!(l, "host" "print_n" |rt, env, mem, v: f64, t: i32| { rt.print_n(env, v, t) });
     def!(l, "host" "print_s" |rt, env, mem, v: i32| { rt.print_s(mem, v) });
     def!(l, "host" "print_tab" |rt, env, mem| { rt.print_tab() });
+    def!(l, "host" "print_slots" |rt, env, mem, p: i32, b: i32, n: i32, nl: i32| -> i32 {
+        rt.print_slots(env, mem, p, b, n, nl)
+    });
     def!(l, "host" "print_end" |rt, env, mem, p: i32, nl: i32| -> i32 { rt.print_end(env, mem, p, nl) });
     def!(l, "host" "aref" |rt, env, mem, s: i32, n: i32| -> i32 { rt.aref(env, mem, s, n) });
     def!(l, "host" "aget_i" |rt, env, mem, s: i32, i: i32| -> i32 { rt.aget_i(env, s, i) });

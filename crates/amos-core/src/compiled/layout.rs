@@ -145,6 +145,8 @@ pub const BRIDGE_FLOAT: i32 = 1;
 pub const BRIDGE_STR: i32 = 2;
 pub const BRIDGE_DYN_INT: i32 = 3;
 pub const BRIDGE_CALL: i32 = 4;
+/// A Tab (`,`) between the items of `host.print_slots`.
+pub const BRIDGE_TAB: i32 = 5;
 /// Scratch buffers of the number formatting helpers (128 bytes each).
 pub const SCR_A: u32 = 192;
 pub const SCR_B: u32 = 320;

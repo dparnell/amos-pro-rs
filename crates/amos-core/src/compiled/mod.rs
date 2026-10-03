@@ -42,7 +42,7 @@ pub use runtime::{Env, HeapKind, Runtime, ST_CONTINUE, ST_GROW, ST_STOP, ST_YIEL
 
 /// Version of the module / runtime interface. A module records the version
 /// it was compiled for (exported global `amos_abi`).
-pub const ABI_VERSION: i32 = 15;
+pub const ABI_VERSION: i32 = 16;
 
 /// Status returned by the module's `run` export.
 pub const RUN_RUNNING: i32 = 1;

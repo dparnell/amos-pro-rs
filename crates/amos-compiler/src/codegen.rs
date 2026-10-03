@@ -99,6 +99,7 @@ imports! {
     PrintS = "host" "print_s" (i);
     PrintTab = "host" "print_tab" ();
     PrintEnd = "host" "print_end" (i i) -> i;
+    PrintSlots = "host" "print_slots" (i i i i) -> i;
     Aref = "host" "aref" (i i) -> i;
     AgetI = "host" "aget_i" (i i) -> i;
     AgetF = "host" "aget_f" (i i) -> f;
@@ -939,6 +940,15 @@ impl<'a> Gen<'a> {
                 self.w(W::I32Store(mem32(slot)));
                 continue;
             }
+            self.bridge_store(slot, a);
+        }
+        self.bridge_top = base;
+        base as i32
+    }
+
+    /// Evaluates `a` into the bridge slot at `slot` (type and value).
+    fn bridge_store(&mut self, slot: u32, a: &Expr) {
+        {
             match a.ty {
                 Ty::Int | Ty::Str => {
                     let t = self.tmp(ValType::I32);
@@ -984,8 +994,6 @@ impl<'a> Gen<'a> {
                 }
             }
         }
-        self.bridge_top = base;
-        base as i32
     }
 
     fn push_value(&mut self, ty: Ty) {
@@ -2533,6 +2541,29 @@ impl<'a> Gen<'a> {
                 }
             }
             Stmt::Assign(lv, e) => self.assign(lv, e),
+            Stmt::Print { items, newline } if self.bridge_top + items.len() as u32 <= layout::BRIDGE_SLOTS => {
+                // The items in bridge slots, printed by one call.
+                let base = self.bridge_top;
+                self.bridge_top = base + items.len() as u32;
+                for (k, it) in items.iter().enumerate() {
+                    let slot = self.layout.bridge + (base + k as u32) * layout::BRIDGE_SLOT;
+                    match it {
+                        PrintItem::Tab => {
+                            self.get(L_BASE);
+                            self.i32c(layout::BRIDGE_TAB);
+                            self.w(W::I32Store(mem32(slot)));
+                        }
+                        PrintItem::Value(e) => self.bridge_store(slot, e),
+                    }
+                }
+                self.bridge_top = base;
+                self.i32c(pos);
+                self.i32c(base as i32);
+                self.i32c(items.len() as i32);
+                self.i32c(*newline as i32);
+                self.call(Imp::PrintSlots);
+                self.status_check();
+            }
             Stmt::Print { items, newline } => {
                 self.call(Imp::PrintBegin);
                 for it in items {

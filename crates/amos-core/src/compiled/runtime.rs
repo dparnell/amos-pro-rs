@@ -1386,7 +1386,7 @@ impl Runtime {
     }
 
     pub fn print_i(&mut self, v: i32) {
-        self.print_buf.extend(crate::ffp::format_int(v).bytes());
+        push_int(&mut self.print_buf, v);
     }
 
     pub fn print_f(&mut self, env: &mut dyn Env, v: f64) {
@@ -1405,6 +1405,24 @@ impl Runtime {
 
     pub fn print_tab(&mut self) {
         self.print_buf.push(9);
+    }
+
+    /// Print of the `n` items in the bridge slots from `base` (values, or
+    /// `BRIDGE_TAB`): the text `print_i` / `print_f` / `print_n` /
+    /// `print_s` / `print_tab` and `print_end` would make, in one call.
+    pub fn print_slots(&mut self, env: &mut dyn Env, mem: &mut [u8], pos: i32, base: i32, n: i32, newline: i32) -> i32 {
+        self.print_buf.clear();
+        for k in 0..n.max(0) as u32 {
+            let a = self.layout.bridge + (base as u32 + k) * layout::BRIDGE_SLOT;
+            match ld_i32(mem, a) {
+                layout::BRIDGE_INT => self.print_i(ld_i32(mem, a + 8)),
+                layout::BRIDGE_DYN_INT => self.print_i(ld_f64(mem, a + 8) as i32),
+                layout::BRIDGE_FLOAT => self.print_f(env, ld_f64(mem, a + 8)),
+                layout::BRIDGE_TAB => self.print_tab(),
+                _ => self.print_s(mem, ld_i32(mem, a + 8)),
+            }
+        }
+        self.print_end(env, mem, pos, newline)
     }
 
     pub fn print_end(&mut self, env: &mut dyn Env, mem: &mut [u8], pos: i32, newline: i32) -> i32 {
@@ -2250,4 +2268,33 @@ fn point_table(code: &[u8], instrs: &[Instr]) -> Vec<i32> {
 /// Value of a dynamic number (payload, tag 0 int / 1 float).
 pub fn dyn_value(v: f64, tag: i32) -> Value {
     if tag == 0 { Value::Int(v as i32) } else { Value::Float(v) }
+}
+
+/// Appends `ffp::format_int(v)` (sign or space, digits) without allocating.
+fn push_int(buf: &mut Vec<u8>, v: i32) {
+    let mut digits = [0u8; 10];
+    let mut n = v.unsigned_abs();
+    let mut k = digits.len();
+    loop {
+        k -= 1;
+        digits[k] = b'0' + (n % 10) as u8;
+        n /= 10;
+        if n == 0 {
+            break;
+        }
+    }
+    buf.push(if v < 0 { b'-' } else { b' ' });
+    buf.extend_from_slice(&digits[k..]);
+}
+
+#[cfg(test)]
+mod print_tests {
+    #[test]
+    fn push_int_is_format_int() {
+        for v in [0, 1, -1, 9, 10, -10, 12345, i32::MAX, i32::MIN, i32::MIN + 1, 1_000_000_000, -999_999_999] {
+            let mut b = Vec::new();
+            super::push_int(&mut b, v);
+            assert_eq!(b, crate::ffp::format_int(v).into_bytes(), "{v}");
+        }
+    }
 }

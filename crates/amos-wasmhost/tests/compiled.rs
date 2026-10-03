@@ -841,3 +841,27 @@ fn dynamic_comparisons() {
     run(&src[..src.len() - "Set Double Precision\n".len()]);
     run(&format!("Set Double Precision\n{}", &src[..src.len() - "Set Double Precision\n".len()]));
 }
+
+/// Print through the bridge slots (`host.print_slots`): every kind of item,
+/// tabs, no new line, functions inside the items (their own bridge slots),
+/// a long list, errors in an item, both precisions.
+#[test]
+fn print_items() {
+    let mut many = String::from("I=7 : Print ");
+    for _ in 0..24 {
+        many.push_str("I;");
+    }
+    many.push('I');
+    let progs = [
+        "A=-5 : B#=2.5 : C$=\"x\" : Print A;B#;C$,A,,B#;Val(\"7\");Val(\"1.5\");Str$(A);-2147483648;2147483647;0\nPrint\nPrint A;\nPrint B#,\nPrint \"z\"".to_string(),
+        "For I=-3 To 3 : Print I;Mid$(\"abcdef\",I+4,2);Sqr(I*I);Left$(Str$(I),2),Upper$(\"q\")+Lower$(\"W\");Instr(\"abc\",\"c\");Repeat$(\"-\",I+3) : Next".to_string(),
+        "Set Double Precision\nX#=1/3 : Print X#;X#*1E10;-X#;Val(\"0.1\")+Val(\"0.2\")".to_string(),
+        "Fix 2 : Print 1.23456;-7.5;10 : Fix -1 : Print 3.14159".to_string(),
+        many,
+        "Print 1;2;3;10/0;4".to_string(),
+    ];
+    for p in &progs {
+        same(p);
+        same_budget(p, 2);
+    }
+}
