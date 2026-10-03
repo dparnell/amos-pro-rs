@@ -44,4 +44,21 @@ fn main() {
     for (d, b, n) in rows.iter().take(8) {
         println!("{:>8.1} ms {:>7} B  {n}", d.as_secs_f64() * 1e3, b);
     }
+    // With the compiled code cache: a first (cold) and a second (warm) run.
+    let dir = std::env::temp_dir().join(format!("amos-jit-bench-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    for pass in ["cold cache", "warm cache"] {
+        let mut total = std::time::Duration::ZERO;
+        for (_, _, f) in &rows {
+            let prg = amos_core::Program::load(&std::fs::read(f).unwrap()).unwrap();
+            let wasm = amos_compiler::compile(&prg).unwrap();
+            let mut it = amos_core::interp::Interp::new();
+            it.load(&prg).unwrap();
+            let t = std::time::Instant::now();
+            let _ = amos_wasmhost::CompiledProgram::new_cached(&wasm, it.prg.clone().unwrap(), Some(&dir)).unwrap();
+            total += t.elapsed();
+        }
+        println!("{pass}: {:.1} ms total (instantiation included)", total.as_secs_f64() * 1e3);
+    }
+    let _ = std::fs::remove_dir_all(&dir);
 }

@@ -69,8 +69,23 @@ impl CompiledProgram {
     /// Instantiates `wasm`, compiled from the verified program `prg` (the
     /// program the machine's interpreter was started with).
     pub fn new(wasm: &[u8], prg: Rc<Compiled>) -> Result<CompiledProgram, String> {
+        CompiledProgram::new_cached(wasm, prg, None)
+    }
+
+    /// `new`, with the native code compiled from `wasm` kept in the
+    /// directory `cache_dir` (if given): a later run of the same module
+    /// (same wasmtime, configuration and target) loads it instead of
+    /// compiling. Cache problems are ignored (the module is compiled).
+    pub fn new_cached(
+        wasm: &[u8],
+        prg: Rc<Compiled>,
+        cache_dir: Option<&std::path::Path>,
+    ) -> Result<CompiledProgram, String> {
         let engine = engine();
-        let module = Module::new(engine, wasm).map_err(|e| e.to_string())?;
+        let module = match cache_dir {
+            Some(dir) => crate::cache::module(engine, wasm, dir)?,
+            None => Module::new(engine, wasm).map_err(|e| e.to_string())?,
+        };
         let rt = Runtime::new(prg, 0, HeapKind::Linear);
         let pages = rt.layout.pages;
         let mut store = Store::new(engine, Ctx { rt, env: None, mem: None });
@@ -99,11 +114,21 @@ impl CompiledProgram {
     /// Starts `program` on `machine` (like `Machine::run_program`) and
     /// instantiates its compiled module.
     pub fn start(machine: &mut Machine, program: &Program, wasm: &[u8]) -> Result<CompiledProgram, String> {
+        CompiledProgram::start_cached(machine, program, wasm, None)
+    }
+
+    /// `start`, with the compiled code cache of `new_cached`.
+    pub fn start_cached(
+        machine: &mut Machine,
+        program: &Program,
+        wasm: &[u8],
+        cache_dir: Option<&std::path::Path>,
+    ) -> Result<CompiledProgram, String> {
         machine
             .run_program(program)
             .map_err(|e| format!("{} (at {})", amos_core::errors::test_message(e.code), e.pos))?;
         let prg = machine.interp.prg.clone().ok_or("no program")?;
-        CompiledProgram::new(wasm, prg)
+        CompiledProgram::new_cached(wasm, prg, cache_dir)
     }
 
     pub fn runtime(&self) -> &Runtime {
