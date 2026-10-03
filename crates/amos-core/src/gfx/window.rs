@@ -298,8 +298,15 @@ impl Screen {
                         let (a, b) = bm.split_at_mut(si);
                         (&b[..n], &mut a[di..di + n])
                     };
-                    for (d, &s) in dst.iter_mut().zip(src) {
-                        *d = (*d & keep) | (s & mask);
+                    if keep == 0 {
+                        // (The usual case: the destination is not read.)
+                        for (d, &s) in dst.iter_mut().zip(src) {
+                            *d = s & mask;
+                        }
+                    } else {
+                        for (d, &s) in dst.iter_mut().zip(src) {
+                            *d = (*d & keep) | (s & mask);
+                        }
                     }
                 }
                 continue;

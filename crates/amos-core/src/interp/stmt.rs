@@ -266,13 +266,26 @@ impl Interp {
     /// Print items: `;` joins, `,` emits a tab, no separator at the end
     /// emits a new line.
     pub fn print_items(&mut self, hw: &mut dyn Host) -> R<()> {
-        let text = self.print_text(hw)?;
-        hw.print(self, &text)
+        // (The text buffer is kept between Prints: no allocation per call.)
+        let mut text = std::mem::take(&mut self.print_buf);
+        text.clear();
+        let r = match self.print_text_into(hw, &mut text) {
+            Ok(()) => hw.print(self, &text),
+            Err(e) => Err(e),
+        };
+        self.print_buf = text;
+        r
     }
 
     /// Builds the text of a Print statement.
     pub fn print_text(&mut self, hw: &mut dyn Host) -> R<Vec<u8>> {
         let mut out = Vec::new();
+        self.print_text_into(hw, &mut out)?;
+        Ok(out)
+    }
+
+    /// Appends the text of a Print statement to `out`.
+    fn print_text_into(&mut self, hw: &mut dyn Host, out: &mut Vec<u8>) -> R<()> {
         let mut newline = true;
         loop {
             let t = self.peek();
@@ -300,8 +313,10 @@ impl Interp {
                     out.extend(self.print_using(&fmt, &v));
                 }
                 _ => match self.eval(hw)? {
-                    // (Strings are appended without an intermediate copy.)
+                    // (Strings and integers are appended without an
+                    // intermediate copy.)
                     Value::Str(s) => out.extend_from_slice(&s),
+                    Value::Int(i) => crate::ffp::push_int(out, i),
                     v => out.extend(self.value_text(&v)),
                 },
             }
@@ -309,7 +324,7 @@ impl Interp {
         if newline {
             out.extend_from_slice(b"\r\n");
         }
-        Ok(out)
+        Ok(())
     }
 
     /// Text of a value as Print shows it.

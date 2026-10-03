@@ -268,6 +268,8 @@ pub struct Interp {
     /// known yet) for the program `else_cache_prg`.
     pub(crate) else_cache: Vec<u32>,
     pub(crate) else_cache_prg: Option<Rc<Compiled>>,
+    /// Text of the Print being built (kept between Prints).
+    print_buf: Vec<u8>,
 }
 
 impl Default for Interp {
@@ -324,6 +326,7 @@ impl Interp {
             str_consts: Vec::new(),
             else_cache: Vec::new(),
             else_cache_prg: None,
+            print_buf: Vec::new(),
         }
     }
 

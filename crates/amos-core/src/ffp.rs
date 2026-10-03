@@ -1222,6 +1222,24 @@ pub fn format_int(v: i32) -> String {
     if v < 0 { format!("-{}", (v as i64).unsigned_abs()) } else { format!(" {v}") }
 }
 
+/// Appends `format_int(v)` to `buf` (no allocation).
+pub fn push_int(buf: &mut Vec<u8>, v: i32) {
+    let mut digits = [0u8; 11];
+    let mut n = v.unsigned_abs();
+    let mut k = digits.len();
+    loop {
+        k -= 1;
+        digits[k] = b'0' + (n % 10) as u8;
+        n /= 10;
+        if n == 0 {
+            break;
+        }
+    }
+    k -= 1;
+    digits[k] = if v < 0 { b'-' } else { b' ' };
+    buf.extend_from_slice(&digits[k..]);
+}
+
 // ---------------------------------------------------------------------------
 // Double -> text (Float2AsciiD / Dtoa)
 // ---------------------------------------------------------------------------
@@ -1939,6 +1957,15 @@ mod tests {
         assert_eq!(format_int(-12), "-12");
         assert_eq!(format_int(0), " 0");
         assert_eq!(format_int(i32::MIN), "-2147483648");
+        let mut seed = 5u32;
+        let special = [0, 1, -1, 9, 10, -10, i32::MAX, i32::MIN, i32::MIN + 1, 1_000_000_000];
+        for k in 0..20000 {
+            seed = seed.wrapping_mul(1103515245).wrapping_add(12345);
+            let v = if k < special.len() { special[k] } else { (seed as i32) >> (seed % 31) };
+            let mut b = b"x".to_vec();
+            push_int(&mut b, v);
+            assert_eq!(b[1..], *format_int(v).as_bytes(), "{v}");
+        }
     }
 
     #[test]
