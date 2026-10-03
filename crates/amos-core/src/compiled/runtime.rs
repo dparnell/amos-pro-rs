@@ -984,13 +984,9 @@ impl Runtime {
                 let call = self.sites[i].call.as_ref().expect("bridged call");
                 let (kw, start) = (call.kw, 2 + (call.tok_end - fpos));
                 let (code, end) = self.bridge_code(i, fpos, mem, base);
-                if kw.slot != 0 {
-                    // An extension function: `Interp::operand_value` calls
-                    // the machine directly for those.
-                    self.with_code(it, hw, i, code, start, end, |it, hw| hw.function(it, kw))
-                } else {
-                    self.with_code(it, hw, i, code, 2, end, |it, hw| it.eval(hw))
-                }
+                // The function itself, as `Interp::operand_value` calls it
+                // (no expression evaluation around it).
+                self.with_code(it, hw, i, code, start, end, |it, hw| it.function_value(hw, kw))
             }
         };
         match r {
