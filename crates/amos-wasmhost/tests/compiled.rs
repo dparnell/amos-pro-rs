@@ -692,3 +692,28 @@ fn bit_operations_on_variables() {
     assert!(png(&mut a) == png(&mut b), "displays differ");
     assert_eq!(a.state, b.state);
 }
+
+#[test]
+fn loop_regions() {
+    let progs = [
+        // Nested loops of every kind, single instruction bodies.
+        "For I=1 To 3 : Next : For J=1 To 2 : For K=1 To 2 : Print J;K; : Next : Next : Print I",
+        "I=0 : Repeat : J=0 : While J<3 : Inc J : Do : Inc K : Exit If K mod 4=0 : Loop : Wend : Inc I : Until I=3 : Print I;J;K",
+        // Backward Gotos crossing loops (merged regions), Goto into a loop.
+        "N=0\nL1: For I=1 To 3\nInc N : If N=5 Then Goto L2\nNext I\nGoto L1\nL2: Print N;I",
+        "A=0\nFor I=1 To 3\nL: Inc A\nIf A<10 and I=2 Then Goto L\nNext\nPrint A;I",
+        "A=0 : Goto M\nRepeat\nM: Inc A\nUntil A>5\nPrint A",
+        "I=0\nTOP: Inc I : J=0\nW: Inc J : If J<3 Then Goto W\nIf I<4 Then Goto TOP\nPrint I;J",
+        // Loops in procedures, Gosubs in loops, an Every handler in a loop.
+        "P[3]\nProcedure P[N]\nFor I=1 To N : For J=1 To I : S=S+J : Next : Next : Print S\nEnd Proc",
+        "For I=1 To 3 : Gosub L : Next : Print C : End\nL: For K=1 To 4 : Inc C : Next : Return",
+        "Every 1 Gosub E\nFor I=1 To 3000 : A=A+1 : Next : Every Off : Print A;B>0 : End\nE: For K=1 To 3 : Inc B : Next : Every On : Return",
+    ];
+    for p in progs {
+        same(p);
+        let budgets: &[usize] = if p.contains("Every") { &[40, 97] } else { &[1, 2, 3, 5, 9] };
+        for &b in budgets {
+            same_budget(p, b);
+        }
+    }
+}

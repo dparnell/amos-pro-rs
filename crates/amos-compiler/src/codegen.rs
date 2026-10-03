@@ -152,6 +152,8 @@ enum Lbl {
     Status,
     Raise,
     Point(u32),
+    /// The `loop` of a loop region starting at a point (`Gen::regions`).
+    Region(u32),
     Anon(u32),
 }
 
@@ -200,6 +202,10 @@ struct Gen<'a> {
     /// First free keyword bridge slot (`layout::BRIDGE_SLOT`): the
     /// parameters of the calls being evaluated are in the slots before.
     bridge_top: u32,
+    /// Loop regions: point ranges `[a, b]` (properly nested) emitted as a
+    /// wasm `loop` with their own dispatch, so that jumps back inside them
+    /// branch directly instead of going through the dispatcher.
+    regions: Vec<(u32, u32)>,
 }
 
 fn mem32(offset: u32) -> MemArg {
@@ -342,26 +348,93 @@ impl<'a> Gen<'a> {
         self.br(Lbl::Status);
     }
 
-    /// Continues at `point`: a direct branch when it is a later instruction
-    /// (its block encloses this code), else through the dispatcher.
+    /// Continues at `point`: a direct branch to a later instruction (its
+    /// block encloses this code) or back inside a loop region containing
+    /// both, else through the dispatcher.
     fn jump_point(&mut self, point: u32) {
         if point > self.k {
-            self.br(Lbl::Point(point));
+            self.branch_forward(point);
+        } else if let Some(r) = self.common_region(self.k, point) {
+            self.i32c(point as i32);
+            self.set(L_POINT);
+            self.br(Lbl::Region(self.regions[r].0));
         } else {
             self.i32c(point as i32);
             self.status_jump();
         }
     }
 
+    /// Branches to the later point `p`: the block of the unit containing it
+    /// at the level of the innermost region containing this instruction and
+    /// `p` (with `L_POINT` set when that unit is a region).
+    fn branch_forward(&mut self, p: u32) {
+        let level = self.common_region(self.k, p);
+        match self.child_region(level, p) {
+            Some(c) => {
+                self.i32c(p as i32);
+                self.set(L_POINT);
+                self.br(Lbl::Point(self.regions[c].0));
+            }
+            None => self.br(Lbl::Point(p)),
+        }
+    }
+
+    /// Innermost region containing points `x` and `y`.
+    fn common_region(&self, x: u32, y: u32) -> Option<usize> {
+        let (lo, hi) = (x.min(y), x.max(y));
+        (0..self.regions.len())
+            .filter(|&i| self.regions[i].0 <= lo && hi <= self.regions[i].1)
+            .min_by_key(|&i| self.regions[i].1 - self.regions[i].0)
+    }
+
+    /// The outermost region containing `p` directly inside `level` (`None`:
+    /// the top level).
+    fn child_region(&self, level: Option<usize>, p: u32) -> Option<usize> {
+        let (la, lb) = level.map_or((0, u32::MAX), |l| self.regions[l]);
+        (0..self.regions.len())
+            .filter(|&i| Some(i) != level)
+            .filter(|&i| {
+                let (a, b) = self.regions[i];
+                a <= p && p <= b && la <= a && b <= lb && (a, b) != (la, lb)
+            })
+            .max_by_key(|&i| self.regions[i].1 - self.regions[i].0)
+    }
+
+    /// Jumps to the point on the stack (a loop's body or start from the
+    /// control stack mirror): inside the innermost region containing this
+    /// instruction when it is there, else through the dispatcher.
+    fn jump_dyn_point(&mut self) {
+        match self.common_region(self.k, self.k) {
+            Some(r) => {
+                let (a, b) = self.regions[r];
+                self.w(W::LocalTee(L_ST));
+                self.i32c(a as i32);
+                self.w(W::I32Sub);
+                self.i32c((b - a + 1) as i32);
+                self.w(W::I32LtU);
+                self.if_(BlockType::Empty);
+                self.get(L_ST);
+                self.set(L_POINT);
+                self.br(Lbl::Region(a));
+                self.end();
+                self.br(Lbl::Status);
+            }
+            None => self.status_jump(),
+        }
+    }
+
     /// A status on the stack, usually `expected` (a point): a direct branch
-    /// for it when it is a later instruction, the dispatcher otherwise.
+    /// for it when it is a later instruction or back inside a region, the
+    /// dispatcher otherwise.
     fn status_jump_expect(&mut self, expected: Option<u32>) {
         match expected {
-            Some(pt) if pt > self.k => {
+            Some(pt) if pt > self.k || self.common_region(self.k, pt).is_some() => {
                 self.w(W::LocalTee(L_ST));
                 self.i32c(pt as i32);
                 self.w(W::I32Eq);
-                self.br_if(Lbl::Point(pt));
+                self.if_(BlockType::Empty);
+                self.jump_point(pt);
+                self.end();
                 self.br(Lbl::Status);
             }
             _ => self.status_jump(),
@@ -2096,7 +2169,7 @@ impl<'a> Gen<'a> {
                 self.w(W::I32Eqz);
                 self.if_(BlockType::Empty);
                 self.hdr(layout::FOR_BODY);
-                self.status_jump();
+                self.jump_dyn_point();
                 self.end();
                 self.release(a, ValType::I32);
                 self.release(v, ValType::I32);
@@ -2183,7 +2256,7 @@ impl<'a> Gen<'a> {
                 self.w(W::I32And);
                 self.if_(BlockType::Empty);
                 self.hdr(layout::FOR_BODY);
-                self.status_jump();
+                self.jump_dyn_point();
                 self.end();
                 self.i32c(pos);
                 self.get(c);
@@ -2203,7 +2276,7 @@ impl<'a> Gen<'a> {
                 self.i32c(1);
                 self.w(W::I32Store(mem32(layout::LAZY_WHILE)));
                 self.hdr(layout::TOP_START_POINT);
-                self.status_jump();
+                self.jump_dyn_point();
                 self.end();
                 self.i32c(pos);
                 self.call(Imp::Wend);
@@ -2218,7 +2291,7 @@ impl<'a> Gen<'a> {
                 self.w(W::I32And);
                 self.if_(BlockType::Empty);
                 self.hdr(layout::FOR_BODY);
-                self.status_jump();
+                self.jump_dyn_point();
                 self.end();
                 self.i32c(pos);
                 self.call(Imp::LoopEnd);
@@ -2721,6 +2794,141 @@ impl<'a> Gen<'a> {
     }
 
     /// The `run` function.
+    /// The loop regions of the program: For / Repeat / Do / While loops (to
+    /// their last instruction) and backward Gotos, made properly nested
+    /// (crossing ranges are merged).
+    fn loop_regions(&self, stmts: &[Stmt]) -> Result<Vec<(u32, u32)>, CompileError> {
+        let mut v: Vec<(u32, u32)> = Vec::new();
+        for (k, st) in stmts.iter().enumerate() {
+            let k = k as u32;
+            let r = match st {
+                Stmt::For { body, exit, .. } | Stmt::LoopStart { body, exit, .. } => {
+                    Some((self.point_of(*body)?, self.point_of(*exit)?))
+                }
+                Stmt::While { exit, .. } => Some((k, self.point_of(*exit)?)),
+                Stmt::Goto(idx) => {
+                    let scope = self.instrs[k as usize].scope;
+                    match self.prg.scopes.get(scope).and_then(|s| s.labels.get(*idx as usize)) {
+                        Some(l) => {
+                            let t = self.point_of(l.target)?;
+                            (t <= k).then_some((t, k + 1))
+                        }
+                        None => None,
+                    }
+                }
+                _ => None,
+            };
+            if let Some((a, e)) = r
+                && a < e
+                && e <= self.instrs.len() as u32
+            {
+                v.push((a, e - 1));
+            }
+        }
+        loop {
+            v.sort_by_key(|&(a, b)| (a, std::cmp::Reverse(b)));
+            v.dedup();
+            let mut merged = false;
+            'outer: for i in 0..v.len() {
+                for j in i + 1..v.len() {
+                    let ((a1, b1), (a2, b2)) = (v[i], v[j]);
+                    if a2 <= b1 && b2 > b1 && a2 > a1 {
+                        v[i] = (a1, b2);
+                        v.remove(j);
+                        merged = true;
+                        break 'outer;
+                    }
+                }
+            }
+            if !merged {
+                return Ok(v);
+            }
+        }
+    }
+
+    /// The units directly inside `level` (a region, `None` for the top
+    /// level): `(first, last, region)` point ranges, an instruction or a
+    /// region.
+    fn units(&self, level: Option<usize>) -> Vec<(u32, u32, Option<usize>)> {
+        let mut out = Vec::new();
+        if self.instrs.is_empty() {
+            return out;
+        }
+        let (a, b) = level.map_or((0, self.instrs.len() as u32 - 1), |l| self.regions[l]);
+        let mut p = a;
+        while p <= b {
+            match self.child_region(level, p) {
+                Some(c) => {
+                    out.push((self.regions[c].0, self.regions[c].1, Some(c)));
+                    p = self.regions[c].1 + 1;
+                }
+                None => {
+                    out.push((p, p, None));
+                    p += 1;
+                }
+            }
+        }
+        out
+    }
+
+    /// Emits the units of a level (their blocks are open, the first one
+    /// innermost): each one after the end of its block.
+    fn emit_units(&mut self, units: &[(u32, u32, Option<usize>)], stmts: &[Stmt]) -> Result<(), CompileError> {
+        for (i, &(a, _, region)) in units.iter().enumerate() {
+            if i > 0 && region.is_some() {
+                // Falling into a region: its dispatch starts at its head.
+                self.i32c(a as i32);
+                self.set(L_POINT);
+            }
+            self.end(); // the unit's block
+            if let Some(r) = region {
+                self.emit_region(r, stmts)?;
+            } else {
+                let k = a as usize;
+                self.pos = self.instrs[k].pos;
+                self.scope = self.instrs[k].scope;
+                self.k = k as u32;
+                self.budget(k as u32);
+                self.i32c(self.pos as i32);
+                self.set(L_EXCPOS);
+                self.i32c(0);
+                self.set(L_EXCODE);
+                self.stmt(k, &stmts[k])?;
+            }
+        }
+        Ok(())
+    }
+
+    /// A loop region: `loop` with its own dispatch on `L_POINT` (the head
+    /// directly, else a `br_table` over its units).
+    fn emit_region(&mut self, r: usize, stmts: &[Stmt]) -> Result<(), CompileError> {
+        let (a, b) = self.regions[r];
+        self.w(W::Loop(BlockType::Empty));
+        self.labels.push(Lbl::Region(a));
+        let units = self.units(Some(r));
+        for u in units.iter().rev() {
+            self.w(W::Block(BlockType::Empty));
+            self.labels.push(Lbl::Point(u.0));
+        }
+        let bad = self.block();
+        self.get(L_POINT);
+        self.i32c(a as i32);
+        self.w(W::I32Eq);
+        self.w(W::BrIf(1));
+        self.get(L_POINT);
+        self.i32c(a as i32);
+        self.w(W::I32Sub);
+        let targets: Vec<u32> =
+            (a..=b).map(|p| units.iter().position(|u| u.0 <= p && p <= u.1).expect("unit") as u32 + 1).collect();
+        self.w(W::BrTable(Cow::Owned(targets), 0));
+        self.end();
+        let _ = bad;
+        self.w(W::Unreachable);
+        self.emit_units(&units, stmts)?;
+        self.end(); // loop
+        Ok(())
+    }
+
     fn run_function(&mut self, stmts: &[Stmt]) -> Result<(), CompileError> {
         let n = self.instrs.len() as u32;
         self.w(W::GlobalGet(0));
@@ -2749,31 +2957,23 @@ impl<'a> Gen<'a> {
         self.get(L_ST);
         self.set(L_POINT);
         // Dispatch.
+        self.regions = self.loop_regions(stmts)?;
         self.w(W::Block(BlockType::Empty));
         self.labels.push(Lbl::Status);
         self.w(W::Block(BlockType::Empty));
         self.labels.push(Lbl::Raise);
         self.w(W::Block(BlockType::Empty));
         self.labels.push(Lbl::Point(n));
-        for k in (0..n).rev() {
+        let units = self.units(None);
+        for u in units.iter().rev() {
             self.w(W::Block(BlockType::Empty));
-            self.labels.push(Lbl::Point(k));
+            self.labels.push(Lbl::Point(u.0));
         }
         self.get(L_POINT);
-        let targets: Vec<u32> = (0..=n).collect();
-        self.w(W::BrTable(Cow::Owned(targets), n));
-        for (k, s) in stmts.iter().enumerate() {
-            self.end(); // $p[k]
-            self.pos = self.instrs[k].pos;
-            self.scope = self.instrs[k].scope;
-            self.k = k as u32;
-            self.budget(k as u32);
-            self.i32c(self.pos as i32);
-            self.set(L_EXCPOS);
-            self.i32c(0);
-            self.set(L_EXCODE);
-            self.stmt(k, s)?;
-        }
+        let targets: Vec<u32> =
+            (0..n).map(|p| units.iter().position(|u| u.0 <= p && p <= u.1).expect("unit") as u32).collect();
+        self.w(W::BrTable(Cow::Owned(targets), units.len() as u32));
+        self.emit_units(&units, stmts)?;
         self.end(); // $end
         // `Interp::run` checks the budget before finding the end.
         self.budget(n);
@@ -2981,6 +3181,7 @@ pub fn module(
         consts: structure::string_constants(prg),
         pos: 0,
         bridge_top: 0,
+        regions: Vec::new(),
     };
     // Locals 1..N_FIXED are the fixed ones; temporaries follow.
     g.run_function(stmts)?;
