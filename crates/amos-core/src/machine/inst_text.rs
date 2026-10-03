@@ -52,6 +52,11 @@ impl Hardware {
         wi(self.text_screen()?.locate(x, y))
     }
 
+    /// `Centre text`.
+    pub(crate) fn centre(&mut self, text: &[u8]) -> R<()> {
+        wi(self.text_screen()?.centre(text))
+    }
+
     /// `Pen n`.
     pub(crate) fn pen(&mut self, n: i32) -> R<()> {
         self.go_wn(&[27, b'P', (n as u8).wrapping_add(48)])
@@ -157,7 +162,7 @@ impl Hardware {
             }
             CENTRE => {
                 let t = it.inst_args(self, kw)?.str(0);
-                wi(self.text_screen()?.centre(&t))?;
+                self.centre(&t)?;
             }
             CMOVE => {
                 let a = it.inst_args(self, kw)?;

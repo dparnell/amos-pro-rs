@@ -773,6 +773,19 @@ Reserve Zone 5 : Set Zone 1,0,0 To 100,100 : Set Zone 2,40,40 To 60,60\n";
     fn reveal(m: &mut Machine) -> String {
         let mut out = String::new();
         let _ = m.hw.print(&mut m.interp, b"Ab\r\n");
+        for n in 1..=2 {
+            for t in [
+                tk::X_BOB,
+                tk::Y_BOB,
+                tk::I_BOB,
+                tk::X_SPRITE,
+                tk::Y_SPRITE,
+                tk::I_SPRITE,
+            ] {
+                out += &call_with(m, t, &[n]);
+            }
+        }
+        out += &call_with(m, tk::DRAW_TO, &[310, 195]);
         out += &call_with(m, tk::SET_PAINT, &[1]);
         out += &call_with(m, tk::BAR, &[200, 100, 230, 130]);
         out += &call_with(m, tk::PLOT, &[240, 100]);
@@ -825,7 +838,11 @@ Reserve Zone 5 : Set Zone 1,0,0 To 100,100 : Set Zone 2,40,40 To 60,60\n";
             Err(e) => format!("{e:?}"),
         };
         assert_eq!(want, got, "{call}");
-        assert_eq!(a_log[..], b.hw.log[b_log_start..], "{call}");
+        // B's log: what its setup printed (without its stop message), then
+        // what the typed call printed.
+        let mut b_log = b.hw.log[..b_log_start.saturating_sub(1)].to_vec();
+        b_log.extend_from_slice(&b.hw.log[b_log_start..]);
+        assert_eq!(a_log, b_log, "{call}");
         assert_eq!(reveal(&mut a), reveal(&mut b), "{call}");
         a.vbl();
         b.vbl();
@@ -1059,6 +1076,101 @@ Reserve Zone 5 : Set Zone 1,0,0 To 100,100 : Set Zone 2,40,40 To 60,60\n";
         );
         check("", "Print Mouse Click", func(|hw, _| Ok(hw.mouse_click())));
         check("", "Print Scancode", func(|hw, _| Ok(hw.scancode())));
+    }
+
+    #[test]
+    fn more_keywords() {
+        let two = "Screen Open 1,320,100,4,Lowres : Screen 0";
+        check(two, "Screen 1", inst(|hw, _| hw.screen(1)));
+        check(two, "Screen 0", inst(|hw, _| hw.screen(0)));
+        check(two, "Screen 3", inst(|hw, _| hw.screen(3)));
+        check(two, "Screen 9", inst(|hw, _| hw.screen(9)));
+        check("", "Centre \"Hello\"", inst(|hw, _| hw.centre(b"Hello")));
+        check("Locate 5,3", "Centre \"\"", inst(|hw, _| hw.centre(b"")));
+        let long = "x".repeat(60);
+        let call = format!("Centre \"{long}\"");
+        check("", &call, inst(move |hw, _| hw.centre(long.as_bytes())));
+        check(
+            "",
+            "Gr Locate 10,20",
+            inst(|hw, _| hw.gr_locate(Some(10), Some(20))),
+        );
+        check(
+            "Gr Locate 5,5",
+            "Gr Locate ,20",
+            inst(|hw, _| hw.gr_locate(None, Some(20))),
+        );
+        let filled = "Ink 2 : Bar 0,0 To 100,100 : Print \"Text\"";
+        check(filled, "Cls", inst(|hw, _| hw.cls(None, None)));
+        check(filled, "Cls 3", inst(|hw, _| hw.cls(Some(3), None)));
+        check(
+            filled,
+            "Cls 4,10,10 To 50,50",
+            inst(|hw, _| hw.cls(Some(4), Some((10, 10, 50, 50)))),
+        );
+        check(
+            "Screen Close 0",
+            "Cls 3",
+            inst(|hw, _| hw.cls(Some(3), None)),
+        );
+        check(
+            "",
+            "Text 10,50,\"Hi\"",
+            inst(|hw, _| hw.text(Some(10), Some(50), b"Hi")),
+        );
+        check(
+            "Gr Locate 30,40",
+            "Text ,50,\"Hi\"",
+            inst(|hw, _| hw.text(None, Some(50), b"Hi")),
+        );
+        check(
+            "",
+            "Text 10,50,\"\"",
+            inst(|hw, _| hw.text(Some(10), Some(50), b"")),
+        );
+        let img = "Ink 3 : Bar 0,0 To 15,15 : Get Sprite 1,0,0 To 16,16";
+        let bobs = format!("{img} : Bob 1,50,50,1");
+        check(
+            &bobs,
+            "Bob 1,60,70,1",
+            inst(|hw, _| hw.bob(1, Some(60), Some(70), Some(1))),
+        );
+        check(
+            &bobs,
+            "Bob 1,,80,",
+            inst(|hw, _| hw.bob(1, None, Some(80), None)),
+        );
+        check(
+            &bobs,
+            "Bob 2,10,10,1",
+            inst(|hw, _| hw.bob(2, Some(10), Some(10), Some(1))),
+        );
+        check(
+            &bobs,
+            "Bob -1,10,10,1",
+            inst(|hw, _| hw.bob(-1, Some(10), Some(10), Some(1))),
+        );
+        let sprites = format!("{img} : Sprite 1,200,100,1");
+        check(
+            &sprites,
+            "Sprite 1,210,120,1",
+            inst(|hw, _| hw.sprite(1, Some(210), Some(120), Some(1))),
+        );
+        check(
+            &sprites,
+            "Sprite 1,,130,",
+            inst(|hw, _| hw.sprite(1, None, Some(130), None)),
+        );
+        check(
+            &sprites,
+            "Sprite 5,,100,1",
+            inst(|hw, _| hw.sprite(5, None, Some(100), Some(1))),
+        );
+        check(
+            &sprites,
+            "Sprite 70,10,10,1",
+            inst(|hw, _| hw.sprite(70, Some(10), Some(10), Some(1))),
+        );
     }
 
     #[test]

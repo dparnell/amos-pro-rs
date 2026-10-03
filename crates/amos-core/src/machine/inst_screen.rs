@@ -52,6 +52,30 @@ impl Hardware {
         }
     }
 
+    /// `Screen n`.
+    pub(crate) fn screen(&mut self, n: i32) -> R<()> {
+        let n = check_screen(n)?;
+        ec(self.screens.activate(n))
+    }
+
+    /// `Cls` (`c` None: the windows), `Cls c` (`rect` None: the whole
+    /// screen), `Cls c,x1,y1 To x2,y2`. (`rect` is ignored without `c`.)
+    pub(crate) fn cls(&mut self, c: Option<i32>, rect: Option<(i32, i32, i32, i32)>) -> R<()> {
+        let Some(c) = c else {
+            self.cur_screen()?;
+            self.cur_mut()?.cls_windows();
+            return Ok(());
+        };
+        let s = self.cur_mut()?;
+        let (x1, y1, x2, y2) = rect.unwrap_or((0, 0, 10000, 10000));
+        // Word coordinates as in EcCls.
+        let w = |v: i32| v as i16 as i32;
+        for b in s.autoback_targets() {
+            s.cls_rect(b, c as u8, w(x1), w(y1), w(x2), w(y2));
+        }
+        Ok(())
+    }
+
     /// `Screen To Front` / `Screen To Front n`.
     pub(crate) fn screen_to_front(&mut self, n: Option<i32>) -> R<()> {
         let n = self.screen_or_current(n)?;
@@ -215,8 +239,8 @@ impl Hardware {
                 self.screens.remove(n);
             }
             SCREEN => {
-                let n = check_screen(it.inst_args(self, kw)?.int(0))?;
-                ec(self.screens.activate(n))?;
+                let n = it.inst_args(self, kw)?.int(0);
+                self.screen(n)?;
             }
             SCREEN_DISPLAY => {
                 let a = it.inst_args(self, kw)?;
@@ -306,23 +330,15 @@ impl Hardware {
                 self.screen_reset();
                 self.sprites_reset();
             }
-            CLS => {
-                self.cur_screen()?;
-                self.cur_mut()?.cls_windows();
-            }
+            CLS => self.cls(None, None)?,
             CLS_2 | CLS_3 => {
                 let a = it.inst_args(self, kw)?;
-                let s = self.cur_mut()?;
-                let (x1, y1, x2, y2) = if kw.token == CLS_2 {
-                    (0, 0, 10000, 10000)
+                let rect = if kw.token == CLS_2 {
+                    None
                 } else {
-                    (a.int(1), a.int(2), a.int(3), a.int(4))
+                    Some((a.int(1), a.int(2), a.int(3), a.int(4)))
                 };
-                // Word coordinates as in EcCls.
-                let w = |v: i32| v as i16 as i32;
-                for b in s.autoback_targets() {
-                    s.cls_rect(b, a.int(0) as u8, w(x1), w(y1), w(x2), w(y2));
-                }
+                self.cls(Some(a.int(0)), rect)?;
             }
             // Palettes
             COLOUR => {

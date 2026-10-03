@@ -89,7 +89,7 @@ impl Hardware {
     }
 
     /// Moves the graphic cursor, omitted coordinates are kept (`GrXY`).
-    fn gr_xy(&mut self, x: Option<i32>, y: Option<i32>) -> R<(i32, i32)> {
+    pub(crate) fn gr_xy(&mut self, x: Option<i32>, y: Option<i32>) -> R<(i32, i32)> {
         let g = self.gr()?;
         if let Some(y) = opt16(y) {
             g.y = y;
@@ -231,6 +231,25 @@ impl Hardware {
         self.draw_op(|g, c| g.ellipse(c, x, y, rx, w16(r)))
     }
 
+    /// `Gr Locate x,y`.
+    pub(crate) fn gr_locate(&mut self, x: Option<i32>, y: Option<i32>) -> R<()> {
+        self.gr_xy(x, y)?;
+        Ok(())
+    }
+
+    /// `Text x,y,s` (graphic text).
+    pub(crate) fn text(&mut self, x: Option<i32>, y: Option<i32>, s: &[u8]) -> R<()> {
+        self.draw_screen()?;
+        let (x, y) = self.gr_xy(x, y)?;
+        if !s.is_empty() {
+            self.draw_op(|g, c| {
+                let adv = g.text(c, x, y, s);
+                g.x = x + adv;
+            })?;
+        }
+        Ok(())
+    }
+
     /// `Point(x,y)`.
     pub(crate) fn point(&mut self, x: Option<i32>, y: Option<i32>) -> R<i32> {
         self.draw_screen()?;
@@ -317,7 +336,7 @@ impl Hardware {
             }
             tk::GR_LOCATE => {
                 let a = it.inst_args(self, kw)?;
-                self.gr_xy(a.opt(0), a.opt(1))?;
+                self.gr_locate(a.opt(0), a.opt(1))?;
             }
             tk::DRAW_TO => {
                 let a = it.inst_args(self, kw)?;
@@ -380,15 +399,7 @@ impl Hardware {
             }
             tk::TEXT => {
                 let a = it.inst_args(self, kw)?;
-                self.draw_screen()?;
-                let s = a.str(2);
-                let (x, y) = self.gr_xy(a.opt(0), a.opt(1))?;
-                if !s.is_empty() {
-                    self.draw_op(|g, c| {
-                        let adv = g.text(c, x, y, &s);
-                        g.x = x + adv;
-                    })?;
-                }
+                self.text(a.opt(0), a.opt(1), &a.str(2))?;
             }
             tk::GET_FONTS | tk::GET_DISC_FONTS | tk::GET_ROM_FONTS => {
                 it.inst_args(self, kw)?;

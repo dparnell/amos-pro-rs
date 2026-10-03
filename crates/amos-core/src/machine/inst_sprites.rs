@@ -1094,6 +1094,49 @@ impl Hardware {
         }
     }
 
+    /// `Sprite n,x,y,image` (None: omitted, the current value).
+    pub(crate) fn sprite(
+        &mut self,
+        n: i32,
+        x: Option<i32>,
+        y: Option<i32>,
+        image: Option<i32>,
+    ) -> R<()> {
+        if !(0..SPRITE_MAX as i32).contains(&n) {
+            return err(E_FONCALL);
+        }
+        let act = &mut self.sprites.act[n as usize];
+        let x = match x {
+            Some(x) => x as i16,
+            None if act.x == 0 => return err(E_FONCALL),
+            None => act.x,
+        };
+        let y = match y {
+            Some(y) => y as i16,
+            None if act.y == 0 => return err(E_FONCALL),
+            None => act.y,
+        };
+        act.flag |= 8;
+        act.x = x;
+        act.y = y;
+        if let Some(i) = image {
+            act.image = i as i16;
+        }
+        self.sprites.dirty_sprites = true;
+        Ok(())
+    }
+
+    /// `Bob n,x,y,image` (None: omitted, the current value).
+    pub(crate) fn bob(
+        &mut self,
+        n: i32,
+        x: Option<i32>,
+        y: Option<i32>,
+        image: Option<i32>,
+    ) -> R<()> {
+        self.bob_set(n, x, y, image, 0, -1, 0)
+    }
+
     // Collision functions as typed functions (the token path and compiled
     // code call these with the parameters read). `range` is the `,start To
     // end` of the second forms; `None` is the whole range of the first
@@ -1495,28 +1538,7 @@ impl Hardware {
             // ---- Hardware sprites
             SPRITE => {
                 let a = it.inst_args(self, kw)?;
-                let n = a.int(0);
-                if !(0..SPRITE_MAX as i32).contains(&n) {
-                    return err(E_FONCALL);
-                }
-                let act = &mut self.sprites.act[n as usize];
-                let x = match a.opt(1) {
-                    Some(x) => x as i16,
-                    None if act.x == 0 => return err(E_FONCALL),
-                    None => act.x,
-                };
-                let y = match a.opt(2) {
-                    Some(y) => y as i16,
-                    None if act.y == 0 => return err(E_FONCALL),
-                    None => act.y,
-                };
-                act.flag |= 8;
-                act.x = x;
-                act.y = y;
-                if let Some(i) = a.opt(3) {
-                    act.image = i as i16;
-                }
-                self.sprites.dirty_sprites = true;
+                self.sprite(a.int(0), a.opt(1), a.opt(2), a.opt(3))?;
             }
             SPRITE_OFF | SPRITE_OFF_2 => {
                 let a = it.inst_args(self, kw)?;
@@ -1629,7 +1651,7 @@ impl Hardware {
             // ---- Bobs
             BOB => {
                 let a = it.inst_args(self, kw)?;
-                self.bob_set(a.int(0), a.opt(1), a.opt(2), a.opt(3), 0, -1, 0)?;
+                self.bob(a.int(0), a.opt(1), a.opt(2), a.opt(3))?;
             }
             SET_BOB => {
                 let a = it.inst_args(self, kw)?;
