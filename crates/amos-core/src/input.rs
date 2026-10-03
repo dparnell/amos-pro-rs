@@ -103,6 +103,9 @@ pub struct InputState {
     pub joystick_keys: bool,
     /// Incremented for every key press stored (menu shortcut detection).
     pub key_serial: u64,
+    /// Joystick state from real game controllers, per Amiga port (0 =
+    /// mouse port, 1 = joystick port), in `Joy(n)` bits.
+    pub gamepads: [u8; 2],
 }
 
 impl Default for InputState {
@@ -123,6 +126,7 @@ impl Default for InputState {
             scanshift: 0,
             joystick_keys: true,
             key_serial: 0,
+            gamepads: [0; 2],
         }
     }
 }
@@ -304,11 +308,23 @@ impl InputState {
         std::mem::take(&mut self.break_pressed)
     }
 
-    /// `Joy(n)`: bit 0 up, 1 down, 2 left, 3 right, 4 fire. Port 1 is
-    /// emulated with the cursor keys and Ctrl / Alt (fire); port 0 fire is
-    /// the right mouse button as on the Amiga.
+    /// Sets the state of a game controller plugged into Amiga port 0 or 1
+    /// (`Joy(n)` bits: 1 up, 2 down, 4 left, 8 right, 16 fire).
+    pub fn set_gamepad(&mut self, port: usize, bits: u8) {
+        if let Some(p) = self.gamepads.get_mut(port) {
+            *p = bits & 31;
+        }
+    }
+
+    /// `Joy(n)`: bit 0 up, 1 down, 2 left, 3 right, 4 fire. Game controllers
+    /// are merged with the emulation of port 1 by the cursor keys and
+    /// Ctrl / Alt (fire); port 0 fire is also the right mouse button as on
+    /// the Amiga.
     pub fn joy_state(&self, port: i32) -> i32 {
-        let mut v = 0;
+        let mut v = match port {
+            0 | 1 => self.gamepads[port as usize] as i32,
+            _ => 0,
+        };
         if port == 1 && self.joystick_keys {
             if self.key_down(raw::UP) {
                 v |= 1;
@@ -357,5 +373,17 @@ mod tests {
         i.event(InputEvent::Key { scancode: 0x33, pressed: true, ch: Some('\u{3}') });
         assert!(i.take_break());
         assert!(i.inkey().is_none());
+    }
+
+    #[test]
+    fn gamepads_merge_with_keys() {
+        let mut i = InputState::default();
+        i.set_gamepad(1, 16 | 8);
+        assert_eq!(i.joy_state(1), 24);
+        i.event(InputEvent::Key { scancode: raw::UP, pressed: true, ch: None });
+        assert_eq!(i.joy_state(1), 25);
+        i.set_gamepad(0, 4);
+        assert_eq!(i.joy_state(0), 4);
+        assert_eq!(i.joy_state(2), 0);
     }
 }

@@ -25,7 +25,10 @@ directory.
 
 In the editor: F1 runs, F2 tests, Esc enters Direct mode, the right mouse
 button opens the menus. The Amiga key is Command (macOS) or the Windows key.
-Joystick port 1 is emulated with the cursor keys and Ctrl/Alt for fire.
+Game controllers work as Amiga joysticks: the first one is in the joystick port
+(port 1), the second in the mouse port (port 0); d-pad or left stick to move,
+any face or shoulder button to fire. Without a controller, port 1 is emulated
+with the cursor keys and Ctrl/Alt for fire.
 
 ### Building standalone applications
 

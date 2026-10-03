@@ -17,6 +17,7 @@ amos-core = { path = "../amos-core" }
 amos-wasmhost = { version = "0.1.0", path = "../amos-wasmhost" }
 bytemuck = { version = "1.25.2", features = ["derive"] }
 cpal = "0.18.2"
+gilrs = "0.11.2"
 log = "0.4.34"
 wgpu = { version = "30.0.1", features = ["webgl"] }
 winit = "0.30.13"

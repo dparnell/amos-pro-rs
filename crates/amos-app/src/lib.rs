@@ -2,6 +2,7 @@
 //! sound glue around the platform independent `amos-core` runtime.
 
 mod audio;
+mod gamepad;
 mod keymap;
 mod renderer;
 
@@ -39,6 +40,8 @@ struct App {
     editor: Option<Editor>,
     /// Window title (the program name for standalone applications).
     title: String,
+    /// Game controllers used as Amiga joysticks.
+    gamepads: gamepad::Gamepads,
     /// The program of a standalone application compiled to WebAssembly
     /// (run instead of the interpreter when the bundle carries a module).
     compiled: Option<amos_wasmhost::CompiledProgram>,
@@ -64,6 +67,7 @@ impl App {
             machine,
             editor,
             title,
+            gamepads: gamepad::Gamepads::new(),
             compiled,
             window: None,
             renderer: None,
@@ -94,6 +98,7 @@ impl App {
         let last = self.last_time.replace(now).unwrap_or(now);
         let elapsed = (now - last).as_secs_f64().min(0.25);
         self.vbl_accumulator += elapsed * VBL_HZ;
+        self.gamepads.poll(&mut self.machine.hw.input);
         while self.vbl_accumulator >= 1.0 {
             self.vbl_accumulator -= 1.0;
             match (&mut self.editor, &mut self.compiled) {
