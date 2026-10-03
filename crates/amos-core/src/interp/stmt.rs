@@ -35,15 +35,33 @@ impl Interp {
             }
             _ => {}
         }
-        if self.exec_flow(hw, t)? {
-            return Ok(());
-        }
-        self.pc = p + 2 + inline_data_size(t);
-        if self.exec_core(hw, t)? {
-            return Ok(());
+        // A token already seen going to the host skips the flow and core
+        // matches (they accept or refuse a token by its value alone).
+        let known = self.host_inst.get(t as usize).copied().unwrap_or(0);
+        if known == 0 {
+            if self.exec_flow(hw, t)? {
+                return Ok(());
+            }
+            self.pc = p + 2 + inline_data_size(t);
+            if self.exec_core(hw, t)? {
+                return Ok(());
+            }
+        } else {
+            self.pc = p + 2 + inline_data_size(t);
         }
         let kw = Keyword { slot: 0, token: t };
-        if kw.def().is_some_and(|d| d.kind() == TokenKind::ReservedVariable) {
+        let reserved = match known {
+            0 => {
+                let r = kw.def().is_some_and(|d| d.kind() == TokenKind::ReservedVariable);
+                if self.host_inst.len() <= t as usize {
+                    self.host_inst.resize(t as usize + 1, 0);
+                }
+                self.host_inst[t as usize] = if r { 2 } else { 1 };
+                r
+            }
+            k => k == 2,
+        };
+        if reserved {
             return hw.reserved_assign(self, kw);
         }
         hw.instruction(self, kw)
@@ -51,6 +69,19 @@ impl Interp {
 
     /// `var = expression`.
     fn assign(&mut self, hw: &mut dyn Host) -> R<()> {
+        let p = self.pc;
+        let flags = self.code[p + 5];
+        if flags & crate::program::var_flags::ARRAY == 0 {
+            // Scalar: what `var_ref` + `write_loc` do, without the location
+            // record.
+            let slot = self.rd(p + 2);
+            self.pc = p + 6 + self.code[p + 4] as usize;
+            self.expect(tk::OP_EQ)?;
+            let v = self.eval(hw)?;
+            let v = self.convert_for(flags & 3, v)?;
+            *self.var_slot(slot) = Var::Scalar(v);
+            return Ok(());
+        }
         let (loc, ty) = self.var_ref(hw)?;
         self.expect(tk::OP_EQ)?;
         let v = self.eval(hw)?;
@@ -268,10 +299,11 @@ impl Interp {
                     let v = self.eval(hw)?;
                     out.extend(self.print_using(&fmt, &v));
                 }
-                _ => {
-                    let v = self.eval(hw)?;
-                    out.extend(self.value_text(&v));
-                }
+                _ => match self.eval(hw)? {
+                    // (Strings are appended without an intermediate copy.)
+                    Value::Str(s) => out.extend_from_slice(&s),
+                    v => out.extend(self.value_text(&v)),
+                },
             }
         }
         if newline {

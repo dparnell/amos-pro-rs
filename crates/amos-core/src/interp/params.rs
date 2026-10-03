@@ -5,10 +5,65 @@ use super::{Host, Interp, R, err};
 use crate::errors;
 use crate::tokens::*;
 
+/// Number of parameters kept without a heap allocation.
+const INLINE_ARGS: usize = 6;
+
+/// A list of parameter values that only allocates beyond
+/// [`INLINE_ARGS`] values (every instruction and function call reads one).
+#[derive(Debug, Default)]
+pub struct ArgVec {
+    len: usize,
+    inline: [Value; INLINE_ARGS],
+    /// All the values once there are more than `INLINE_ARGS`.
+    spill: Vec<Value>,
+}
+
+impl ArgVec {
+    pub fn push(&mut self, v: Value) {
+        if self.spill.is_empty() && self.len < INLINE_ARGS {
+            self.inline[self.len] = v;
+            self.len += 1;
+            return;
+        }
+        if self.spill.is_empty() {
+            self.spill
+                .extend(self.inline.iter_mut().map(std::mem::take));
+        }
+        self.spill.push(v);
+        self.len += 1;
+    }
+
+    /// Moves value `i` out (leaving `Value::Int(0)`).
+    pub fn take(&mut self, i: usize) -> Value {
+        std::mem::take(&mut self[i])
+    }
+}
+
+impl std::ops::Deref for ArgVec {
+    type Target = [Value];
+    fn deref(&self) -> &[Value] {
+        if self.spill.is_empty() {
+            &self.inline[..self.len]
+        } else {
+            &self.spill
+        }
+    }
+}
+
+impl std::ops::DerefMut for ArgVec {
+    fn deref_mut(&mut self) -> &mut [Value] {
+        if self.spill.is_empty() {
+            &mut self.inline[..self.len]
+        } else {
+            &mut self.spill
+        }
+    }
+}
+
 /// Parameters of an instruction or function, already converted to the
 /// types of the signature. Omitted parameters hold [`ENT_NUL`].
 #[derive(Debug, Default)]
-pub struct Args(pub Vec<Value>);
+pub struct Args(pub ArgVec);
 
 impl Args {
     pub fn len(&self) -> usize {
@@ -60,9 +115,9 @@ impl Args {
 impl Interp {
     /// Reads parameters following the signature `sig` (type chars separated
     /// by `,` or `t` for `To`), as the patched `Parameters` routines do.
-    pub fn args(&mut self, hw: &mut dyn Host, sig: &str) -> R<Vec<Value>> {
+    pub fn args(&mut self, hw: &mut dyn Host, sig: &str) -> R<ArgVec> {
         let sig = sig.as_bytes();
-        let mut out = Vec::with_capacity(sig.len().div_ceil(2));
+        let mut out = ArgVec::default();
         let mut i = 0;
         while i < sig.len() {
             let ty = sig[i];

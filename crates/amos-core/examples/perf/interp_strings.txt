@@ -1,0 +1,5 @@
+Do
+  A$="" : For I=1 To 50 : A$=A$+Chr$(65+I mod 26) : Next I
+  B$=Left$(A$,10)+Mid$(A$,5,10)+Right$(A$,5)+Str$(I)+Upper$(A$)
+  P=Instr(A$,"XYZ") : L=Len(B$) : V=Val("123")
+Loop

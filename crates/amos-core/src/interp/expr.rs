@@ -5,6 +5,7 @@
 //! reproduces AMOS quirks such as `10*3/4 = 0` (evaluated as `10*(3/4)`).
 
 use super::value::{AStr, ENT_NUL, STRING_MAX, Value, Var, astr, empty_str, float_to_int};
+use super::params::ArgVec;
 use super::{Exc, Host, Interp, R, err};
 use crate::errors;
 use crate::ffp::Ffp;
@@ -93,6 +94,17 @@ impl Interp {
         let t = self.rd(p);
         match t {
             TK_VAR => {
+                let flags = self.code[p + 5];
+                if flags & crate::program::var_flags::ARRAY == 0 {
+                    // Scalar: what `var_ref` + `read_loc` do, without the
+                    // location record.
+                    let slot = self.rd(p + 2);
+                    self.pc = p + 6 + self.code[p + 4] as usize;
+                    return Ok(match self.var_slot(slot) {
+                        Var::Scalar(v) => v.clone(),
+                        _ => Value::zero(flags & 3),
+                    });
+                }
                 let (loc, ty) = self.var_ref(hw)?;
                 Ok(self.read_loc(&loc, ty))
             }
@@ -136,12 +148,30 @@ impl Interp {
             }
             _ => {
                 self.pc += 2 + inline_data_size(t);
-                if let Some(v) = self.core_function(hw, t)? {
-                    return Ok(v);
-                }
-                hw.function(self, Keyword { slot: 0, token: t })
+                self.function_value(hw, Keyword { slot: 0, token: t })
             }
         }
+    }
+
+    /// The value of the function `kw` whose token was just read (pc after
+    /// it and its inline data), as an operand: the interpreter's own
+    /// functions (`core_function`, main library only), else `hw.function`
+    /// (for compiled code; `TK_EXT` keywords always go to `hw.function`).
+    pub fn function_value(&mut self, hw: &mut dyn Host, kw: Keyword) -> R<Value> {
+        if kw.slot == 0 {
+            // `core_function` accepts or refuses a token by its value alone.
+            let (word, bit) = (kw.token as usize / 64, 1u64 << (kw.token % 64));
+            if self.not_core.get(word).is_none_or(|w| w & bit == 0) {
+                if let Some(v) = self.core_function(hw, kw.token)? {
+                    return Ok(v);
+                }
+                if self.not_core.len() <= word {
+                    self.not_core.resize(word + 1, 0);
+                }
+                self.not_core[word] |= bit;
+            }
+        }
+        hw.function(self, kw)
     }
 
     // ------------------------------------------------------------------
@@ -164,6 +194,24 @@ impl Interp {
 
     pub fn binop(&mut self, op: u16, a: Value, b: Value) -> R<Value> {
         use tk::*;
+        if let (Value::Int(x), Value::Int(y)) = (&a, &b) {
+            // Fast path: the integer arms below, without the conversions.
+            let (x, y) = (*x, *y);
+            match op {
+                OP_AND => return Ok(Value::Int(x & y)),
+                OP_OR => return Ok(Value::Int(x | y)),
+                OP_XOR => return Ok(Value::Int(x ^ y)),
+                OP_MOD => return Ok(int_mod(x, y)),
+                OP_EQ | OP_NE | OP_NE2 | OP_LT | OP_GT | OP_LE | OP_LE2 | OP_GE | OP_GE2 => {
+                    return Ok(compare_result(op, x.cmp(&y)));
+                }
+                OP_PLUS => return int_add(x, y),
+                OP_MINUS => return int_sub(x, y),
+                OP_MUL => return int_mul(x, y),
+                OP_DIV => return int_div(x, y),
+                _ => {}
+            }
+        }
         match op {
             OP_AND | OP_OR | OP_XOR => {
                 let (x, y) = (self.to_int(a)?, self.to_int(b)?);
@@ -175,10 +223,7 @@ impl Interp {
             }
             OP_MOD => {
                 let (x, y) = (self.to_int(a)?, self.to_int(b)?);
-                if y == 0 {
-                    return Ok(Value::Int(x));
-                }
-                Ok(Value::Int(((x as u32) % y.unsigned_abs()) as i32))
+                Ok(int_mod(x, y))
             }
             OP_POW => {
                 let (x, y) = (self.to_float(a)?, self.to_float(b)?);
@@ -198,21 +243,10 @@ impl Interp {
                     (Value::Str(x), Value::Str(y)) => x[..].cmp(&y[..]),
                     _ => unreachable!(),
                 };
-                use std::cmp::Ordering::*;
-                let r = match op {
-                    OP_EQ => ord == Equal,
-                    OP_NE | OP_NE2 => ord != Equal,
-                    OP_LT => ord == Less,
-                    OP_GT => ord == Greater,
-                    OP_LE | OP_LE2 => ord != Greater,
-                    _ => ord != Less,
-                };
-                Ok(Value::Int(if r { -1 } else { 0 }))
+                Ok(compare_result(op, ord))
             }
             OP_PLUS => match self.compat(a, b)? {
-                (Value::Int(x), Value::Int(y)) => {
-                    x.checked_add(y).map(Value::Int).ok_or(Exc::Error(errors::OVERFLOW))
-                }
+                (Value::Int(x), Value::Int(y)) => int_add(x, y),
                 (Value::Float(x), Value::Float(y)) => Ok(Value::Float(self.fop(x, y, Ffp::add, |a, b| a + b))),
                 (Value::Str(x), Value::Str(y)) => {
                     if x.is_empty() {
@@ -232,40 +266,18 @@ impl Interp {
                 _ => unreachable!(),
             },
             OP_MINUS => match self.compat(a, b)? {
-                (Value::Int(x), Value::Int(y)) => {
-                    x.checked_sub(y).map(Value::Int).ok_or(Exc::Error(errors::OVERFLOW))
-                }
+                (Value::Int(x), Value::Int(y)) => int_sub(x, y),
                 (Value::Float(x), Value::Float(y)) => Ok(Value::Float(self.fop(x, y, Ffp::sub, |a, b| a - b))),
                 (Value::Str(x), Value::Str(y)) => Ok(Value::Str(string_minus(&x, &y))),
                 _ => unreachable!(),
             },
             OP_MUL => match self.compat(a, b)? {
-                (Value::Int(x), Value::Int(y)) => {
-                    let (ax, ay) = (x.unsigned_abs(), y.unsigned_abs());
-                    let neg = (x < 0) != (y < 0);
-                    if ax < 65536 && ay < 65536 {
-                        let m = ax.wrapping_mul(ay);
-                        Ok(Value::Int(if neg { (m as i32).wrapping_neg() } else { m as i32 }))
-                    } else {
-                        let m = ax as u64 * ay as u64;
-                        if m >= 1 << 31 {
-                            return err(errors::OVERFLOW);
-                        }
-                        Ok(Value::Int(if neg { -(m as i32) } else { m as i32 }))
-                    }
-                }
+                (Value::Int(x), Value::Int(y)) => int_mul(x, y),
                 (Value::Float(x), Value::Float(y)) => Ok(Value::Float(self.fop(x, y, Ffp::mul, |a, b| a * b))),
                 _ => err(errors::TYPE_MISMATCH),
             },
             OP_DIV => match self.compat(a, b)? {
-                (Value::Int(x), Value::Int(y)) => {
-                    if y == 0 {
-                        return err(errors::DIVISION_BY_ZERO);
-                    }
-                    let q = x.unsigned_abs() / y.unsigned_abs();
-                    let neg = (x < 0) != (y < 0);
-                    Ok(Value::Int(if neg { (q as i32).wrapping_neg() } else { q as i32 }))
-                }
+                (Value::Int(x), Value::Int(y)) => int_div(x, y),
                 (Value::Float(x), Value::Float(y)) => {
                     if y == 0.0 {
                         return err(errors::DIVISION_BY_ZERO);
@@ -283,9 +295,9 @@ impl Interp {
     // ------------------------------------------------------------------
 
     /// Reads `(a, b, ...)` function parameters according to `sig`.
-    pub fn fn_args(&mut self, hw: &mut dyn Host, sig: &str) -> R<Vec<Value>> {
+    pub fn fn_args(&mut self, hw: &mut dyn Host, sig: &str) -> R<ArgVec> {
         if sig.is_empty() {
-            return Ok(Vec::new());
+            return Ok(ArgVec::default());
         }
         self.expect(TK_PAR1)?;
         let v = self.args(hw, sig)?;
@@ -297,7 +309,6 @@ impl Interp {
     /// procedures, errors). Returns `None` for others. pc is after the token.
     fn core_function(&mut self, hw: &mut dyn Host, t: u16) -> R<Option<Value>> {
         use tk::*;
-        let sig = crate::tokens::lookup(t).map_or("", |d| d.param_types());
         let v = match t {
             FN => return self.call_fn(hw).map(Some),
             MIN | MAX => {
@@ -334,7 +345,7 @@ impl Interp {
             ERRTRAP => Value::Int(self.trap_err as i32),
             PI_F => Value::Float(self.round_float(std::f64::consts::PI)),
             _ => {
-                if let Some(v) = self.string_maths_function(hw, t, sig)? {
+                if let Some(v) = self.string_maths_function(hw, t)? {
                     v
                 } else {
                     return Ok(None);
@@ -394,8 +405,10 @@ impl Interp {
     }
 
     /// String and maths functions.
-    fn string_maths_function(&mut self, hw: &mut dyn Host, t: u16, sig: &str) -> R<Option<Value>> {
+    fn string_maths_function(&mut self, hw: &mut dyn Host, t: u16) -> R<Option<Value>> {
         use tk::*;
+        // Signature of the overloaded functions (only looked up by them).
+        let sig = || crate::tokens::lookup(t).map_or("", |d| d.param_types());
         let v = match t {
             LEN => Value::Int(self.str_arg(hw)?.len() as i32),
             ASC => Value::Int(self.str_arg(hw)?.first().copied().unwrap_or(0) as i32),
@@ -411,8 +424,8 @@ impl Interp {
                 self.val(&s)
             }
             STR_S => {
-                let a = self.fn_args(hw, "4")?;
-                let s = match a.into_iter().next().unwrap() {
+                let mut a = self.fn_args(hw, "4")?;
+                let s = match a.take(0) {
                     Value::Int(i) => crate::ffp::format_int(i),
                     Value::Float(f) => self.format_float(f),
                     Value::Str(_) => return err(errors::TYPE_MISMATCH),
@@ -471,7 +484,7 @@ impl Interp {
                 Value::Str(if t == LEFT_S { astr(&s[..n]) } else { astr(&s[s.len() - n..]) })
             }
             MID_S | MID_S_2 => {
-                let a = self.fn_args(hw, sig)?;
+                let a = self.fn_args(hw, sig())?;
                 let s = str_of(&a[0]);
                 let p = int_of(&a[1]);
                 if p < 0 {
@@ -495,7 +508,7 @@ impl Interp {
                 }
             }
             INSTR | INSTR_2 => {
-                let a = self.fn_args(hw, sig)?;
+                let a = self.fn_args(hw, sig())?;
                 let h = str_of(&a[0]);
                 let n = str_of(&a[1]);
                 let start = if a.len() == 3 { int_of(&a[2]) } else { 1 };
@@ -505,24 +518,24 @@ impl Interp {
                 Value::Int(instr(&h, &n, start.max(1) as usize))
             }
             HEX_S | HEX_S_2 | BIN_S | BIN_S_2 => {
-                let a = self.fn_args(hw, sig)?;
+                let a = self.fn_args(hw, sig())?;
                 let n = int_of(&a[0]) as u32;
                 let digits = if a.len() == 2 { int_of(&a[1]) } else { -1 };
                 let hex = t == HEX_S || t == HEX_S_2;
                 let (b, len) = radix_text(n, hex, digits);
                 Value::Str(astr(&b[..len]))
             }
-            ABS => match self.fn_args(hw, "4")?.remove(0) {
+            ABS => match self.fn_args(hw, "4")?.take(0) {
                 Value::Int(i) => Value::Int(i.wrapping_abs()),
                 Value::Float(f) => Value::Float(f.abs()),
                 v => v,
             },
-            INT => match self.fn_args(hw, "4")?.remove(0) {
+            INT => match self.fn_args(hw, "4")?.take(0) {
                 Value::Float(f) => Value::Float(self.round_float(f.floor())),
                 v => v,
             },
             SGN => {
-                let v = self.fn_args(hw, "4")?.remove(0);
+                let v = self.fn_args(hw, "4")?.take(0);
                 Value::Int(match v {
                     Value::Int(i) => i.signum(),
                     Value::Float(f) => {
@@ -676,6 +689,66 @@ impl Interp {
             }
         }
     }
+}
+
+/// Result of a comparison operator (-1 true, 0 false).
+#[inline]
+fn compare_result(op: u16, ord: std::cmp::Ordering) -> Value {
+    use std::cmp::Ordering::*;
+    use tk::*;
+    let r = match op {
+        OP_EQ => ord == Equal,
+        OP_NE | OP_NE2 => ord != Equal,
+        OP_LT => ord == Less,
+        OP_GT => ord == Greater,
+        OP_LE | OP_LE2 => ord != Greater,
+        _ => ord != Less,
+    };
+    Value::Int(if r { -1 } else { 0 })
+}
+
+#[inline]
+fn int_mod(x: i32, y: i32) -> Value {
+    if y == 0 {
+        return Value::Int(x);
+    }
+    Value::Int(((x as u32) % y.unsigned_abs()) as i32)
+}
+
+#[inline]
+fn int_add(x: i32, y: i32) -> R<Value> {
+    x.checked_add(y).map(Value::Int).ok_or(Exc::Error(errors::OVERFLOW))
+}
+
+#[inline]
+fn int_sub(x: i32, y: i32) -> R<Value> {
+    x.checked_sub(y).map(Value::Int).ok_or(Exc::Error(errors::OVERFLOW))
+}
+
+#[inline]
+fn int_mul(x: i32, y: i32) -> R<Value> {
+    let (ax, ay) = (x.unsigned_abs(), y.unsigned_abs());
+    let neg = (x < 0) != (y < 0);
+    if ax < 65536 && ay < 65536 {
+        let m = ax.wrapping_mul(ay);
+        Ok(Value::Int(if neg { (m as i32).wrapping_neg() } else { m as i32 }))
+    } else {
+        let m = ax as u64 * ay as u64;
+        if m >= 1 << 31 {
+            return err(errors::OVERFLOW);
+        }
+        Ok(Value::Int(if neg { -(m as i32) } else { m as i32 }))
+    }
+}
+
+#[inline]
+fn int_div(x: i32, y: i32) -> R<Value> {
+    if y == 0 {
+        return err(errors::DIVISION_BY_ZERO);
+    }
+    let q = x.unsigned_abs() / y.unsigned_abs();
+    let neg = (x < 0) != (y < 0);
+    Ok(Value::Int(if neg { (q as i32).wrapping_neg() } else { q as i32 }))
 }
 
 /// The original's 32 bit multiply drops the high*high term.

@@ -1,0 +1,8 @@
+Screen Open 0,320,256,16,Lowres
+Cls 0
+For I=1 To 8 : Ink I : Bar 0,0 To 15,15 : Get Sprite I,0,0 To 16,16 : Next I
+Do
+  For I=0 To 7 : Sprite I,128+(T*(I+1)) mod 300,50+I*20,I+1 : Next I
+  Inc T
+  Wait Vbl
+Loop

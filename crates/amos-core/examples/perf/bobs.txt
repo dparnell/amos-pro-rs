@@ -1,0 +1,11 @@
+Screen Open 0,320,256,16,Lowres
+Double Buffer : Autoback 1
+Cls 0
+For I=1 To 15 : Ink I : Bar 0,0 To 31,31 : Ink 0 : Circle 16,16,8 : Get Bob I,0,0 To 32,32 : Next I
+Cls 0
+For I=0 To 255 Step 8 : Ink (I/8) mod 16 : Bar 0,I To 319,I+7 : Next I
+For I=0 To 30 : Bob I,Rnd(280),Rnd(220),1+(I mod 15) : Next I
+Do
+  For I=0 To 30 : Bob I,(X Bob(I)+I+1) mod 300,(Y Bob(I)+2) mod 230,1+(I mod 15) : Next I
+  Wait Vbl
+Loop

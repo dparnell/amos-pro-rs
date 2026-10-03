@@ -1,0 +1,6 @@
+Dim T(1000),S$(100),F#(200)
+Do
+  For I=0 To 1000 : T(I)=T(I)+I : Next I
+  For I=0 To 100 : S$(I)=Str$(T(I)) : Next I
+  For I=0 To 200 : F#(I)=F#(I)+T(I)*0.5 : Next I
+Loop

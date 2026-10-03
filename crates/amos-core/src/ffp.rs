@@ -418,8 +418,9 @@ impl Ffp {
         if v & 0x7F == 0 && v & 0x80 == 0 {
             return 0.0;
         }
-        let mant = (v >> 8) as f64 / (1u64 << 24) as f64;
-        let val = mant * 2f64.powi((v & 0x7F) as i32 - 64);
+        // mant / 2^24 * 2^(e - 64), exact: built from the bits instead of
+        // `powi` (same value, it is on the interpreter's hot path).
+        let val = (v >> 8) as f64 * crate::number::pow2((v & 0x7F) as i32 - 64 - 24);
         if v & 0x80 != 0 { -val } else { val }
     }
 

@@ -1,0 +1,4 @@
+Do
+  For I=1 To 20 : Print "Scrolling text line number ";I;" with some more text" : Next I
+  Wait Vbl
+Loop

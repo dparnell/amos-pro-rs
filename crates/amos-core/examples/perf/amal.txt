@@ -1,0 +1,12 @@
+Screen Open 0,320,256,16,Lowres
+Cls 0
+For I=1 To 8 : Ink I : Bar 0,0 To 15,15 : Get Sprite I,0,0 To 16,16 : Next I
+For I=0 To 15
+  Sprite I,130+I*10,60+I*5,1+(I mod 8)
+  Channel I To Sprite I
+  Amal I,"Loop: Let X=X+1; Let Y=Y+1; If X>400 Jump Re; Pause; Jump Loop; Re: Let X=130; Let Y=60; Jump Loop"
+Next I
+Amal On
+Do
+  Wait Vbl
+Loop

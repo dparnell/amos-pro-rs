@@ -1,0 +1,13 @@
+Screen Open 0,320,256,32,Lowres
+Do
+  For I=1 To 50
+    Ink I mod 32 : Plot Rnd(319),Rnd(255)
+    Draw Rnd(319),Rnd(255) To Rnd(319),Rnd(255)
+    Bar Rnd(250),Rnd(199) To Rnd(50)+260,Rnd(50)+200
+    Circle Rnd(319),Rnd(255),Rnd(60)+1
+    Box Rnd(150),Rnd(150) To Rnd(150)+100,Rnd(100)+100
+    Ellipse 160,128,Rnd(100)+1,Rnd(80)+1
+  Next I
+  Gr Writing 2 : Bar 10,10 To 300,240 : Gr Writing 1
+  Wait Vbl
+Loop

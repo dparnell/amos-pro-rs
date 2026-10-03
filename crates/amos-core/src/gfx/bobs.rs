@@ -230,29 +230,36 @@ pub fn draw(t: &mut Target, src: &Src, c: &Calc, plane_mask: u16) {
     if pm == 0 {
         return;
     }
+    // The minterm applied to all planes at once: for each pixel, bit p of
+    // the result is bit (A<<2 | S_p<<1 | D_p) of `lf`, A being the mask.
+    let terms = |a: u8| -> [u8; 4] {
+        std::array::from_fn(|sd| {
+            if (c.lf >> ((a << 2) | sd as u8)) & 1 != 0 {
+                0xFF
+            } else {
+                0
+            }
+        })
+    };
+    let (t0, t1) = (terms(0), terms(1));
     for py in c.ry..c.ry + c.rh {
         let iy = py - c.y;
+        let row_in = iy >= 0 && (iy as u32) < src.h;
+        let row = (py as u32 * t.width) as usize;
         for px in c.rx..c.rx + c.rw {
             let ix = px - c.x;
-            let inside = ix >= 0 && iy >= 0 && (ix as u32) < src.w && (iy as u32) < src.h;
+            let inside = row_in && ix >= 0 && (ix as u32) < src.w;
             let s = if inside {
                 src.pixels[(iy as u32 * src.w + ix as u32) as usize]
             } else {
                 0
             };
             let a = inside && (!c.masked || s != 0);
-            let o = (py as u32 * t.width + px as u32) as usize;
+            let tm = if a { &t1 } else { &t0 };
+            let o = row + px as usize;
             let d = t.pixels[o];
-            let mut out = d;
-            for p in 0..8 {
-                if pm & (1 << p) == 0 {
-                    continue;
-                }
-                let idx = ((a as u8) << 2) | (((s >> p) & 1) << 1) | ((d >> p) & 1);
-                let bit = (c.lf >> idx) & 1;
-                out = (out & !(1 << p)) | (bit << p);
-            }
-            t.pixels[o] = out;
+            let res = (tm[3] & s & d) | (tm[2] & s & !d) | (tm[1] & !s & d) | (tm[0] & !s & !d);
+            t.pixels[o] = (d & !pm) | (res & pm);
         }
     }
 }
@@ -315,6 +322,63 @@ pub fn collide(a: &Src, ax: i32, ay: i32, b: &Src, bx: i32, by: i32) -> bool {
     false
 }
 
+/// Collision view of a bank image shown with flip `flags`: reads the mask
+/// straight from the planar data, so a collision test costs nothing when
+/// the rectangles do not overlap (same result as [`collide`] on
+/// `Src::new(img, flags)`).
+pub struct ColImg<'a> {
+    img: &'a Image,
+    flags: u16,
+    pub w: u32,
+    pub h: u32,
+}
+
+impl<'a> ColImg<'a> {
+    pub fn new(img: &'a Image, flags: u16) -> Self {
+        ColImg {
+            img,
+            flags,
+            w: img.width(),
+            h: img.height as u32,
+        }
+    }
+
+    /// Pixel (x, y) of the flipped image is not colour 0.
+    #[inline]
+    fn mask_at(&self, x: i32, y: i32) -> bool {
+        if x < 0 || y < 0 || x as u32 >= self.w || y as u32 >= self.h {
+            return false;
+        }
+        let (mut x, mut y) = (x as u32, y as u32);
+        if self.flags & images::FLIP_X != 0 {
+            x = self.w - 1 - x;
+        }
+        if self.flags & images::FLIP_Y != 0 {
+            y = self.h - 1 - y;
+        }
+        self.img.pixel(x, y) != 0
+    }
+}
+
+/// [`collide`] for [`ColImg`]s.
+pub fn collide_img(a: &ColImg, ax: i32, ay: i32, b: &ColImg, bx: i32, by: i32) -> bool {
+    let x0 = ax.max(bx);
+    let x1 = (ax + a.w as i32).min(bx + b.w as i32);
+    let y0 = ay.max(by);
+    let y1 = (ay + a.h as i32).min(by + b.h as i32);
+    if x0 >= x1 || y0 >= y1 {
+        return false;
+    }
+    for y in y0..y1 {
+        for x in x0..x1 {
+            if a.mask_at(x - ax, y - ay) && b.mask_at(x - bx, y - by) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 /// Image number without flags.
 pub fn index(image: u16) -> u16 {
     image & !FLIP_MASK
@@ -328,6 +392,101 @@ mod tests {
     fn img() -> Image {
         // 4x2 image: 1 2 0 3 / 0 1 1 0, two planes
         grab(&[1, 2, 0, 3, 0, 1, 1, 0], 4, 0, 0, 4, 2, 2)
+    }
+
+    /// The plane by plane minterm (reference for `draw`).
+    fn draw_reference(t: &mut Target, src: &Src, c: &Calc, plane_mask: u16) {
+        let pm = (plane_mask as u32 & ((1u32 << c.nplanes) - 1)) as u8;
+        if pm == 0 {
+            return;
+        }
+        for py in c.ry..c.ry + c.rh {
+            let iy = py - c.y;
+            for px in c.rx..c.rx + c.rw {
+                let ix = px - c.x;
+                let inside = ix >= 0 && iy >= 0 && (ix as u32) < src.w && (iy as u32) < src.h;
+                let s = if inside {
+                    src.pixels[(iy as u32 * src.w + ix as u32) as usize]
+                } else {
+                    0
+                };
+                let a = inside && (!c.masked || s != 0);
+                let o = (py as u32 * t.width + px as u32) as usize;
+                let d = t.pixels[o];
+                let mut out = d;
+                for p in 0..8 {
+                    if pm & (1 << p) == 0 {
+                        continue;
+                    }
+                    let idx = ((a as u8) << 2) | (((s >> p) & 1) << 1) | ((d >> p) & 1);
+                    let bit = (c.lf >> idx) & 1;
+                    out = (out & !(1 << p)) | (bit << p);
+                }
+                t.pixels[o] = out;
+            }
+        }
+    }
+
+    #[test]
+    fn draw_matches_plane_by_plane_reference() {
+        let mut seed = 99u32;
+        let mut rnd = || {
+            seed = seed.wrapping_mul(1103515245).wrapping_add(12345);
+            (seed >> 16) as u8
+        };
+        let bm: Vec<u8> = (0..20 * 9).map(|_| rnd() & 31).collect();
+        let im = grab(&bm, 20, 0, 0, 20, 9, 5);
+        for lf in 0..=255u8 {
+            for (x, y, masked, pmask) in [
+                (3, 2, true, 0xFFFF),
+                (-5, -3, false, 0x15),
+                (17, 30, true, 0x3),
+            ] {
+                let c = Calc {
+                    x,
+                    y,
+                    image: 1,
+                    flags: 0,
+                    rx: x.div_euclid(16) * 16,
+                    ry: y.max(0),
+                    rw: 32,
+                    rh: 9,
+                    nplanes: 5,
+                    lf,
+                    masked,
+                };
+                let c = Calc {
+                    rx: c.rx.max(0),
+                    ..c
+                };
+                let px: Vec<u8> = (0..48 * 40).map(|_| rnd()).collect();
+                let (mut a, mut b) = (px.clone(), px);
+                let src = Src::new(&im, 0);
+                draw(
+                    &mut Target {
+                        pixels: &mut a,
+                        width: 48,
+                        height: 40,
+                        planes: 5,
+                    },
+                    &src,
+                    &c,
+                    pmask,
+                );
+                draw_reference(
+                    &mut Target {
+                        pixels: &mut b,
+                        width: 48,
+                        height: 40,
+                        planes: 5,
+                    },
+                    &src,
+                    &c,
+                    pmask,
+                );
+                assert_eq!(a, b, "minterm {lf:02x}");
+            }
+        }
     }
 
     #[test]
@@ -382,5 +541,20 @@ mod tests {
         assert!(collide(&s, 0, 0, &s, 1, 0));
         assert!(!collide(&s, 0, 0, &s, 3, 1));
         assert!(!collide(&s, 0, 0, &s, 20, 0));
+        // The planar view gives the same answers, flipped or not.
+        for fa in [0, images::FLIP_X, images::FLIP_Y, FLIP_MASK] {
+            for fb in [0, images::FLIP_X, images::FLIP_Y, FLIP_MASK] {
+                let (sa, sb) = (Src::new(&im, fa), Src::new(&im, fb));
+                let (ca, cb) = (ColImg::new(&im, fa), ColImg::new(&im, fb));
+                for dx in -20..20 {
+                    for dy in -4..4 {
+                        assert_eq!(
+                            collide(&sa, 0, 0, &sb, dx, dy),
+                            collide_img(&ca, 0, 0, &cb, dx, dy)
+                        );
+                    }
+                }
+            }
+        }
     }
 }

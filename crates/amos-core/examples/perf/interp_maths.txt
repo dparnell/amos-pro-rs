@@ -1,0 +1,7 @@
+Do
+  For I=1 To 2000
+    A=A+I*3-(I/7) : B=B Xor I : C#=C#+I*0.5
+    If A>100000 Then A=0
+  Next I
+  X#=Sqr(C#)+Sin(1.5)
+Loop

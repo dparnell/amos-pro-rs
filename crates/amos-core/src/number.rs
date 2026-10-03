@@ -8,10 +8,56 @@ pub fn ffp_to_f64(v: u32) -> f64 {
     if v & 0xFFFF_FF00 == 0 {
         return 0.0;
     }
-    let mant = (v >> 8) as f64 / (1u64 << 24) as f64;
+    // Exact (24 bit mantissa, normal exponent): same value as
+    // `mant / 2^24 * 2f64.powi(exp)`.
     let exp = (v & 0x7F) as i32 - 64;
-    let val = mant * 2f64.powi(exp);
+    let val = (v >> 8) as f64 * pow2(exp - 24);
     if v & 0x80 != 0 { -val } else { val }
+}
+
+/// 2^e for -1022 <= e <= 1023 (normal doubles), built from its bits.
+#[inline]
+pub fn pow2(e: i32) -> f64 {
+    debug_assert!((-1022..=1023).contains(&e));
+    f64::from_bits(((e + 1023) as u64) << 52)
+}
+
+#[cfg(test)]
+mod pow2_tests {
+    #[test]
+    fn ffp_to_f64_matches_powi() {
+        let reference = |v: u32| -> f64 {
+            if v & 0xFFFF_FF00 == 0 {
+                return 0.0;
+            }
+            let mant = (v >> 8) as f64 / (1u64 << 24) as f64;
+            let val = mant * 2f64.powi((v & 0x7F) as i32 - 64);
+            if v & 0x80 != 0 { -val } else { val }
+        };
+        let mut x = 1u32;
+        for _ in 0..200_000 {
+            x = x.wrapping_mul(1664525).wrapping_add(1013904223);
+            for v in [x, x & 0xFFFF_FF7F, x | 0xFF, x & 0xFFFF_FF00, x & 0xFF] {
+                assert_eq!(
+                    super::ffp_to_f64(v).to_bits(),
+                    reference(v).to_bits(),
+                    "{v:08x}"
+                );
+                let f = crate::ffp::Ffp(v);
+                let r = if v & 0x7F == 0 && v & 0x80 == 0 {
+                    0.0
+                } else {
+                    let val =
+                        (v >> 8) as f64 / (1u64 << 24) as f64 * 2f64.powi((v & 0x7F) as i32 - 64);
+                    if v & 0x80 != 0 { -val } else { val }
+                };
+                assert_eq!(f.to_f64().to_bits(), r.to_bits(), "{v:08x}");
+            }
+        }
+        for e in -1022..=1023 {
+            assert_eq!(super::pow2(e), 2f64.powi(e));
+        }
+    }
 }
 
 /// Converts an `f64` to Motorola Fast Floating Point (rounding to 24 bits).

@@ -1,0 +1,12 @@
+Screen Open 0,320,256,32,Lowres
+Screen Open 1,320,256,32,Lowres
+Screen To Back 1
+For I=0 To 255 : Ink I mod 32 : Draw 0,I To 319,I : Next I
+Def Scroll 1,0,0 To 320,256,2,1
+Do
+  Screen Copy 1,0,0,320,256 To 0,0,0
+  Screen Copy 1,10,10,200,200 To 0,50,30
+  Scroll 1
+  Screen Offset 1,T mod 50,0 : Inc T
+  Wait Vbl
+Loop

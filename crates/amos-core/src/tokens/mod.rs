@@ -129,6 +129,7 @@ pub const TK_ML: u16 = 0x258C;
 pub const EXTENSION_SLOTS: usize = 7;
 
 /// Returns the definition of a main-library token or an operator.
+#[inline]
 pub fn lookup(token: u16) -> Option<&'static TokenDef> {
     if token & 0x8000 != 0 {
         return OPERATORS.binary_search_by_key(&token, |d| d.token).ok().map(|i| &OPERATORS[i]);
@@ -137,9 +138,32 @@ pub fn lookup(token: u16) -> Option<&'static TokenDef> {
 }
 
 /// Returns the definition of a token in extension `slot` (0 = main library).
+#[inline]
 pub fn lookup_ext(slot: usize, offset: u16) -> Option<&'static TokenDef> {
     let table = EXTENSIONS.get(slot)?;
-    table.binary_search_by_key(&offset, |d| d.token).ok().map(|i| &table[i])
+    // Direct index (the interpreter looks keywords up at every call).
+    let i = *token_index()[slot].get(offset as usize)?;
+    (i != u16::MAX).then(|| &table[i as usize])
+}
+
+/// For each extension slot: token value -> index in its table (`u16::MAX`
+/// for none). Same answers as a binary search of the sorted tables.
+#[inline]
+fn token_index() -> &'static [Vec<u16>; EXTENSION_SLOTS] {
+    static INDEX: OnceLock<[Vec<u16>; EXTENSION_SLOTS]> = OnceLock::new();
+    INDEX.get_or_init(|| {
+        std::array::from_fn(|slot| {
+            let table = EXTENSIONS[slot];
+            let max = table.iter().map(|d| d.token as usize).max().unwrap_or(0);
+            let mut v = vec![u16::MAX; max + 1];
+            for (t, e) in v.iter_mut().enumerate() {
+                if let Ok(i) = table.binary_search_by_key(&(t as u16), |d| d.token) {
+                    *e = i as u16;
+                }
+            }
+            v
+        })
+    })
 }
 
 /// All variants of the overloaded keyword `token` (in table order); a
@@ -178,6 +202,7 @@ pub struct Keyword {
 }
 
 impl Keyword {
+    #[inline]
     pub fn def(&self) -> Option<&'static TokenDef> {
         if self.slot == 0 { lookup(self.token) } else { lookup_ext(self.slot as usize, self.token) }
     }

@@ -103,6 +103,87 @@ pub fn rgb12_to_rgba(c: u16) -> [u8; 4] {
 pub fn render_rgba(frame: &Frame) -> Vec<u8> {
     let (w, h) = (DISPLAY_WIDTH as usize, DISPLAY_HEIGHT as usize);
     let mut out = vec![0u8; w * h * 4];
+    out.as_chunks_mut::<4>().0.fill(frame.border);
+    for layer in &frame.layers {
+        render_layer(layer, &mut out, w, h);
+    }
+    out
+}
+
+/// Draws one layer: per pixel, the band outside the window shows colour 0
+/// of the line's palette row (unless the layer is transparent), the window
+/// the bitmap pixel (transparent index / alpha 0 / outside the bitmap: not
+/// drawn), as [`render_rgba_reference`] does, a row at a time.
+fn render_layer(layer: &Layer, out: &mut [u8], w: usize, h: usize) {
+    let b = layer.band;
+    let win = layer.window;
+    let (scale_x, scale_y) = (layer.scale_x.max(1) as i32, layer.scale_y.max(1) as i32);
+    let x0 = b.x.max(0);
+    let x1 = (b.x + b.w as i32).min(w as i32);
+    if x0 >= x1 {
+        return;
+    }
+    // Window columns within the band's visible columns.
+    let (wx0, wx1) = (win.x.max(x0), (win.x + win.w as i32).min(x1));
+    for y in b.y.max(0)..(b.y + b.h as i32).min(h as i32) {
+        let row = ((y - b.y) / 2).max(0) as u32;
+        let prow = if layer.palette_rows > 1 { row.min(layer.palette_rows - 1) } else { 0 } as usize;
+        let line = &mut out[y as usize * w * 4..(y as usize + 1) * w * 4];
+        // Band outside the window.
+        if layer.transparent.is_none()
+            && let Some(&c) = layer.palette.get(prow * 256)
+        {
+            let in_win_rows = y >= win.y && y < win.y + win.h as i32;
+            let (a, z) = if in_win_rows && wx0 < wx1 { (wx0, wx1) } else { (x1, x1) };
+            for x in (x0..a).chain(z.max(x0)..x1) {
+                line[x as usize * 4..x as usize * 4 + 4].copy_from_slice(&c);
+            }
+        }
+        if !(y >= win.y && y < win.y + win.h as i32) || wx0 >= wx1 {
+            continue;
+        }
+        let sy = (y - win.y) / scale_y + layer.src_y;
+        if sy < 0 || sy >= layer.height as i32 {
+            continue;
+        }
+        let src_row = sy as usize * layer.width as usize;
+        let pal = &layer.palette[(prow * 256).min(layer.palette.len())..];
+        for x in wx0..wx1 {
+            let sx = (x - win.x) / scale_x + layer.src_x;
+            if sx < 0 || sx >= layer.width as i32 {
+                continue;
+            }
+            let i = src_row + sx as usize;
+            let colour = match layer.format {
+                LayerFormat::Indexed => {
+                    let idx = layer.pixels[i];
+                    if Some(idx) == layer.transparent {
+                        continue;
+                    }
+                    match pal.get(idx as usize) {
+                        Some(&c) => c,
+                        None => continue,
+                    }
+                }
+                LayerFormat::Rgba => {
+                    let c: [u8; 4] = layer.pixels[i * 4..i * 4 + 4].try_into().unwrap();
+                    if c[3] == 0 {
+                        continue;
+                    }
+                    c
+                }
+            };
+            line[x as usize * 4..x as usize * 4 + 4].copy_from_slice(&colour);
+        }
+    }
+}
+
+/// The straightforward per pixel compositor (reference for the tests of
+/// [`render_rgba`]).
+#[cfg(test)]
+pub fn render_rgba_reference(frame: &Frame) -> Vec<u8> {
+    let (w, h) = (DISPLAY_WIDTH as usize, DISPLAY_HEIGHT as usize);
+    let mut out = vec![0u8; w * h * 4];
     for px in out.chunks_exact_mut(4) {
         px.copy_from_slice(&frame.border);
     }
@@ -154,4 +235,68 @@ pub fn render_rgba(frame: &Frame) -> Vec<u8> {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod render_tests {
+    use super::*;
+
+    #[test]
+    fn render_rgba_matches_the_reference() {
+        let mut seed = 7u32;
+        let mut rnd = |n: u32| {
+            seed = seed.wrapping_mul(1103515245).wrapping_add(12345);
+            (seed >> 8) % n.max(1)
+        };
+        for _ in 0..300 {
+            let n_layers = 1 + rnd(4) as usize;
+            let mut pixels = Vec::new();
+            let mut palettes = Vec::new();
+            let mut specs = Vec::new();
+            for _ in 0..n_layers {
+                let format = if rnd(3) == 0 { LayerFormat::Rgba } else { LayerFormat::Indexed };
+                let (width, height) = (1 + rnd(400), 1 + rnd(300));
+                let bpp = if format == LayerFormat::Rgba { 4 } else { 1 };
+                let px: Vec<u8> = (0..width * height * bpp).map(|_| rnd(256) as u8).collect();
+                let palette_rows = 1 + rnd(3) * rnd(200);
+                // Sometimes a short palette (missing colours are not drawn).
+                let len = if rnd(5) == 0 { rnd(palette_rows * 256) } else { palette_rows * 256 };
+                let pal: Vec<[u8; 4]> = (0..len).map(|i| [i as u8, (i >> 8) as u8, rnd(256) as u8, 255]).collect();
+                let rect = |r: &mut dyn FnMut(u32) -> u32| Rect {
+                    x: r(900) as i32 - 100,
+                    y: r(700) as i32 - 60,
+                    w: r(900),
+                    h: r(700),
+                };
+                let band = rect(&mut rnd);
+                let window = rect(&mut rnd);
+                specs.push((format, width, height, palette_rows, band, window, rnd(40) as i32 - 10, rnd(40) as i32 - 10, 1 + rnd(2), 1 + rnd(2), if rnd(2) == 0 { None } else { Some(rnd(4) as u8) }));
+                pixels.push(px);
+                palettes.push(pal);
+            }
+            let layers = specs
+                .iter()
+                .enumerate()
+                .map(|(k, s)| Layer {
+                    id: k as u32,
+                    pixels_version: 0,
+                    format: s.0,
+                    width: s.1,
+                    height: s.2,
+                    pixels: &pixels[k],
+                    palette: &palettes[k],
+                    palette_rows: s.3,
+                    band: s.4,
+                    window: s.5,
+                    src_x: s.6,
+                    src_y: s.7,
+                    scale_x: s.8,
+                    scale_y: s.9,
+                    transparent: s.10,
+                })
+                .collect();
+            let frame = Frame { border: [1, 2, 3, 255], layers };
+            assert!(render_rgba(&frame) == render_rgba_reference(&frame));
+        }
+    }
 }

@@ -488,14 +488,20 @@ pub fn blit(src: &[u8], buf: &mut [u8], bw: i32, r: &CopyRect, minterm: u8, plan
     let pm = ((1u32 << planes.min(8)) - 1) as u8;
     let m = (minterm & 0xF0) | (minterm >> 4); // A is always set: only bits 4-7 count
     let fast = minterm & 0xF0 == 0xC0;
+    let w = r.w as usize;
     for y in 0..r.h {
         let o = ((r.dy + y) * bw + r.dx) as usize;
         let s = (y * r.w) as usize;
-        for x in 0..r.w as usize {
-            let c = buf[o + x];
-            let b = src[s + x];
-            let v = if fast { b } else { minterm8(m, 0xFF, b, c) };
-            buf[o + x] = (c & !pm) | (v & pm);
+        // Whole rows (no per pixel bounds checks: the copy vectorises).
+        let (dst, row) = (&mut buf[o..o + w], &src[s..s + w]);
+        if fast {
+            for (c, &b) in dst.iter_mut().zip(row) {
+                *c = (*c & !pm) | (b & pm);
+            }
+        } else {
+            for (c, &b) in dst.iter_mut().zip(row) {
+                *c = (*c & !pm) | (minterm8(m, 0xFF, b, *c) & pm);
+            }
         }
     }
 }

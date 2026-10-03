@@ -1076,14 +1076,14 @@ impl Hardware {
     // ------------------------------------------------------------------
 
     /// Image of a bob/sprite usable for collisions (needs a mask).
-    fn col_src(&self, image: u16, flags: u16) -> Option<(Src, i32, i32)> {
+    fn col_src(&self, image: u16, flags: u16) -> Option<(bobs::ColImg<'_>, i32, i32)> {
         let i = image & 0x3FFF;
         let img = self.sprite_image(i)?;
         if self.sprites.mask(false, i) != MaskState::Made {
             return None;
         }
         let (hx, hy) = images::flipped_hot(img, flags);
-        Some((Src::new(img, flags), hx, hy))
+        Some((bobs::ColImg::new(img, flags), hx, hy))
     }
 
     /// Screen -> hardware coordinates of a bob (`CXyS`).
@@ -1127,7 +1127,7 @@ impl Hardware {
                     continue;
                 }
                 if let Some((s2, h2x, h2y)) = self.col_src(a.image as u16, 0)
-                    && bobs::collide(&src, ax, ay, &s2, a.x as i32 - h2x, a.y as i32 - h2y)
+                    && bobs::collide_img(&src, ax, ay, &s2, a.x as i32 - h2x, a.y as i32 - h2y)
                 {
                     hits.push(sn as u16);
                 }
@@ -1145,7 +1145,7 @@ impl Hardware {
                     continue;
                 }
                 if let Some((s2, h2x, h2y)) = self.col_src(other.image, other.image & FLIP_MASK)
-                    && bobs::collide(
+                    && bobs::collide_img(
                         &src,
                         ax,
                         ay,
@@ -1190,7 +1190,7 @@ impl Hardware {
                 }
                 let (bx, by) = self.bob_hard(b.screen, b.x as i32, b.y as i32);
                 if let Some((s2, h2x, h2y)) = self.col_src(b.image, b.image & FLIP_MASK)
-                    && bobs::collide(&src, ax, ay, &s2, bx - h2x, by - h2y)
+                    && bobs::collide_img(&src, ax, ay, &s2, bx - h2x, by - h2y)
                 {
                     hits.push(b.number);
                 }
@@ -1208,7 +1208,7 @@ impl Hardware {
                     continue;
                 }
                 if let Some((s2, h2x, h2y)) = self.col_src(o.image as u16, 0)
-                    && bobs::collide(&src, ax, ay, &s2, o.x as i32 - h2x, o.y as i32 - h2y)
+                    && bobs::collide_img(&src, ax, ay, &s2, o.x as i32 - h2x, o.y as i32 - h2y)
                 {
                     hits.push(sn as u16);
                 }

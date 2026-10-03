@@ -391,9 +391,34 @@ impl GrState {
     /// outline pen draws the border when Set Paint is on.
     pub fn bar(&mut self, c: &mut Canvas, x1: i32, y1: i32, x2: i32, y2: i32) {
         let (cx0, cy0, cx1, cy1) = clip_rect(self, c);
-        for y in y1.max(cy0)..=y2.min(cy1 - 1) {
-            for x in x1.max(cx0)..=x2.min(cx1 - 1) {
-                self.fill_pixel(c, x, y, y);
+        let (xa, xb) = (x1.max(cx0), x2.min(cx1 - 1));
+        if self.pattern.is_none() && xa <= xb {
+            // Solid fill: what `fill_pixel` does to every pixel (all inside
+            // the clip rectangle), a row at a time.
+            let on = !self.inverse();
+            let complement = self.writing & COMPLEMENT != 0;
+            let value = if on {
+                Some(self.ink & c.mask)
+            } else if self.writing & JAM2 != 0 {
+                Some(self.paper & c.mask)
+            } else {
+                None
+            };
+            for y in y1.max(cy0)..=y2.min(cy1 - 1) {
+                let row = &mut c.buf[(y * c.w + xa) as usize..=(y * c.w + xb) as usize];
+                if complement {
+                    if on {
+                        row.iter_mut().for_each(|p| *p ^= c.mask);
+                    }
+                } else if let Some(v) = value {
+                    row.fill(v);
+                }
+            }
+        } else {
+            for y in y1.max(cy0)..=y2.min(cy1 - 1) {
+                for x in xa..=xb {
+                    self.fill_pixel(c, x, y, y);
+                }
             }
         }
         if self.paint_outline {

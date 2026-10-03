@@ -110,16 +110,15 @@ impl Interp {
             tk::NEXT => {
                 self.test_point(hw)?;
                 self.pc = p + 2;
-                let Some(Ctl::For { var, step, limit, body, .. }) = self.ctl.last().cloned() else {
+                let Some(&Ctl::For { var, step, limit, body, .. }) = self.ctl.last() else {
                     return err(errors::SYNTAX_ERROR);
                 };
-                let cur = match self.read_loc(&var, 0) {
-                    Value::Int(i) => i,
-                    Value::Float(f) => super::value::float_to_int(f),
-                    Value::Str(_) => 0,
+                let (cur, ty) = match self.read_loc(&var, 0) {
+                    Value::Int(i) => (i, 0),
+                    Value::Float(f) => (super::value::float_to_int(f), 1),
+                    Value::Str(_) => (0, 0),
                 };
                 let v = cur.wrapping_add(step);
-                let ty = if matches!(self.read_loc(&var, 0), Value::Float(_)) { 1 } else { 0 };
                 self.write_loc(&var, ty, Value::Int(v))?;
                 let done = if step >= 0 { v > limit } else { v < limit };
                 if done {
@@ -135,7 +134,7 @@ impl Interp {
                 self.test_point(hw)?;
                 self.pc = p + 2;
                 let c = self.eval_cond(hw)?;
-                let Some(Ctl::Repeat { body, .. }) = self.ctl.last().cloned() else {
+                let Some(&Ctl::Repeat { body, .. }) = self.ctl.last() else {
                     return err(errors::SYNTAX_ERROR);
                 };
                 if c {
@@ -146,7 +145,7 @@ impl Interp {
             }
             tk::WEND => {
                 self.test_point(hw)?;
-                let Some(Ctl::While { start, .. }) = self.ctl.last().cloned() else {
+                let Some(&Ctl::While { start, .. }) = self.ctl.last() else {
                     return err(errors::SYNTAX_ERROR);
                 };
                 self.pop_ctl();
@@ -154,7 +153,7 @@ impl Interp {
             }
             tk::LOOP => {
                 self.test_point(hw)?;
-                let Some(Ctl::Do { body, .. }) = self.ctl.last().cloned() else {
+                let Some(&Ctl::Do { body, .. }) = self.ctl.last() else {
                     return err(errors::SYNTAX_ERROR);
                 };
                 self.pc = body;

@@ -1,0 +1,5 @@
+Do
+  Play 1,40,0 : Play 2,50,0 : Play 4,45,0 : Play 8,55,0
+  Wait 5
+  Shoot : Wait 10 : Boom : Wait 10 : Bell 40 : Wait 5
+Loop

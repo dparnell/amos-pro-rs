@@ -1,0 +1,9 @@
+Do
+  For I=1 To 30
+    Print "Hello world, line ";I;" of the AMOS text stress test ";
+    Pen I mod 16 : Paper (I+3) mod 16
+  Next I
+  Locate 0,0 : Centre "Centred" : Cls 0
+  For I=1 To 40 : Print At(I mod 38,I mod 25);"*"; : Next I
+  Wait Vbl
+Loop

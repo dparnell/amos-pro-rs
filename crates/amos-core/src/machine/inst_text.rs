@@ -389,7 +389,13 @@ impl Hardware {
     /// Prints text in the current window of the current screen.
     pub(crate) fn text_print(&mut self, it: &mut Interp, text: &[u8]) -> R<()> {
         let _ = it;
-        self.log.push(crate::detok::latin1_to_string(text));
+        if self.log_print {
+            // (ASCII text is already valid UTF-8: same string, built faster.)
+            self.log.push(match text.is_ascii() {
+                true => String::from_utf8(text.to_vec()).unwrap_or_default(),
+                false => crate::detok::latin1_to_string(text),
+            });
+        }
         let s = self.text_screen()?;
         wi(s.print_text(text))
     }

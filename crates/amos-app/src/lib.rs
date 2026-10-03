@@ -51,6 +51,13 @@ struct App {
     audio_failed: bool,
     last_time: Option<Instant>,
     vbl_accumulator: f64,
+    /// The machine's instruction budget per VBL (`adapt_budget` lowers it
+    /// temporarily on slow hosts).
+    max_budget: usize,
+    /// The machine may have changed since the last frame was rendered (a
+    /// VBL ran or input arrived): the frame is built and uploaded again.
+    /// Otherwise the renderer reuses the last picture.
+    frame_dirty: bool,
 }
 
 impl App {
@@ -62,8 +69,16 @@ impl App {
                 (m, e, "AMOS Professional".to_string(), None)
             }
         };
+        let mut machine = machine;
+        // Printed text is copied to the log output only on request
+        // (`RUST_LOG=amos_print=debug`): a program printing in a loop would
+        // otherwise spend most of its time in the console (in a browser,
+        // one `console.info` per Print).
+        machine.hw.log_print = log::log_enabled!(target: "amos_print", log::Level::Debug);
+        let max_budget = machine.instructions_per_frame;
         Self {
             proxy,
+            max_budget,
             machine,
             editor,
             title,
@@ -75,6 +90,7 @@ impl App {
             audio_failed: false,
             last_time: None,
             vbl_accumulator: 0.0,
+            frame_dirty: true,
         }
     }
 
@@ -101,15 +117,37 @@ impl App {
         self.gamepads.poll(&mut self.machine.hw.input);
         while self.vbl_accumulator >= 1.0 {
             self.vbl_accumulator -= 1.0;
+            self.frame_dirty = true;
+            let start = Instant::now();
             match (&mut self.editor, &mut self.compiled) {
                 (Some(ed), _) => ed.vbl(&mut self.machine),
                 (None, Some(cp)) => cp.vbl(&mut self.machine),
                 (None, None) => self.machine.vbl(),
             }
+            self.adapt_budget(start.elapsed().as_secs_f64());
             for line in self.machine.hw.log.drain(..) {
                 log::info!("{line}");
             }
             self.process_build_requests();
+        }
+    }
+
+    /// Keeps a VBL shorter than a frame on hosts too slow for the full
+    /// instruction budget: a program that never waits (a busy loop polling
+    /// the mouse) runs `instructions_per_frame` instructions per VBL, and
+    /// when that takes longer than 1/50 s the display and input lag further
+    /// and further behind. The budget shrinks while VBLs are slow and grows
+    /// back to the machine's default when they are fast again; on a fast
+    /// enough host it never changes.
+    fn adapt_budget(&mut self, seconds: f64) {
+        const SLOW: f64 = 0.012;
+        const FAST: f64 = 0.006;
+        const MIN_BUDGET: usize = 20_000;
+        let budget = &mut self.machine.instructions_per_frame;
+        if seconds > SLOW {
+            *budget = (*budget * 3 / 4).max(MIN_BUDGET.min(self.max_budget));
+        } else if seconds < FAST && *budget < self.max_budget {
+            *budget = (*budget + *budget / 8 + 1000).min(self.max_budget);
         }
     }
 
@@ -124,6 +162,12 @@ impl App {
             }
             self.machine.hw.build_results.push(result);
         }
+    }
+
+    /// Forwards an input event to the machine.
+    fn input(&mut self, event: InputEvent) {
+        self.machine.input(event);
+        self.frame_dirty = true;
     }
 
     fn window_to_display(&self, x: f64, y: f64) -> (f32, f32) {
@@ -174,6 +218,7 @@ impl ApplicationHandler<UserEvent> for App {
         match event {
             UserEvent::RendererReady(Ok(renderer)) => {
                 self.renderer = Some(renderer);
+                self.frame_dirty = true;
                 if let Some(w) = &self.window {
                     let size = w.inner_size();
                     self.renderer.as_mut().unwrap().resize(size.width, size.height);
@@ -208,7 +253,11 @@ impl ApplicationHandler<UserEvent> for App {
                     return;
                 }
                 if let Some(r) = &mut self.renderer {
-                    r.render(&self.machine.frame());
+                    if std::mem::take(&mut self.frame_dirty) {
+                        r.render(Some(&self.machine.frame()));
+                    } else {
+                        r.render(None);
+                    }
                 }
                 if let Some(w) = &self.window {
                     w.request_redraw();
@@ -221,18 +270,18 @@ impl ApplicationHandler<UserEvent> for App {
                 match event.physical_key {
                     PhysicalKey::Code(code) if keymap::amiga_scancode(code).is_some() => {
                         let scancode = keymap::amiga_scancode(code).unwrap();
-                        self.machine.input(InputEvent::Key { scancode, pressed, ch });
+                        self.input(InputEvent::Key { scancode, pressed, ch });
                     }
                     _ => {
                         if let Some(c) = ch {
-                            self.machine.input(InputEvent::Char(c));
+                            self.input(InputEvent::Char(c));
                         }
                     }
                 }
             }
             WindowEvent::CursorMoved { position, .. } => {
                 let (x, y) = self.window_to_display(position.x, position.y);
-                self.machine.input(InputEvent::MouseMove { x, y });
+                self.input(InputEvent::MouseMove { x, y });
             }
             WindowEvent::MouseInput { state, button, .. } => {
                 self.ensure_audio();
@@ -242,14 +291,14 @@ impl ApplicationHandler<UserEvent> for App {
                     winit::event::MouseButton::Middle => MouseButton::Middle,
                     _ => return,
                 };
-                self.machine.input(InputEvent::MouseButton { button, pressed: state == ElementState::Pressed });
+                self.input(InputEvent::MouseButton { button, pressed: state == ElementState::Pressed });
             }
             WindowEvent::MouseWheel { delta, .. } => {
                 let delta = match delta {
                     MouseScrollDelta::LineDelta(_, y) => y,
                     MouseScrollDelta::PixelDelta(p) => (p.y / 20.0) as f32,
                 };
-                self.machine.input(InputEvent::MouseWheel { delta });
+                self.input(InputEvent::MouseWheel { delta });
             }
             _ => {}
         }

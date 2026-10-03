@@ -1,0 +1,15 @@
+Global G
+Do
+  For I=1 To 200 : PADD[I,G] : G=Param mod 1000 : Next I
+  FIB[12]
+  Gosub SUB
+Loop
+SUB:
+  G=G+1
+Return
+Procedure PADD[A,B]
+  C=A+B
+End Proc[C]
+Procedure FIB[N]
+  If N<2 Then R=N Else FIB[N-1] : R1=Param : FIB[N-2] : R=R1+Param
+End Proc[R]

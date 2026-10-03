@@ -21,7 +21,7 @@ pub mod verify;
 use std::rc::Rc;
 
 use crate::errors;
-use crate::program::{Program, read_u16};
+use crate::program::Program;
 use crate::tokens::*;
 use value::{Array, Value, Var};
 use verify::{Compiled, GLOBAL, TestError, Verifier};
@@ -235,6 +235,12 @@ pub struct Interp {
     pub direct_mode: bool,
     /// Length of the program part of `code` (direct lines are appended).
     prog_len: usize,
+    /// Main library tokens that `core_function` does not handle (bit set,
+    /// learnt as they are met): their calls go straight to the host.
+    not_core: Vec<u64>,
+    /// Main library instruction tokens handled by the host (learnt as they
+    /// are met): 1 instruction, 2 reserved variable assignment, 0 unknown.
+    host_inst: Vec<u8>,
 }
 
 impl Default for Interp {
@@ -279,6 +285,8 @@ impl Interp {
             running: false,
             direct_mode: false,
             prog_len: 0,
+            not_core: Vec::new(),
+            host_inst: Vec::new(),
         }
     }
 
@@ -325,7 +333,8 @@ impl Interp {
 
     #[inline]
     pub fn rd(&self, p: usize) -> u16 {
-        read_u16(&self.code, p)
+        // (One bounds check instead of two.)
+        u16::from_be_bytes(self.code[p..p + 2].try_into().unwrap())
     }
 
     #[inline]
@@ -355,6 +364,7 @@ impl Interp {
     }
 
     /// Expects the token `t` at pc.
+    #[inline]
     pub fn expect(&mut self, t: u16) -> R<()> {
         if self.peek() == t {
             self.pc += 2;
@@ -393,6 +403,18 @@ impl Interp {
     /// After a jump: drop the loops of the current routine that do not
     /// contain the new position (`LGoto`).
     pub fn after_jump(&mut self) {
+        // Usual case, decided by the innermost entry alone: a Gosub / Proc
+        // frame (no loop of this routine) or a loop containing pc.
+        match self.ctl.last() {
+            None | Some(Ctl::Gosub { .. } | Ctl::Proc(_)) => return,
+            Some(
+                Ctl::For { body, exit, .. }
+                | Ctl::Repeat { body, exit }
+                | Ctl::Do { body, exit }
+                | Ctl::While { body, exit, .. },
+            ) if *body <= self.pc && self.pc <= *exit => return,
+            _ => {}
+        }
         let base = self.routine_base();
         while self.ctl.len() > base {
             let pc = self.pc;
@@ -415,6 +437,7 @@ impl Interp {
     // ------------------------------------------------------------------
 
     /// Variables of the current procedure (or globals in the main program).
+    #[inline]
     fn frame_vars(&mut self, frame: usize) -> &mut Vec<Var> {
         let idx = self.frame_stack[frame];
         match &mut self.ctl[idx] {
@@ -423,6 +446,7 @@ impl Interp {
         }
     }
 
+    #[inline]
     pub fn var_slot(&mut self, slot: u16) -> &mut Var {
         if slot & GLOBAL != 0 {
             return &mut self.globals[(slot & !GLOBAL) as usize];
@@ -436,6 +460,7 @@ impl Interp {
         &mut self.frame_vars(depth - 1)[slot as usize]
     }
 
+    #[inline]
     pub fn var_loc_slot(&mut self, loc: &VarLoc) -> &mut Var {
         if loc.slot & GLOBAL != 0 || self.frame_stack.is_empty() {
             return self.var_slot(loc.slot);
@@ -449,6 +474,7 @@ impl Interp {
         self.code[p + 5] & 3
     }
 
+    #[inline]
     pub fn read_loc(&mut self, loc: &VarLoc, ty: u8) -> Value {
         let double = self.double;
         let v = self.var_loc_slot(loc);
@@ -462,6 +488,7 @@ impl Interp {
         }
     }
 
+    #[inline]
     pub fn write_loc(&mut self, loc: &VarLoc, ty: u8, val: Value) -> R<()> {
         let val = self.convert_for(ty, val)?;
         let v = self.var_loc_slot(loc);
@@ -479,6 +506,7 @@ impl Interp {
     }
 
     /// Converts a value for storage in a variable of type `ty`.
+    #[inline(always)]
     pub fn convert_for(&self, ty: u8, val: Value) -> R<Value> {
         Ok(match (ty, val) {
             (0, Value::Float(f)) => Value::Int(value::float_to_int(f)),
@@ -498,9 +526,11 @@ impl Interp {
             return err(errors::SYNTAX_ERROR);
         }
         let slot = self.rd(p + 2);
-        let ty = self.var_type_at(p);
-        let array = self.code[p + 5] & crate::program::var_flags::ARRAY != 0;
-        self.pc = self.skip_token(p);
+        let (len, flags) = (self.code[p + 4], self.code[p + 5]);
+        let ty = flags & 3;
+        let array = flags & crate::program::var_flags::ARRAY != 0;
+        // `token_size` of a TK_VAR.
+        self.pc = p + 6 + len as usize;
         let frame = self.frame_stack.len().saturating_sub(1);
         if array && self.peek() == TK_PAR1 {
             self.pc += 2;

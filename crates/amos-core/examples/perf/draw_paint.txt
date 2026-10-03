@@ -1,0 +1,8 @@
+Screen Open 0,320,256,16,Lowres
+Do
+  Cls 0 : Ink 1
+  For I=1 To 12 : Circle 160,128,I*10 : Next I
+  For I=1 To 12 : Ink I+2 : Paint 160+I*10-5,128 : Next I
+  Polygon 10,10 To 100,30 To 50,120 To 10,10
+  Wait Vbl
+Loop

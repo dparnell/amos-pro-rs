@@ -71,6 +71,10 @@ pub struct Hardware {
     pub timer: i32,
     /// Messages for the console / editor (errors, debug).
     pub log: Vec<String>,
+    /// Whether printed text is also copied to `log` (the console output of
+    /// the command line tools and tests; a windowed host that does not show
+    /// it turns it off).
+    pub log_print: bool,
     /// Address and data registers for Call / Execall (`Areg`, `Dreg`).
     pub areg: [i32; 8],
     pub dreg: [i32; 8],
@@ -120,6 +124,7 @@ impl Hardware {
             vbl_count: 0,
             timer: 0,
             log: Vec::new(),
+            log_print: true,
             areg: [0; 8],
             dreg: [0; 8],
             fields: Default::default(),

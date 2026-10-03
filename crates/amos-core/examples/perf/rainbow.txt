@@ -1,0 +1,8 @@
+Set Rainbow 0,0,256,"(1,1,15)","(1,1,15)",""
+Rainbow 0,0,40,256
+Set Rainbow 1,1,128,"(2,1,15)","","(1,1,15)"
+Rainbow 1,0,60,200
+Do
+  Inc T : Rainbow 0,T mod 256,40,256 : Rainbow 1,(T*2) mod 128,60,200
+  Wait Vbl
+Loop

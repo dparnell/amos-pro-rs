@@ -47,6 +47,24 @@ impl Image {
     /// Converts to one byte per pixel.
     pub fn to_chunky(&self) -> Vec<u8> {
         let w = self.width();
+        let row_bytes = self.width_words as usize * 2;
+        let plane_bytes = row_bytes * self.height as usize;
+        if self.planes <= 8 && self.planar.len() >= plane_bytes * self.planes as usize {
+            // Whole planes present: 8 pixels per plane byte.
+            let mut out = vec![0u8; plane_bytes * 8];
+            for p in 0..self.planes as usize {
+                let plane = &self.planar[p * plane_bytes..(p + 1) * plane_bytes];
+                for (o, &b) in out.as_chunks_mut::<8>().0.iter_mut().zip(plane) {
+                    if b == 0 {
+                        continue;
+                    }
+                    for (k, px) in o.iter_mut().enumerate() {
+                        *px |= ((b >> (7 - k)) & 1) << p;
+                    }
+                }
+            }
+            return out;
+        }
         let mut out = Vec::with_capacity((w * self.height as u32) as usize);
         for y in 0..self.height as u32 {
             for x in 0..w {
@@ -237,6 +255,35 @@ pub fn save_bank(bank: &Bank, out: &mut Vec<u8>) {
 pub const BANK_ADDRESS_BASE: u32 = 0x0010_0000;
 const PAGE: u32 = 4096;
 
+/// Hasher of page numbers (Peek / Poke hash a page at every access; the
+/// map is never iterated, so the order does not matter).
+#[derive(Clone, Copy, Default)]
+struct PageHash;
+
+impl std::hash::BuildHasher for PageHash {
+    type Hasher = PageHasher;
+    fn build_hasher(&self) -> PageHasher {
+        PageHasher(0)
+    }
+}
+
+struct PageHasher(u64);
+
+impl std::hash::Hasher for PageHasher {
+    fn finish(&self) -> u64 {
+        // Fibonacci hashing spreads consecutive pages over the table.
+        self.0.wrapping_mul(0x9E37_79B9_7F4A_7C15)
+    }
+    fn write(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.0 = (self.0 << 8) | b as u64;
+        }
+    }
+    fn write_u32(&mut self, n: u32) {
+        self.0 = n as u64;
+    }
+}
+
 /// The banks of the running program, and the virtual memory used by
 /// `Start`, `Peek`, `Poke`, `Copy`...
 ///
@@ -248,7 +295,7 @@ pub struct BankSet {
     pub banks: std::collections::BTreeMap<u16, Bank>,
     addresses: std::collections::BTreeMap<u16, u32>,
     next_address: u32,
-    free_memory: std::collections::HashMap<u32, Box<[u8; PAGE as usize]>>,
+    free_memory: std::collections::HashMap<u32, Box<[u8; PAGE as usize]>, PageHash>,
     /// Incremented whenever a bank is added, removed or renumbered.
     pub generation: u64,
 }
@@ -427,6 +474,25 @@ impl BankSet {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn to_chunky_matches_pixel() {
+        // Pseudo random planar data, complete and truncated.
+        let mut seed = 12345u32;
+        for (ww, h, planes, cut) in [(1u16, 3u16, 2u16, 0usize), (3, 7, 5, 0), (2, 4, 6, 5), (1, 1, 1, 0)] {
+            let len = ww as usize * 2 * h as usize * planes as usize;
+            let planar: Vec<u8> = (0..len - cut)
+                .map(|_| {
+                    seed = seed.wrapping_mul(1103515245).wrapping_add(12345);
+                    (seed >> 16) as u8
+                })
+                .collect();
+            let img = Image { width_words: ww, height: h, planes, hot_x: 0, hot_y: 0, planar };
+            let want: Vec<u8> =
+                (0..h as u32).flat_map(|y| (0..img.width()).map(move |x| (y, x))).map(|(y, x)| img.pixel(x, y)).collect();
+            assert_eq!(img.to_chunky(), want);
+        }
+    }
+
     use super::*;
 
     #[test]

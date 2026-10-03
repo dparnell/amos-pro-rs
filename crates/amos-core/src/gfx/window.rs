@@ -165,6 +165,30 @@ pub struct TextState {
 
 type WR = Result<(), u16>;
 
+/// The 8 bits of a glyph row as a word whose byte k is $FF when bit 7-k
+/// is set (pixel k of the row), in memory order.
+#[inline]
+fn expand_bits(bits: u8) -> u64 {
+    const TABLE: [u64; 256] = {
+        let mut t = [0u64; 256];
+        let mut b = 0;
+        while b < 256 {
+            let mut bytes = [0u8; 8];
+            let mut k = 0;
+            while k < 8 {
+                if b & (0x80 >> k) != 0 {
+                    bytes[k] = 0xFF;
+                }
+                k += 1;
+            }
+            t[b] = u64::from_ne_bytes(bytes);
+            b += 1;
+        }
+        t
+    };
+    TABLE[bits as usize]
+}
+
 impl Screen {
     fn win(&self) -> &Window {
         &self.text.windows[0]
@@ -184,6 +208,7 @@ impl Screen {
 
     /// Writes `value` at (x, y) of the target bitmap, leaving the planes
     /// in `keep` untouched.
+    #[inline]
     fn put(&mut self, x: i32, y: i32, value: u8, keep: u8) {
         if x < 0 || y < 0 || x >= self.width as i32 || y >= self.height as i32 {
             return;
@@ -195,6 +220,7 @@ impl Screen {
         *p = (*p & keep) | (value & !keep & mask);
     }
 
+    #[inline]
     fn get(&self, x: i32, y: i32) -> u8 {
         if x < 0 || y < 0 || x >= self.width as i32 || y >= self.height as i32 {
             return 0;
@@ -203,12 +229,37 @@ impl Screen {
         self.bitmaps[t][(y as u32 * self.width + x as u32) as usize]
     }
 
+    /// Index in the target bitmap of the pixel span (x, y)..(x + n, y) when
+    /// it lies entirely inside the bitmap (the fast paths below write such
+    /// spans directly; `put` / `get` clip pixel by pixel otherwise).
+    #[inline]
+    fn span(&self, x: i32, y: i32, n: i32) -> Option<usize> {
+        if x < 0 || y < 0 || n < 0 || x + n > self.width as i32 || y >= self.height as i32 {
+            return None;
+        }
+        Some(y as usize * self.width as usize + x as usize)
+    }
+
+    /// Index of the bitmap drawn into.
+    #[inline]
+    fn target_index(&self) -> usize {
+        self.text.target.min(self.bitmaps.len() - 1)
+    }
+
     /// Fills a rectangle (X/W in characters) with the window paper, honouring
     /// the plane mask (`ClFin`).
     fn fill_paper(&mut self, xb: i32, y: i32, wc: i32, h: i32) {
         self.version += 1;
         let (paper, keep) = (self.win().paper as u8, self.win().planes_off);
+        let v = paper & !keep & self.colour_mask();
+        let t = self.target_index();
         for yy in y..y + h {
+            if let Some(i) = self.span(xb * 8, yy, wc * 8) {
+                for p in &mut self.bitmaps[t][i..i + (wc * 8) as usize] {
+                    *p = (*p & keep) | v;
+                }
+                continue;
+            }
             for xx in xb * 8..(xb + wc) * 8 {
                 self.put(xx, yy, paper, keep);
             }
@@ -220,12 +271,36 @@ impl Screen {
     fn copy_rows(&mut self, xb: i32, wc: i32, src_y: i32, dst_y: i32, h: i32) {
         self.version += 1;
         let keep = self.win().planes_off;
-        let rows: Vec<i32> = if dst_y < src_y {
-            (0..h).collect()
-        } else {
-            (0..h).rev().collect()
-        };
-        for r in rows {
+        let mask = !keep & self.colour_mask();
+        let t = self.target_index();
+        let n = (wc * 8).max(0) as usize;
+        for k in 0..h.max(0) {
+            let r = if dst_y < src_y { k } else { h - 1 - k };
+            if let (Some(si), Some(di)) = (
+                self.span(xb * 8, src_y + r, wc * 8),
+                self.span(xb * 8, dst_y + r, wc * 8),
+            ) {
+                // Whole rows inside the bitmap: same result as `get` / `put`.
+                let bm = &mut self.bitmaps[t];
+                if si == di {
+                    for p in &mut bm[di..di + n] {
+                        *p = (*p & keep) | (*p & mask);
+                    }
+                } else {
+                    // Different rows: the spans do not overlap.
+                    let (src, dst) = if si < di {
+                        let (a, b) = bm.split_at_mut(di);
+                        (&a[si..si + n], &mut b[..n])
+                    } else {
+                        let (a, b) = bm.split_at_mut(si);
+                        (&b[..n], &mut a[di..di + n])
+                    };
+                    for (d, &s) in dst.iter_mut().zip(src) {
+                        *d = (*d & keep) | (s & mask);
+                    }
+                }
+                continue;
+            }
             for xx in xb * 8..(xb + wc) * 8 {
                 let v = self.get(xx, src_y + r);
                 self.put(xx, dst_y + r, v, keep);
@@ -279,13 +354,21 @@ impl Screen {
         let (x, y) = self.cursor_xy();
         let (shape, col) = (self.win().shape, self.win().cur_col as u8);
         let mut pixels = [0u8; 64];
-        for r in 0..8 {
-            for c in 0..8 {
-                pixels[r * 8 + c] = self.get(x + c as i32, y + r as i32);
-                if shape[r] & (0x80 >> c) != 0 {
-                    self.put(x + c as i32, y + r as i32, col, 0);
-                }
+        if let (Some(_), Some(_)) = (self.span(x, y, 8), self.span(x, y + 7, 8)) {
+            // The cell is inside the bitmap: same as `get` / `put` below.
+            let v = col & self.colour_mask();
+            let (t, w) = (self.target_index(), self.width as usize);
+            let bm = &mut self.bitmaps[t];
+            let vv = u64::from_ne_bytes([v; 8]);
+            for r in 0..8 {
+                let i = (y as usize + r) * w + x as usize;
+                let row: &mut [u8; 8] = (&mut bm[i..i + 8]).try_into().unwrap();
+                pixels[r * 8..r * 8 + 8].copy_from_slice(row);
+                let m = expand_bits(shape[r]);
+                *row = ((u64::from_ne_bytes(*row) & !m) | (vv & m)).to_ne_bytes();
             }
+        } else {
+            self.aff_cur_clipped(x, y, shape, col, &mut pixels);
         }
         self.version += 1;
         self.text.cursor_save = Some(CursorSave {
@@ -294,6 +377,17 @@ impl Screen {
             y,
             pixels,
         });
+    }
+
+    fn aff_cur_clipped(&mut self, x: i32, y: i32, shape: [u8; 8], col: u8, pixels: &mut [u8; 64]) {
+        for r in 0..8 {
+            for c in 0..8 {
+                pixels[r * 8 + c] = self.get(x + c as i32, y + r as i32);
+                if shape[r] & (0x80 >> c) != 0 {
+                    self.put(x + c as i32, y + r as i32, col, 0);
+                }
+            }
+        }
     }
 
     /// `EffCur`: restores the pixels under the cursor.
@@ -305,9 +399,22 @@ impl Screen {
             return;
         };
         let t = std::mem::replace(&mut self.text.target, cs.bitmap);
-        for r in 0..8 {
-            for c in 0..8 {
-                self.put(cs.x + c, cs.y + r, cs.pixels[(r * 8 + c) as usize], 0);
+        if let (Some(_), Some(_)) = (self.span(cs.x, cs.y, 8), self.span(cs.x, cs.y + 7, 8)) {
+            // Inside the bitmap: same as the `put`s below.
+            let mask = self.colour_mask();
+            let (ti, w) = (self.target_index(), self.width as usize);
+            let bm = &mut self.bitmaps[ti];
+            let mm = u64::from_ne_bytes([mask; 8]);
+            for r in 0..8 {
+                let i = (cs.y as usize + r) * w + cs.x as usize;
+                let saved = u64::from_ne_bytes(cs.pixels[r * 8..r * 8 + 8].try_into().unwrap());
+                bm[i..i + 8].copy_from_slice(&(saved & mm).to_ne_bytes());
+            }
+        } else {
+            for r in 0..8 {
+                for c in 0..8 {
+                    self.put(cs.x + c, cs.y + r, cs.pixels[(r * 8 + c) as usize], 0);
+                }
             }
         }
         self.text.target = t;
@@ -980,6 +1087,42 @@ impl Screen {
     // Character output
     // ------------------------------------------------------------------
 
+    /// Prints the plain characters (>= 32) at the start of `text` that stay
+    /// on the current line, as `cout` would, with the per character work
+    /// done once. Returns how many were printed (0: use `cout`).
+    fn cout_run(&mut self, text: &[u8]) -> usize {
+        let w = self.win();
+        if w.esc != 0 || w.flags != 0 || w.wx <= 1 {
+            return 0;
+        }
+        let (x0, y) = self.cursor_xy();
+        let (pen, paper, keep) = (w.pen as u8, w.paper as u8, w.planes_off);
+        // Characters that fit before the last column (which wraps: `cout`).
+        let room = (w.wx - 1) as usize;
+        let n = text.iter().take(room).take_while(|&&c| c >= 32).count();
+        if n == 0 || self.span(x0, y, 8 * n as i32).is_none() || self.span(x0, y + 7, 8).is_none() {
+            return 0;
+        }
+        let mask = !keep & self.colour_mask();
+        let rep = |b: u8| u64::from_ne_bytes([b; 8]);
+        let (fg, bg, kp) = (rep(pen & mask), rep(paper & mask), rep(keep));
+        let (t, bw) = (self.target_index(), self.width as usize);
+        let bm = &mut self.bitmaps[t];
+        let font = super::font::font();
+        #[allow(clippy::needless_range_loop)] // (r indexes the glyph rows)
+        for r in 0..8 {
+            let i = (y as usize + r) * bw + x0 as usize;
+            for (px, &c) in bm[i..i + 8 * n].as_chunks_mut::<8>().0.iter_mut().zip(&text[..n]) {
+                let m = expand_bits(font[c as usize][r]);
+                *px = ((u64::from_ne_bytes(*px) & kp) | (fg & m) | (bg & !m)).to_ne_bytes();
+            }
+        }
+        // `draw_glyph` + `COutFin` for each character (no wrap: n < wx).
+        self.version += n as u64;
+        self.win_mut().wx -= n as i32;
+        n
+    }
+
     /// `COut` (+W.s:15573): one character or control code.
     pub(crate) fn cout(&mut self, c: u8) -> WR {
         if self.win().esc != 0 {
@@ -1015,6 +1158,22 @@ impl Screen {
         self.version += 1;
         if flags == 0 {
             // Fast path: replace.
+            if let (Some(_), Some(_)) = (self.span(x, y, 8), self.span(x, y + 7, 8)) {
+                // Eight pixels at a time: byte k of the word is pixel k.
+                let mask = !keep & self.colour_mask();
+                let rep = |b: u8| u64::from_ne_bytes([b; 8]);
+                let (fg, bg, kp) = (rep(pen & mask), rep(paper & mask), rep(keep));
+                let (t, w) = (self.target_index(), self.width as usize);
+                let bm = &mut self.bitmaps[t];
+                for (r, &bits) in g.iter().enumerate() {
+                    let i = (y as usize + r) * w + x as usize;
+                    let px: &mut [u8; 8] = (&mut bm[i..i + 8]).try_into().unwrap();
+                    let m = expand_bits(bits);
+                    let old = u64::from_ne_bytes(*px);
+                    *px = ((old & kp) | (fg & m) | (bg & !m)).to_ne_bytes();
+                }
+                return;
+            }
             for (r, &bits) in g.iter().enumerate() {
                 for i in 0..8 {
                     let v = if bits & (0x80 >> i) != 0 { pen } else { paper };
@@ -1403,11 +1562,18 @@ impl Screen {
         if !self.has_window() {
             return Ok(());
         }
-        let text = text.to_vec();
         self.auto_prt(&mut |s: &mut Screen| {
             s.eff_cur();
             let mut r = Ok(());
-            for &c in &text {
+            let mut i = 0;
+            while i < text.len() {
+                // Runs of plain characters on one line at once.
+                let n = s.cout_run(&text[i..]);
+                if n > 0 {
+                    i += n;
+                    continue;
+                }
+                let c = text[i];
                 if c == 0 {
                     break;
                 }
@@ -1415,6 +1581,7 @@ impl Screen {
                 if r.is_err() {
                     break;
                 }
+                i += 1;
             }
             s.aff_cur();
             r

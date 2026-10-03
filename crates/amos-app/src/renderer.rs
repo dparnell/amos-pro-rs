@@ -40,6 +40,9 @@ struct LayerResources {
     uniforms: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
     used: bool,
+    /// Last uploaded palette and uniforms (uploaded again only on change).
+    palette_data: Vec<[u8; 4]>,
+    uniforms_data: Option<LayerUniforms>,
 }
 
 pub struct Renderer {
@@ -56,6 +59,13 @@ pub struct Renderer {
     dummy_indexed: wgpu::TextureView,
     dummy_rgba: wgpu::TextureView,
     layers: HashMap<u32, LayerResources>,
+    /// Layers of the last frame, back to front, and its border colour.
+    order: Vec<u32>,
+    border: [u8; 4],
+    /// The display texture does not show the last frame yet.
+    needs_composite: bool,
+    /// Palette being prepared (kept to avoid an allocation per layer).
+    scratch_palette: Vec<[u8; 4]>,
 }
 
 impl Renderer {
@@ -191,6 +201,10 @@ impl Renderer {
             dummy_indexed,
             dummy_rgba,
             layers: HashMap::new(),
+            order: Vec::new(),
+            border: [0, 0, 0, 255],
+            needs_composite: true,
+            scratch_palette: Vec::new(),
         })
     }
 
@@ -219,16 +233,23 @@ impl Renderer {
         [((sw - w) / 2.0).floor(), ((sh - h) / 2.0).floor(), w, h]
     }
 
-    pub fn render(&mut self, frame: &Frame) {
-        for res in self.layers.values_mut() {
-            res.used = false;
+    /// Shows a frame. `None` when the machine did not change since the last
+    /// frame given: the display texture is reused (only the window blit is
+    /// done again).
+    pub fn render(&mut self, frame: Option<&Frame>) {
+        if let Some(frame) = frame {
+            for res in self.layers.values_mut() {
+                res.used = false;
+            }
+            self.order.clear();
+            for layer in &frame.layers {
+                self.upload_layer(layer);
+                self.order.push(layer.id);
+            }
+            self.layers.retain(|_, res| res.used);
+            self.border = frame.border;
+            self.needs_composite = true;
         }
-        let mut order = Vec::with_capacity(frame.layers.len());
-        for layer in &frame.layers {
-            self.upload_layer(layer);
-            order.push(layer.id);
-        }
-        self.layers.retain(|_, res| res.used);
 
         let surface_texture = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(t) | wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
@@ -259,8 +280,9 @@ impl Renderer {
         );
 
         let mut encoder = self.device.create_command_encoder(&Default::default());
-        {
-            let border = frame.border.map(|c| c as f64 / 255.0);
+        if self.needs_composite {
+            self.needs_composite = false;
+            let border = self.border.map(|c| c as f64 / 255.0);
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("composite screens"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -275,8 +297,8 @@ impl Renderer {
                 ..Default::default()
             });
             pass.set_pipeline(&self.layer_pipeline);
-            for id in order {
-                pass.set_bind_group(0, &self.layers[&id].bind_group, &[]);
+            for id in &self.order {
+                pass.set_bind_group(0, &self.layers[id].bind_group, &[]);
                 pass.draw(0..4, 0..1);
             }
         }
@@ -326,15 +348,20 @@ impl Renderer {
             res.pixels_version = layer.pixels_version;
         }
 
-        // Palettes are small: always upload them so fades, colour cycling and
-        // rainbows take effect immediately.
-        let mut palette = vec![[0u8; 4]; (PALETTE_WIDTH * palette_rows) as usize];
+        // Palettes change often (fades, colour cycling, rainbows) but not at
+        // every frame: upload them when they differ from the last upload.
+        let palette = &mut self.scratch_palette;
+        palette.clear();
+        palette.resize((PALETTE_WIDTH * palette_rows) as usize, [0u8; 4]);
         for row in 0..palette_rows as usize {
             let src = &layer.palette[(row * PALETTE_WIDTH as usize).min(layer.palette.len())..];
             let n = src.len().min(PALETTE_WIDTH as usize);
             palette[row * PALETTE_WIDTH as usize..][..n].copy_from_slice(&src[..n]);
         }
-        write_texture(&self.queue, &res.palette, bytemuck::cast_slice(&palette), PALETTE_WIDTH, palette_rows, 4);
+        if stale || res.palette_data != *palette {
+            write_texture(&self.queue, &res.palette, bytemuck::cast_slice(palette), PALETTE_WIDTH, palette_rows, 4);
+            std::mem::swap(&mut res.palette_data, palette);
+        }
 
         let rect = |r: amos_core::display::Rect| [r.x as f32, r.y as f32, r.w as f32, r.h as f32];
         let uniforms = LayerUniforms {
@@ -354,7 +381,11 @@ impl Renderer {
                 0.0,
             ],
         };
-        self.queue.write_buffer(&res.uniforms, 0, bytemuck::bytes_of(&uniforms));
+        let changed = res.uniforms_data.is_none_or(|u| bytemuck::bytes_of(&u) != bytemuck::bytes_of(&uniforms));
+        if changed {
+            self.queue.write_buffer(&res.uniforms, 0, bytemuck::bytes_of(&uniforms));
+            res.uniforms_data = Some(uniforms);
+        }
     }
 
     fn create_layer_resources(&self, layer: &Layer, palette_rows: u32) -> LayerResources {
@@ -398,6 +429,8 @@ impl Renderer {
             uniforms,
             bind_group,
             used: true,
+            palette_data: Vec::new(),
+            uniforms_data: None,
         }
     }
 }
