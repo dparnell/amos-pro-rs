@@ -106,7 +106,13 @@ pub struct Screen {
     /// Text windows.
     pub text: TextState,
     /// Zones (`Reserve Zone`): x1, y1, x2, y2 inclusive; all 0 = free.
-    pub zones: Vec<[u16; 4]>,
+    /// Read with `zones()`, changed through `zones_mut()` / `set_zone`.
+    zones: Vec<[u16; 4]>,
+    /// Changes with every change of `zones` (`zone_cache` validity).
+    zones_gen: u32,
+    /// Last `zone_at` lookup: (x, y) packed, `zones_gen`, result. Busy
+    /// loops ask for the zone under an unmoved mouse again and again.
+    zone_cache: std::cell::Cell<(u32, u32, i32)>,
 }
 
 impl Screen {
@@ -157,6 +163,8 @@ impl Screen {
             gr: GrState::default(),
             text: TextState::default(),
             zones: Vec::new(),
+            zones_gen: 0,
+            zone_cache: std::cell::Cell::new((0, u32::MAX, 0)),
         };
         // Default display (EcCree, +W.s:3030-3052).
         let wtx = if hires { width / 2 } else { width } as i32;
@@ -340,7 +348,22 @@ impl Screen {
     /// Zone containing the screen coordinates (`GZone`, +W.s:11110), 0 if
     /// none.
     pub fn zone_at(&self, x: i32, y: i32) -> i32 {
+        if self.zones.is_empty() {
+            return 0;
+        }
         let (x, y) = (x as u16, y as u16);
+        let key = (x as u32) << 16 | y as u32;
+        let (k, generation, r) = self.zone_cache.get();
+        if k == key && generation == self.zones_gen {
+            return r;
+        }
+        let r = self.zone_scan(x, y);
+        self.zone_cache.set((key, self.zones_gen, r));
+        r
+    }
+
+    /// `zone_at` without the cache.
+    fn zone_scan(&self, x: u16, y: u16) -> i32 {
         for (i, z) in self.zones.iter().enumerate() {
             if z[2] == 0 && z[3] == 0 {
                 continue;
@@ -350,6 +373,19 @@ impl Screen {
             }
         }
         0
+    }
+
+    /// The zones (`Reserve Zone`): x1, y1, x2, y2 inclusive; all 0 = free.
+    pub fn zones(&self) -> &[[u16; 4]] {
+        &self.zones
+    }
+
+    /// The zones, to change them.
+    pub fn zones_mut(&mut self) -> &mut Vec<[u16; 4]> {
+        self.zones_gen = self.zones_gen.wrapping_add(1);
+        // (A wrapped generation must not match an old cache entry.)
+        self.zone_cache.set((0, u32::MAX, 0));
+        &mut self.zones
     }
 
     /// Zone under the hardware coordinates (`ZoEc`, +W.s:11083).
@@ -385,7 +421,7 @@ impl Screen {
         if x1 >= x2 || y1 >= y2 {
             return Err(1);
         }
-        self.zones[n - 1] = [x1, y1, x2, y2];
+        self.zones_mut()[n - 1] = [x1, y1, x2, y2];
         Ok(())
     }
 }
@@ -577,7 +613,7 @@ impl Screens {
         let src = self.get(cur).ok_or(E_NOT_OPENED)?;
         let mut c = src.clone();
         c.number = n;
-        c.zones.clear();
+        c.zones_mut().clear();
         c.text = TextState::default();
         c.clone_of = Some(src.clone_of.unwrap_or(cur));
         c.dual_with = None;
@@ -723,6 +759,44 @@ impl Screens {
 
 #[cfg(test)]
 mod tests {
+    /// The cached `zone_at` is the scan of the zones, whatever changed
+    /// them in between.
+    #[test]
+    fn zone_cache_matches_the_scan() {
+        let mut s = Screen::new(0, 320, 200, 16, 0);
+        let mut seed = 7u32;
+        let mut rnd = |n: u32| {
+            seed = seed.wrapping_mul(1103515245).wrapping_add(12345);
+            (seed >> 8) % n
+        };
+        let mut checked = 0;
+        for _ in 0..20000 {
+            match rnd(10) {
+                0 => *s.zones_mut() = vec![[0; 4]; rnd(8) as usize],
+                1 | 2 => {
+                    let (x, y) = (rnd(300) as i32, rnd(180) as i32);
+                    let (w, h) = (1 + rnd(60) as i32, 1 + rnd(40) as i32);
+                    let _ = s.set_zone(1 + rnd(8) as i32, x, y, x + w, y + h);
+                }
+                3 => {
+                    if !s.zones().is_empty() {
+                        let n = rnd(s.zones().len() as u32) as usize;
+                        s.zones_mut()[n] = [0; 4];
+                    }
+                }
+                _ => {
+                    // The same point several times (the cached case).
+                    let (x, y) = (rnd(330) as i32 - 5, rnd(210) as i32 - 5);
+                    for _ in 0..1 + rnd(3) {
+                        assert_eq!(s.zone_at(x, y), s.zone_scan(x as u16, y as u16));
+                        checked += 1;
+                    }
+                }
+            }
+        }
+        assert!(checked > 10000);
+    }
+
     use super::*;
 
     #[test]

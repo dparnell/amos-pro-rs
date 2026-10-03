@@ -235,7 +235,7 @@ impl Hardware {
                     return err(FONCALL);
                 }
                 let s = self.text_screen()?;
-                s.zones = vec![[0; 4]; (n as u32 & 0xFFFF) as usize];
+                *s.zones_mut() = vec![[0; 4]; (n as u32 & 0xFFFF) as usize];
             }
             RESET_ZONE | RESET_ZONE_2 => {
                 let a = it.inst_args(self, kw)?;
@@ -244,16 +244,16 @@ impl Hardware {
                     return err(FONCALL);
                 }
                 let s = self.text_screen()?;
-                if s.zones.is_empty() {
+                if s.zones().is_empty() {
                     return err(73);
                 }
                 let n = n as u16 as usize;
                 if n == 0 {
-                    s.zones.iter_mut().for_each(|z| *z = [0; 4]);
-                } else if n > s.zones.len() {
+                    s.zones_mut().iter_mut().for_each(|z| *z = [0; 4]);
+                } else if n > s.zones().len() {
                     return err(73);
                 } else {
-                    s.zones[n - 1] = [0; 4];
+                    s.zones_mut()[n - 1] = [0; 4];
                 }
             }
             SET_ZONE => {
