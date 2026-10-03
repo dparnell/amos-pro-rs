@@ -28,8 +28,23 @@ struct Ctx {
 
 type Shared = Rc<RefCell<Ctx>>;
 
+thread_local! {
+    /// The program whose `run` is being called: the imports exported by
+    /// this module (`amos_*`, see `def!`) act on it.
+    static CURRENT: std::cell::Cell<*const RefCell<Ctx>> = const { std::cell::Cell::new(std::ptr::null()) };
+}
+
+/// `with` on the program being run (imports exported as wasm functions).
+fn with_current<R>(f: impl FnOnce(&mut Runtime, &mut dyn Env, &mut [u8]) -> R) -> R {
+    let p = CURRENT.with(|c| c.get());
+    assert!(!p.is_null(), "imports are only called during run");
+    // SAFETY: set by `CompiledProgram::run` to its context (kept alive by
+    // the program) for the duration of the call into the module.
+    with(unsafe { &*p }, f)
+}
+
 /// Calls `f` with the runtime, the machine and the module memory.
-fn with<R>(ctx: &Shared, f: impl FnOnce(&mut Runtime, &mut dyn Env, &mut [u8]) -> R) -> R {
+fn with<R>(ctx: &RefCell<Ctx>, f: impl FnOnce(&mut Runtime, &mut dyn Env, &mut [u8]) -> R) -> R {
     let mut c = ctx.borrow_mut();
     let Ctx { rt, env, mem, len } = &mut *c;
     // SAFETY: the block is allocated by `CompiledProgram::new_async` and
@@ -49,26 +64,61 @@ struct Imports {
     ctx: Shared,
     host: Object,
     rt: Object,
+    /// The exports of this (the runtime's) module.
+    app: JsValue,
 }
 
+impl Imports {
+    /// Gives import `module.name` this module's export `export` (a wasm
+    /// function: the compiled module then calls it directly, without going
+    /// through JavaScript); `false` if there is no such export.
+    fn export(&self, module: &str, name: &str, export: &str) -> Result<bool, String> {
+        let f = Reflect::get(&self.app, &JsValue::from_str(export)).map_err(js_err)?;
+        if !f.is_function() {
+            return Ok(false);
+        }
+        let target = if module == "host" { &self.host } else { &self.rt };
+        Reflect::set(target, &JsValue::from_str(name), &f).map_err(js_err)?;
+        Ok(true)
+    }
+}
+
+/// An import: a function of this module exported as `amos_<module>_<name>`
+/// working on the program being run (`CURRENT`), or (if the export is
+/// missing) a JavaScript closure on the program's context.
 macro_rules! def {
     ($l:expr, $m:literal $n:literal |$rt:ident, $env:ident, $mem:ident $(, $a:ident : $t:ty)*| $(-> $r:ty)? $body:block) => {{
-        let c = $l.ctx.clone();
-        let f = Closure::<dyn FnMut($($t),*) $(-> $r)?>::new(move |$($a: $t),*| $(-> $r)? {
+        #[unsafe(export_name = concat!("amos_", $m, "_", $n))]
+        extern "C" fn direct($($a: $t),*) $(-> $r)? {
             #[allow(unused_variables)]
-            with(&c, |$rt, $env, $mem| $body)
-        });
-        let target = if $m == "host" { &$l.host } else { &$l.rt };
-        Reflect::set(target, &JsValue::from_str($n), &f.into_js_value()).map_err(js_err)?;
+            with_current(|$rt, $env, $mem| $body)
+        }
+        let _ = direct as extern "C" fn($($t),*) $(-> $r)?;
+        if !$l.export($m, $n, concat!("amos_", $m, "_", $n))? {
+            let c = $l.ctx.clone();
+            let f = Closure::<dyn FnMut($($t),*) $(-> $r)?>::new(move |$($a: $t),*| $(-> $r)? {
+                #[allow(unused_variables)]
+                with(&c, |$rt, $env, $mem| $body)
+            });
+            let target = if $m == "host" { &$l.host } else { &$l.rt };
+            Reflect::set(target, &JsValue::from_str($n), &f.into_js_value()).map_err(js_err)?;
+        }
     }};
 }
 
 /// An import that needs neither the runtime nor the memory.
 macro_rules! pure {
     ($l:expr, $m:literal $n:literal |$($a:ident : $t:ty),*| -> $r:ty $body:block) => {{
-        let f = Closure::<dyn FnMut($($t),*) -> $r>::new(move |$($a: $t),*| -> $r { $body });
-        let target = if $m == "host" { &$l.host } else { &$l.rt };
-        Reflect::set(target, &JsValue::from_str($n), &f.into_js_value()).map_err(js_err)?;
+        #[unsafe(export_name = concat!("amos_", $m, "_", $n))]
+        extern "C" fn direct($($a: $t),*) -> $r {
+            $body
+        }
+        let _ = direct as extern "C" fn($($t),*) -> $r;
+        if !$l.export($m, $n, concat!("amos_", $m, "_", $n))? {
+            let f = Closure::<dyn FnMut($($t),*) -> $r>::new(move |$($a: $t),*| -> $r { $body });
+            let target = if $m == "host" { &$l.host } else { &$l.rt };
+            Reflect::set(target, &JsValue::from_str($n), &f.into_js_value()).map_err(js_err)?;
+        }
     }};
 }
 
@@ -131,7 +181,7 @@ impl CompiledProgram {
     }
 
     async fn instantiate(wasm: &[u8], ctx: &Shared, base: u32) -> Result<(Function, i32, u32), String> {
-        let mut l = Imports { ctx: ctx.clone(), host: Object::new(), rt: Object::new() };
+        let mut l = Imports { ctx: ctx.clone(), host: Object::new(), rt: Object::new(), app: wasm_bindgen::exports() };
         define_imports(&mut l)?;
         let env = Object::new();
         Reflect::set(&env, &"memory".into(), &wasm_bindgen::memory()).map_err(js_err)?;
@@ -182,7 +232,9 @@ impl CompiledProgram {
         }
         let env_ptr: *mut (dyn Env + 'static) = env;
         self.ctx.borrow_mut().env = Some(env_ptr);
+        let prev = CURRENT.with(|c| c.replace(Rc::as_ptr(&self.ctx)));
         let r = self.run.call1(&JsValue::NULL, &JsValue::from(budget.min(i32::MAX as usize) as i32));
+        CURRENT.with(|c| c.set(prev));
         self.ctx.borrow_mut().env = None;
         match r.map(|v| v.as_f64().map(|v| v as i32)) {
             Ok(Some(RUN_RUNNING)) => RunState::Running,

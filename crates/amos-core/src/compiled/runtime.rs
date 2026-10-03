@@ -237,8 +237,10 @@ pub struct Runtime {
     /// What the control stack mirror was last made from (`mirror`): the
     /// words are only written again when it changes.
     mirror_key: Option<MirrorKey>,
-    /// Parameters of a plain call (`preset`), kept between calls.
+    /// Parameters of a plain call (`plain_preset`), kept between calls.
     preset_buf: Vec<Option<Value>>,
+    /// The two integer parameters of the last plain call (`Scin`).
+    last_xy: Option<(i32, i32)>,
     stopped: Option<StopInfo>,
     /// Procedure frames of returned calls, reused (no allocation per call:
     /// the boxes go back into `Ctl::Proc` as they are).
@@ -281,6 +283,7 @@ impl Runtime {
             margs: Vec::new(),
             mirror_key: None,
             preset_buf: Vec::new(),
+            last_xy: None,
             stopped: None,
             frame_pool: Vec::new(),
             heap: arrays::Heap::new(heap, layout.size),
@@ -1052,7 +1055,7 @@ impl Runtime {
                 let mask = self.sites[i].plain.unwrap_or(0);
                 let kw = self.sites[i].call.as_ref().expect("bridged call").kw;
                 let r = if mask as u32 >> PLAIN_SLOTS_SHIFT != 0 {
-                    self.plain_preset(it, hw, mem, mask as u32, base).map(|()| it.preset_args(&self.preset_buf))
+                    self.plain_preset(it, hw, mem, mask as u32, base)
                 } else {
                     Ok(())
                 };
@@ -1080,7 +1083,7 @@ impl Runtime {
                 let mask = self.sites[i].plain.unwrap_or(0);
                 let kw = self.sites[i].call.as_ref().expect("bridged call").kw;
                 let r = if mask as u32 >> PLAIN_SLOTS_SHIFT != 0 {
-                    self.plain_preset(it, hw, mem, mask as u32, base).map(|()| it.preset_args(&self.preset_buf))
+                    self.plain_preset(it, hw, mem, mask as u32, base)
                 } else {
                     Ok(())
                 };
@@ -1105,31 +1108,68 @@ impl Runtime {
         }
     }
 
-    /// The parameters of a plain call for `Interp::preset_args`, in
-    /// `self.preset_buf`: `mask` has bit k set when slot k of the signature
-    /// is given, and the number of slots from bit `PLAIN_SLOTS_SHIFT`; the
-    /// values are in the bridge slots from `base` (or on the stack).
+    /// Gives the interpreter the parameters of a plain call: `mask` has bit
+    /// k set when slot k of the signature is given, and the number of slots
+    /// from bit `PLAIN_SLOTS_SHIFT`; the values are in the bridge slots from
+    /// `base` (or on the stack). Integers only: `Interp::preset_ints`;
+    /// otherwise the values (`Interp::preset_buf`). Two integers are also
+    /// kept in `last_xy` (`Scin`).
     fn plain_preset(&mut self, it: &mut Interp, hw: &mut dyn Host, mem: &mut [u8], mask: u32, base: i32) -> R<()> {
-        let slots = mask >> PLAIN_SLOTS_SHIFT;
+        let slots = (mask >> PLAIN_SLOTS_SHIFT) as usize;
+        let given = mask & ((1 << PLAIN_SLOTS_SHIFT) - 1);
+        self.last_xy = None;
+        if base >= 0 {
+            // All the given parameters integers?
+            let mut vals = [0i32; PLAIN_SLOTS_SHIFT as usize];
+            let mut a = self.layout.bridge + base as u32 * layout::BRIDGE_SLOT;
+            let mut ints = true;
+            for (s, v) in vals.iter_mut().enumerate().take(slots) {
+                if given & (1 << s) == 0 {
+                    continue;
+                }
+                match ld_i32(mem, a) {
+                    layout::BRIDGE_INT => *v = ld_i32(mem, a + 8),
+                    layout::BRIDGE_DYN_INT => *v = ld_f64(mem, a + 8) as i32,
+                    _ => {
+                        ints = false;
+                        break;
+                    }
+                }
+                a += layout::BRIDGE_SLOT;
+            }
+            if ints {
+                if slots == 2 && given == 3 {
+                    self.last_xy = Some((vals[0], vals[1]));
+                }
+                it.preset_ints(&vals[..slots], given);
+                return Ok(());
+            }
+        }
         self.preset_buf.clear();
         if base < 0 {
-            return self.plain_preset_stack(mask);
-        }
-        let mut a = self.layout.bridge + base as u32 * layout::BRIDGE_SLOT;
-        for s in 0..slots {
-            if mask & (1 << s) == 0 {
-                self.preset_buf.push(None);
-                continue;
+            self.plain_preset_stack(mask);
+        } else {
+            let mut a = self.layout.bridge + base as u32 * layout::BRIDGE_SLOT;
+            for s in 0..slots {
+                if given & (1 << s) == 0 {
+                    self.preset_buf.push(None);
+                    continue;
+                }
+                let v = match ld_i32(mem, a) {
+                    layout::BRIDGE_INT => Value::Int(ld_i32(mem, a + 8)),
+                    layout::BRIDGE_FLOAT => Value::Float(ld_f64(mem, a + 8)),
+                    layout::BRIDGE_DYN_INT => Value::Int(ld_f64(mem, a + 8) as i32),
+                    ty => self.slot_value(it, hw, mem, a, ty)?,
+                };
+                self.preset_buf.push(Some(v));
+                a += layout::BRIDGE_SLOT;
             }
-            let v = match ld_i32(mem, a) {
-                layout::BRIDGE_INT => Value::Int(ld_i32(mem, a + 8)),
-                layout::BRIDGE_FLOAT => Value::Float(ld_f64(mem, a + 8)),
-                layout::BRIDGE_DYN_INT => Value::Int(ld_f64(mem, a + 8) as i32),
-                ty => self.slot_value(it, hw, mem, a, ty)?,
-            };
-            self.preset_buf.push(Some(v));
-            a += layout::BRIDGE_SLOT;
         }
+        if let [Some(Value::Int(x)), Some(Value::Int(y))] = self.preset_buf[..] {
+            self.last_xy = Some((x, y));
+        }
+        // (Moved: no copy.)
+        it.preset_buf().append(&mut self.preset_buf);
         Ok(())
     }
 
@@ -1153,7 +1193,7 @@ impl Runtime {
 
     /// `plain_preset` with the values on the stack.
     #[cold]
-    fn plain_preset_stack(&mut self, mask: u32) -> R<()> {
+    fn plain_preset_stack(&mut self, mask: u32) {
         let slots = mask >> PLAIN_SLOTS_SHIFT;
         let n = (mask & ((1 << PLAIN_SLOTS_SHIFT) - 1)).count_ones() as usize;
         let mut values = self.stack.split_off(self.stack.len().saturating_sub(n)).into_iter();
@@ -1161,7 +1201,6 @@ impl Runtime {
             let v = if mask & (1 << s) == 0 { None } else { Some(values.next().unwrap_or(Value::Int(0))) };
             self.preset_buf.push(v);
         }
-        Ok(())
     }
 
     /// Refreshes the input mirror (`layout::IN_VALID`); returns `IN_VALID`.
@@ -1202,12 +1241,16 @@ impl Runtime {
         let pos = pos as usize;
         it.inst_pos = pos;
         let mask = mask as u32;
-        let r = if mask >> PLAIN_SLOTS_SHIFT != 0 {
-            self.plain_preset(it, hw, mem, mask, base).map(|()| it.preset_args(&self.preset_buf))
-        } else {
-            Ok(())
-        };
+        let r = if mask >> PLAIN_SLOTS_SHIFT != 0 { self.plain_preset(it, hw, mem, mask, base) } else { Ok(()) };
+        // The handlers of the machine leave the state `sync` mirrors alone
+        // except the control stack (On Menu) and Param (Comp Compile):
+        // nothing else to mirror when those did not change.
+        let before = (it.ctl.len(), it.frame_stack.len(), it.param_e);
         let r = r.and_then(|()| hw.instruction(it, Keyword { slot: 0, token: token as u16 }));
+        if r.is_ok() && before == (it.ctl.len(), it.frame_stack.len(), it.param_e) {
+            input_stale(mem);
+            return ST_CONTINUE;
+        }
         let r = r.map(|_| ST_CONTINUE);
         self.result(it, hw, mem, r, pos)
     }
@@ -1227,21 +1270,17 @@ impl Runtime {
         let (it, hw) = env.parts();
         it.inst_pos = pos as usize;
         let mask = mask as u32;
-        let r = if mask >> PLAIN_SLOTS_SHIFT != 0 {
-            self.plain_preset(it, hw, mem, mask, base).map(|()| it.preset_args(&self.preset_buf))
-        } else {
-            Ok(())
-        };
+        let r = if mask >> PLAIN_SLOTS_SHIFT != 0 { self.plain_preset(it, hw, mem, mask, base) } else { Ok(()) };
         let r = r.and_then(|()| it.function_value(hw, Keyword { slot: 0, token: token as u16 }));
         if !structure::input_read_only(token as u16) {
             input_stale(mem);
         } else if token as u16 == crate::tokens::tk::SCIN
             && ld_i32(mem, layout::IN_VALID) == 1
-            && let (Ok(Value::Int(v)), [Some(Value::Int(x)), Some(Value::Int(y))]) = (&r, &self.preset_buf[..])
+            && let (Ok(Value::Int(v)), Some((x, y))) = (&r, self.last_xy)
         {
             // Kept for the module (`layout::IN_SCIN_OK`).
             for (w, v) in
-                [(layout::IN_SCIN_X, *x), (layout::IN_SCIN_Y, *y), (layout::IN_SCIN_V, *v), (layout::IN_SCIN_OK, 1)]
+                [(layout::IN_SCIN_X, x), (layout::IN_SCIN_Y, y), (layout::IN_SCIN_V, *v), (layout::IN_SCIN_OK, 1)]
             {
                 st_i32(mem, w, v);
             }
