@@ -534,7 +534,20 @@ impl Interp {
     /// `Name[args]` procedure call at pc.
     fn call_with_args(&mut self, hw: &mut dyn Host) -> R<()> {
         let index = self.proc_operand()?;
-        let mut args = Vec::new();
+        // (The argument vector is reused from call to call.)
+        let mut args = std::mem::take(&mut self.proc_args);
+        args.clear();
+        let r = self.call_args(hw, &mut args).and_then(|()| {
+            let ret = self.pc;
+            self.enter_proc(index, ret, &mut args)
+        });
+        args.clear();
+        self.proc_args = args;
+        r
+    }
+
+    /// The `[a, b...]` arguments of a procedure call.
+    fn call_args(&mut self, hw: &mut dyn Host, args: &mut Vec<Value>) -> R<()> {
         if self.peek() == TK_BRA1 {
             self.pc += 2;
             loop {
@@ -546,8 +559,7 @@ impl Interp {
                 }
             }
         }
-        let ret = self.pc;
-        self.call_proc(index, ret, args)
+        Ok(())
     }
 
     // ------------------------------------------------------------------

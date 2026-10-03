@@ -110,7 +110,7 @@ impl Ctl {
 }
 
 /// Saved state of a procedure call.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct ProcFrame {
     pub proc_index: usize,
     /// Where to continue after End Proc (`None`: return to the caller of
@@ -247,6 +247,12 @@ pub struct Interp {
     preset: Vec<Option<Value>>,
     /// `preset` holds parameters for the next call.
     preset_set: bool,
+    /// Frames of returned procedures, reused by the next calls (boxed: the
+    /// boxes themselves are reused, `Ctl::Proc` holds one).
+    #[allow(clippy::vec_box)]
+    frame_pool: Vec<Box<ProcFrame>>,
+    /// Vector reused for the arguments of procedure calls.
+    proc_args: Vec<Value>,
 }
 
 impl Default for Interp {
@@ -295,6 +301,8 @@ impl Interp {
             host_inst: Vec::new(),
             preset: Vec::new(),
             preset_set: false,
+            frame_pool: Vec::new(),
+            proc_args: Vec::new(),
         }
     }
 
@@ -783,34 +791,47 @@ impl Interp {
     // Procedures
     // ------------------------------------------------------------------
 
-    pub fn call_proc(&mut self, index: usize, ret: usize, args: Vec<Value>) -> R<()> {
-        let (body, n_locals, params, param_types, mc) = {
-            let p = &self.compiled().procs[index];
-            (p.body, p.locals.len(), p.params.clone(), p.param_types.clone(), p.machine_code)
-        };
-        if mc {
+    pub fn call_proc(&mut self, index: usize, ret: usize, mut args: Vec<Value>) -> R<()> {
+        self.enter_proc(index, ret, &mut args)
+    }
+
+    /// `call_proc` taking the arguments out of `args` (left empty, its
+    /// allocation kept by the caller). The frame comes from the pool of
+    /// frames of returned procedures.
+    pub(crate) fn enter_proc(&mut self, index: usize, ret: usize, args: &mut Vec<Value>) -> R<()> {
+        // (A reference to the program: the procedure table is borrowed while
+        // the interpreter changes.)
+        let prg = self.prg.clone().expect("no program");
+        let p = &prg.procs[index];
+        if p.machine_code {
             return Err(Exc::Message("Machine code procedures are not supported".into()));
         }
-        let mut locals: Vec<Var> = vec![Var::Unset; n_locals];
-        for ((slot, ty), v) in params.iter().zip(param_types.iter()).zip(args) {
-            let v = self.convert_for(*ty, v)?;
+        let mut frame = self.frame_pool.pop().unwrap_or_default();
+        frame.locals.resize(p.locals.len(), Var::Unset);
+        for ((slot, ty), v) in p.params.iter().zip(p.param_types.iter()).zip(args.drain(..)) {
+            let v = match self.convert_for(*ty, v) {
+                Ok(v) => v,
+                Err(e) => {
+                    frame.locals.clear();
+                    self.frame_pool.push(frame);
+                    return Err(e);
+                }
+            };
             if slot & GLOBAL != 0 {
                 self.globals[(slot & !GLOBAL) as usize] = Var::Scalar(v);
             } else {
-                locals[*slot as usize] = Var::Scalar(v);
+                frame.locals[*slot as usize] = Var::Scalar(v);
             }
         }
-        let frame = ProcFrame {
-            proc_index: index,
-            ret,
-            locals,
-            data: self.data,
-            on_error: self.on_error,
-            error_on: self.error_on,
-            error_pos: self.error_pos,
-            scope: self.scope,
-        };
-        self.push_ctl(Ctl::Proc(Box::new(frame)))?;
+        let body = p.body;
+        frame.proc_index = index;
+        frame.ret = ret;
+        frame.data = self.data;
+        frame.on_error = self.on_error;
+        frame.error_on = self.error_on;
+        frame.error_pos = self.error_pos;
+        frame.scope = self.scope;
+        self.push_ctl(Ctl::Proc(frame))?;
         self.frame_stack.push(self.ctl.len() - 1);
         self.scope = index + 1;
         self.data = DataPtr { base: body, line: 0, item: 0 };
@@ -839,6 +860,13 @@ impl Interp {
         self.error_pos = f.error_pos;
         self.scope = f.scope;
         self.pc = f.ret;
+        // The frame is kept for the next call (its variables are dropped
+        // now, as before).
+        let mut f = f;
+        f.locals.clear();
+        if self.frame_pool.len() < 64 {
+            self.frame_pool.push(f);
+        }
         Ok(())
     }
 
