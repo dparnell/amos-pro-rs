@@ -86,3 +86,147 @@ fn modules_of_other_programs_are_refused() {
     assert!(CompiledProgram::start(&mut m, &back.program().unwrap(), back.module.as_ref().unwrap()).is_ok());
     assert_eq!(amos_core::bundle::Bundle::from_bytes(&plain.to_bytes()).unwrap().module, None);
 }
+
+/// Every keyword compiled code calls directly (`machine::plain_args`, the
+/// parameters given with `Interp::preset_args`): all parameters, the first
+/// one omitted, a float for an integer, a negative value (errors), and
+/// angles after Degree, on full
+/// machines, against the interpreter (state, log and display).
+#[test]
+fn plain_keywords_match_the_interpreter() {
+    use amos_core::tokens::{Keyword, MAIN, TokenKind, ValueType};
+    let mut programs = Vec::new();
+    for def in MAIN {
+        let kw = Keyword { slot: 0, token: def.token };
+        if !amos_core::machine::plain_args(kw) {
+            continue;
+        }
+        let sig = def.param_types().as_bytes();
+        let types: Vec<u8> = sig.iter().step_by(2).copied().collect();
+        let seps: Vec<u8> = sig.iter().skip(1).step_by(2).copied().collect();
+        let value = |i: usize, t: u8| match t {
+            b'2' => "\"a\"".to_string(),
+            b'1' => format!("{}.5", i + 1),
+            b'5' => "0.5".to_string(),
+            _ => format!("{}", i + 1),
+        };
+        let join = |vals: &[String]| {
+            let mut s = String::new();
+            for (i, v) in vals.iter().enumerate() {
+                s.push_str(v);
+                match seps.get(i) {
+                    Some(b't') => s.push_str(" To "),
+                    Some(_) => s.push(','),
+                    None => {}
+                }
+            }
+            s
+        };
+        let mut variants: Vec<Vec<String>> = vec![types.iter().enumerate().map(|(i, &t)| value(i, t)).collect()];
+        if types.len() >= 2 {
+            let mut v = variants[0].clone();
+            v[0] = String::new();
+            variants.push(v);
+        }
+        // (Parameters of the wrong type are refused when the program is
+        // verified, the same way for both: run time conversions and errors
+        // instead.)
+        if let Some(&t) = types.first()
+            && t != b'2'
+        {
+            let mut v = variants[0].clone();
+            v[0] = "2.7".into();
+            variants.push(v);
+            let mut v = variants[0].clone();
+            v[0] = "-1".into();
+            variants.push(v);
+        }
+        let name = def.name;
+        for (k, vals) in variants.iter().enumerate() {
+            let args = join(vals);
+            let call = match def.kind() {
+                TokenKind::Instruction => format!("{name} {args}"),
+                kind => {
+                    let target = match kind {
+                        TokenKind::Function(ValueType::Str) => "V$",
+                        TokenKind::ReservedVariable if def.params.as_bytes().get(1) == Some(&b'2') => "V$",
+                        _ => "V",
+                    };
+                    if types.is_empty() { format!("{target}={name}") } else { format!("{target}={name}({args})") }
+                }
+            };
+            programs.push((name, format!("Curs Off\n{call}\nPrint V;V$\n{call}")));
+            if k == 0 && types.contains(&b'5') {
+                programs.push((name, format!("Degree\n{call}\nPrint V;V$")));
+            }
+        }
+    }
+    assert!(programs.len() > 100, "{}", programs.len());
+    let mut compared = 0;
+    let mut failures = Vec::new();
+    // Machine panics (bugs of the machine, the same both ways) are listed.
+    let mut panics = Vec::new();
+    let run = |src: &str, compiled: bool| -> Option<Vec<String>> {
+        let prg = tokenise_program(src.as_bytes()).ok()?;
+        let wasm = amos_compiler::compile(&prg).ok()?;
+        let mut m = Machine::new();
+        let mut cp = None;
+        if compiled {
+            cp = Some(CompiledProgram::start(&mut m, &prg, &wasm).ok()?);
+        } else {
+            m.run_program(&prg).ok()?;
+        }
+        let mut frames = Vec::new();
+        for _ in 0..3 {
+            match &mut cp {
+                Some(cp) => cp.vbl(&mut m),
+                None => m.vbl(),
+            }
+            let h = render_rgba(&m.frame()).iter().fold(0u64, |h, &b| h.wrapping_mul(31).wrapping_add(b as u64));
+            frames.push(format!("{:?} {:?} {h}", m.state, m.hw.log));
+        }
+        Some(frames)
+    };
+    let hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+    let mut covered = std::collections::BTreeSet::new();
+    for (name, src) in &programs {
+        let a = std::panic::catch_unwind(|| run(src, false));
+        let b = std::panic::catch_unwind(|| run(src, true));
+        match (a, b) {
+            (Ok(Some(a)), Ok(Some(b))) => {
+                compared += 1;
+                covered.insert(*name);
+                if a != b {
+                    failures.push(format!("{src}\n  {a:?}\n  {b:?}"));
+                }
+            }
+            (Ok(None), Ok(None)) => {}
+            (Err(_), Err(_)) => panics.push(src.clone()),
+            (a, b) => {
+                failures.push(format!("{src}\n  interpreted ok/panic: {:?}, compiled: {:?}", a.is_ok(), b.is_ok()))
+            }
+        }
+    }
+    std::panic::set_hook(hook);
+    let skipped: Vec<&String> = programs
+        .iter()
+        .map(|(_, src)| src)
+        .filter(|src| {
+            let Ok(prg) = tokenise_program(src.as_bytes()) else { return true };
+            amos_compiler::compile(&prg).is_err() || Machine::new().run_program(&prg).is_err()
+        })
+        .collect();
+    eprintln!(
+        "{} programs, {compared} compared ({} keywords), {} not runnable: {:#?}",
+        programs.len(),
+        covered.len(),
+        skipped.len(),
+        &skipped[..skipped.len().min(15)]
+    );
+    if !panics.is_empty() {
+        eprintln!("machine panics (both ways): {panics:#?}");
+    }
+    assert!(compared > 150 && covered.len() > 40, "only {compared} programs ({} keywords) compared", covered.len());
+    assert!(failures.is_empty(), "{} of {compared} differ:\n{}", failures.len(), failures.join("\n"));
+}

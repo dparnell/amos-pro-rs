@@ -141,6 +141,10 @@ struct Site {
     kinds: Vec<(u8, u32)>,
     /// End of the parameters in `code`.
     end: usize,
+    /// The handler reads its parameters only through `inst_args` /
+    /// `func_args` (`machine::plain_args`): called directly, the values
+    /// given with `Interp::preset_args`, without a token stream.
+    plain: bool,
 }
 
 /// Runtime state of one compiled program.
@@ -178,6 +182,8 @@ pub struct Runtime {
     /// What the control stack mirror was last made from (`mirror`): the
     /// words are only written again when it changes.
     mirror_key: Option<MirrorKey>,
+    /// Parameters of a plain call (`preset`), kept between calls.
+    preset_buf: Vec<Option<Value>>,
     stopped: Option<StopInfo>,
     /// Procedure frames of returned calls, reused (no allocation per call:
     /// the boxes go back into `Ctl::Proc` as they are).
@@ -219,6 +225,7 @@ impl Runtime {
             sites: Vec::new(),
             margs: Vec::new(),
             mirror_key: None,
+            preset_buf: Vec::new(),
             stopped: None,
             frame_pool: Vec::new(),
             heap: arrays::Heap::new(heap, layout.size),
@@ -825,12 +832,48 @@ impl Runtime {
                     structure::instruction_call(&self.prg.code, p)
                 };
                 let n = call.as_ref().map_or(0, |c| c.slots.iter().filter(|s| s.present).count());
-                self.sites.push(Site { call: call.map(Rc::new), n, code: None, kinds: Vec::new(), end: 0 });
+                let plain = call.as_ref().is_some_and(|c| crate::machine::plain_args(c.kw));
+                self.sites.push(Site { call: call.map(Rc::new), n, code: None, kinds: Vec::new(), end: 0, plain });
                 self.site_at.insert(p, self.sites.len() as u32 - 1);
                 self.sites.len() - 1
             }
         };
         self.sites[i].call.is_some().then_some(i)
+    }
+
+    /// The parameters of plain call site `i` for `Interp::preset_args`, in
+    /// `self.preset_buf`: the values (bridge slots from `base`, or popped
+    /// from the stack) in the signature's places, `None` for an omitted one.
+    fn preset(&mut self, i: usize, mem: &mut [u8], base: i32) {
+        let n = self.sites[i].n;
+        let first = self.stack.len().saturating_sub(n);
+        let mut buf = std::mem::take(&mut self.preset_buf);
+        buf.clear();
+        let call = self.sites[i].call.as_ref().expect("bridged call");
+        let mut k = 0u32;
+        for slot in &call.slots {
+            if !slot.present {
+                buf.push(None);
+                continue;
+            }
+            let v = if base >= 0 {
+                let a = self.layout.bridge + (base as u32 + k) * layout::BRIDGE_SLOT;
+                match ld_i32(mem, a) {
+                    layout::BRIDGE_INT => Value::Int(ld_i32(mem, a + 8)),
+                    layout::BRIDGE_FLOAT => Value::Float(ld_f64(mem, a + 8)),
+                    layout::BRIDGE_DYN_INT => Value::Int(ld_f64(mem, a + 8) as i32),
+                    _ => Value::Str(self.str_of(mem, ld_i32(mem, a + 8))),
+                }
+            } else {
+                self.stack.get(first + k as usize).cloned().unwrap_or(Value::Int(0))
+            };
+            buf.push(Some(v));
+            k += 1;
+        }
+        if base < 0 {
+            self.stack.truncate(first);
+        }
+        self.preset_buf = buf;
     }
 
     /// The token stream of call site `i` (at `p`) with the parameter values
@@ -962,6 +1005,17 @@ impl Runtime {
         it.inst_pos = pos;
         let r = match self.site(pos, false) {
             None => Err(Exc::Message("Compiled program: bad keyword call".into())),
+            Some(i) if self.sites[i].plain => {
+                // Directly, the parameters given (none for a keyword
+                // without parameters: its handler may not read them).
+                let call = self.sites[i].call.as_ref().expect("bridged call");
+                let (kw, params) = (call.kw, !call.slots.is_empty());
+                if params {
+                    self.preset(i, mem, base);
+                    it.preset_args(&self.preset_buf);
+                }
+                hw.instruction(it, kw).map(|_| ST_CONTINUE)
+            }
             Some(i) => {
                 let call = self.sites[i].call.as_ref().expect("bridged call");
                 let (start, kw) = (2 + (call.tok_end - pos), call.kw);
@@ -980,6 +1034,15 @@ impl Runtime {
         let fpos = fpos as usize;
         let r = match self.site(fpos, true) {
             None => Err(Exc::Message("Compiled program: bad function call".into())),
+            Some(i) if self.sites[i].plain => {
+                let call = self.sites[i].call.as_ref().expect("bridged call");
+                let (kw, params) = (call.kw, !call.slots.is_empty());
+                if params {
+                    self.preset(i, mem, base);
+                    it.preset_args(&self.preset_buf);
+                }
+                it.function_value(hw, kw)
+            }
             Some(i) => {
                 let call = self.sites[i].call.as_ref().expect("bridged call");
                 let (kw, start) = (call.kw, 2 + (call.tok_end - fpos));
