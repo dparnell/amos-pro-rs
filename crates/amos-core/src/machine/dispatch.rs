@@ -142,6 +142,19 @@ pub fn plain_args(kw: Keyword) -> bool {
                 | POKE
                 | DOKE
                 | LOKE
+                // More (inst_screen.rs, inst_input.rs, inst_sprites.rs,
+                // inst_text.rs).
+                | SCREEN
+                | KEY_SHIFT
+                | BOB_COL
+                | BOB_COL_2
+                | BOBSPRITE_COL
+                | BOBSPRITE_COL_2
+                | SPRITE_COL
+                | SPRITE_COL_2
+                | SPRITEBOB_COL
+                | SPRITEBOB_COL_2
+                | CENTRE
         )
 }
 
@@ -705,5 +718,417 @@ Print V;W;Z;S\n";
         m.vbl();
         let out: String = m.hw.log.concat();
         assert_eq!(out, "-2147483648-2147483648 0 0\r\nEnd");
+    }
+}
+
+/// The typed keyword functions do what the token path does.
+#[cfg(test)]
+mod typed_keywords {
+    use super::*;
+    use crate::Machine;
+    use crate::display::render_rgba;
+    use crate::interp::RunState;
+    use crate::tokens::tk;
+
+    const SETUP: &str = "Screen Open 0,320,200,16,Lowres\nCls 0\nReserve As Work 10,64\n\
+Reserve Zone 5 : Set Zone 1,0,0 To 100,100 : Set Zone 2,40,40 To 60,60\n";
+
+    type Typed = Box<dyn FnOnce(&mut Hardware, &mut Interp) -> R<Option<i32>>>;
+
+    fn run(src: &str) -> Machine {
+        let prg = crate::tokenise::tokenise_program(src.as_bytes()).expect(src);
+        let mut m = Machine::new();
+        m.run_program(&prg).expect(src);
+        for _ in 0..5 {
+            m.vbl();
+            if !m.interp.running {
+                break;
+            }
+        }
+        m
+    }
+
+    fn call_with(m: &mut Machine, token: u16, args: &[i32]) -> String {
+        let v: Vec<Option<Value>> = args.iter().map(|&a| Some(Value::Int(a))).collect();
+        call_values(m, token, v)
+    }
+
+    fn call_values(m: &mut Machine, token: u16, v: Vec<Option<Value>>) -> String {
+        let kw = Keyword { slot: 0, token };
+        if !v.is_empty() {
+            m.interp.preset_args(&v);
+        }
+        let r = if crate::tokens::lookup(token)
+            .is_some_and(|d| matches!(d.kind(), crate::tokens::TokenKind::Instruction))
+        {
+            m.hw.instruction(&mut m.interp, kw).map(|()| String::new())
+        } else {
+            m.hw.function(&mut m.interp, kw).map(|v| format!("{v:?}"))
+        };
+        format!("{r:?}")
+    }
+
+    /// Shows the state the keywords change: text cursor, pens, graphic ink,
+    /// mouse limits and the start of bank 10.
+    fn reveal(m: &mut Machine) -> String {
+        let mut out = String::new();
+        let _ = m.hw.print(&mut m.interp, b"Ab\r\n");
+        out += &call_with(m, tk::SET_PAINT, &[1]);
+        out += &call_with(m, tk::BAR, &[200, 100, 230, 130]);
+        out += &call_with(m, tk::PLOT, &[240, 100]);
+        out += &call_with(m, tk::GR_WRITING, &[1]);
+        let text = vec![
+            Some(Value::Int(200)),
+            Some(Value::Int(150)),
+            Some(Value::str(b"Gr")),
+        ];
+        out += &call_values(m, tk::TEXT, text);
+        m.hw.input.set_mouse(Some(100_000), Some(100_000));
+        out += &format!(" mouse {} {}", m.hw.input.mouse_x, m.hw.input.mouse_y);
+        m.hw.input.set_mouse(Some(-100_000), Some(-100_000));
+        out += &format!(" {} {}", m.hw.input.mouse_x, m.hw.input.mouse_y);
+        m.interp.preset_args(&[Some(Value::Int(10))]);
+        match m.hw.function(
+            &mut m.interp,
+            Keyword {
+                slot: 0,
+                token: tk::START,
+            },
+        ) {
+            Ok(Value::Int(a)) => out += &format!(" mem {}", m.hw.leek(&mut m.interp, a)),
+            r => panic!("{r:?}"),
+        }
+        out
+    }
+
+    /// `call` (a statement, or `Print <function call>`) after the setup in
+    /// a program, against `typed` called directly after the setup.
+    fn check(setup: &str, call: &str, typed: Typed) {
+        let mut a = run(&format!("{SETUP}{setup}\n{call}\n"));
+        let mut b = run(&format!("{SETUP}{setup}\n"));
+        let mut a_log = a.hw.log.clone();
+        a_log.pop();
+        let b_log_start = b.hw.log.len();
+        let want = match &a.state {
+            RunState::Stopped(info) => format!("{:?}", info.reason),
+            s => panic!("{call}: {s:?}"),
+        };
+        let got = match typed(&mut b.hw, &mut b.interp) {
+            Ok(v) => {
+                if let Some(v) = v {
+                    let mut t = b.interp.value_text(&Value::Int(v));
+                    t.extend_from_slice(b"\r\n");
+                    b.hw.print(&mut b.interp, &t).unwrap();
+                }
+                "Stop(End)".to_string()
+            }
+            Err(e) => format!("{e:?}"),
+        };
+        assert_eq!(want, got, "{call}");
+        assert_eq!(a_log[..], b.hw.log[b_log_start..], "{call}");
+        assert_eq!(reveal(&mut a), reveal(&mut b), "{call}");
+        a.vbl();
+        b.vbl();
+        assert!(
+            render_rgba(&a.frame()) == render_rgba(&b.frame()),
+            "{call}: display differs"
+        );
+    }
+
+    fn inst(f: impl FnOnce(&mut Hardware, &mut Interp) -> R<()> + 'static) -> Typed {
+        Box::new(move |hw, it| f(hw, it).map(|()| None))
+    }
+
+    fn func(f: impl FnOnce(&mut Hardware, &mut Interp) -> R<i32> + 'static) -> Typed {
+        Box::new(move |hw, it| f(hw, it).map(Some))
+    }
+
+    #[test]
+    fn text_keywords() {
+        check("", "Locate 3,4", inst(|hw, _| hw.locate(Some(3), Some(4))));
+        check("", "Locate ,4", inst(|hw, _| hw.locate(None, Some(4))));
+        check("", "Locate 3,", inst(|hw, _| hw.locate(Some(3), None)));
+        check(
+            "",
+            "Locate 50,4",
+            inst(|hw, _| hw.locate(Some(50), Some(4))),
+        );
+        check("", "Pen 5", inst(|hw, _| hw.pen(5)));
+        check("", "Pen 300", inst(|hw, _| hw.pen(300)));
+        check("", "Paper 2", inst(|hw, _| hw.paper(2)));
+        check("Screen Close 0", "Pen 2", inst(|hw, _| hw.pen(2)));
+    }
+
+    #[test]
+    fn drawing_keywords() {
+        check("", "Ink 3", inst(|hw, _| hw.ink(Some(3), None, None)));
+        check("", "Ink 3,4", inst(|hw, _| hw.ink(Some(3), Some(4), None)));
+        check("", "Ink ,4,5", inst(|hw, _| hw.ink(None, Some(4), Some(5))));
+        check(
+            "",
+            "Plot 10,20",
+            inst(|hw, _| hw.plot(Some(10), Some(20), None)),
+        );
+        check(
+            "",
+            "Plot 10,20,6",
+            inst(|hw, _| hw.plot(Some(10), Some(20), Some(6))),
+        );
+        check(
+            "Plot 5,5",
+            "Plot ,20",
+            inst(|hw, _| hw.plot(None, Some(20), None)),
+        );
+        check(
+            "",
+            "Plot 10,20,-1",
+            inst(|hw, _| hw.plot(Some(10), Some(20), Some(-1))),
+        );
+        check(
+            "Plot 5,5",
+            "Draw To 60,70",
+            inst(|hw, _| hw.draw_to(Some(60), Some(70))),
+        );
+        check(
+            "Plot 5,5",
+            "Draw To ,70",
+            inst(|hw, _| hw.draw_to(None, Some(70))),
+        );
+        check(
+            "",
+            "Draw 1,2 To 30,40",
+            inst(|hw, _| hw.draw(Some(1), Some(2), Some(30), Some(40))),
+        );
+        check(
+            "Plot 5,5",
+            "Draw ,2 To 30,",
+            inst(|hw, _| hw.draw(None, Some(2), Some(30), None)),
+        );
+        check(
+            "",
+            "Box 10,10 To 50,40",
+            inst(|hw, _| hw.box_(10, 10, 50, 40)),
+        );
+        check(
+            "",
+            "Bar 10,10 To 50,40",
+            inst(|hw, _| hw.bar(10, 10, 50, 40)),
+        );
+        check(
+            "",
+            "Bar 50,10 To 10,40",
+            inst(|hw, _| hw.bar(50, 10, 10, 40)),
+        );
+        check(
+            "",
+            "Circle 50,50,20",
+            inst(|hw, _| hw.circle(Some(50), Some(50), 20)),
+        );
+        check(
+            "Plot 80,80",
+            "Circle ,,20",
+            inst(|hw, _| hw.circle(None, None, 20)),
+        );
+        check(
+            "",
+            "Circle 50,50,0",
+            inst(|hw, _| hw.circle(Some(50), Some(50), 0)),
+        );
+        check(
+            "Ink 7 : Plot 5,6",
+            "Print Point(5,6)",
+            func(|hw, _| hw.point(Some(5), Some(6))),
+        );
+        check(
+            "Plot 5,6",
+            "Print Point(400,6)",
+            func(|hw, _| hw.point(Some(400), Some(6))),
+        );
+        check(
+            "Screen Close 0",
+            "Plot 1,1",
+            inst(|hw, _| hw.plot(Some(1), Some(1), None)),
+        );
+    }
+
+    #[test]
+    fn screen_and_mouse_keywords() {
+        check(
+            "",
+            "Limit Mouse",
+            inst(|hw, _| {
+                hw.limit_mouse();
+                Ok(())
+            }),
+        );
+        check("", "Limit Mouse 0", inst(|hw, _| hw.limit_mouse_screen(0)));
+        check("", "Limit Mouse 1", inst(|hw, _| hw.limit_mouse_screen(1)));
+        check(
+            "",
+            "Limit Mouse 10,20 To 100,90",
+            inst(|hw, _| {
+                hw.limit_mouse_area(10, 20, 100, 90);
+                Ok(())
+            }),
+        );
+        let two = "Screen Open 1,320,100,4,Lowres : Screen 0";
+        check(
+            two,
+            "Screen To Front",
+            inst(|hw, _| hw.screen_to_front(None)),
+        );
+        check(
+            two,
+            "Screen To Front 1",
+            inst(|hw, _| hw.screen_to_front(Some(1))),
+        );
+        check(
+            two,
+            "Screen To Front 3",
+            inst(|hw, _| hw.screen_to_front(Some(3))),
+        );
+        check(
+            two,
+            "Screen To Front 9",
+            inst(|hw, _| hw.screen_to_front(Some(9))),
+        );
+        check(
+            "Colour 3,$123",
+            "Print Colour(3)",
+            func(|hw, _| hw.colour_fn(3)),
+        );
+        check(
+            "Colour 3,$123",
+            "Print Colour(35)",
+            func(|hw, _| hw.colour_fn(35)),
+        );
+        check(
+            "",
+            "Print X Screen(100)",
+            func(|hw, _| hw.x_screen(None, 100)),
+        );
+        check(
+            two,
+            "Print X Screen(1,200)",
+            func(|hw, _| hw.x_screen(Some(1), 200)),
+        );
+        check(
+            "",
+            "Print X Screen(5,200)",
+            func(|hw, _| hw.x_screen(Some(5), 200)),
+        );
+        check(
+            "",
+            "Print Y Screen(100)",
+            func(|hw, _| hw.y_screen(None, 100)),
+        );
+        check(
+            two,
+            "Print Y Screen(1,90)",
+            func(|hw, _| hw.y_screen(Some(1), 90)),
+        );
+        check(
+            "",
+            "Print Zone(50,50)",
+            func(|hw, _| hw.zone_fn(None, 50, 50, false)),
+        );
+        check(
+            "",
+            "Print Zone(0,45,45)",
+            func(|hw, _| hw.zone_fn(Some(0), 45, 45, false)),
+        );
+        check(
+            "",
+            "Print Zone(-2,45,45)",
+            func(|hw, _| hw.zone_fn(Some(-2), 45, 45, false)),
+        );
+        check(
+            "",
+            "Print Zone(4,45,45)",
+            func(|hw, _| hw.zone_fn(Some(4), 45, 45, false)),
+        );
+        check(
+            "",
+            "Print Hzone(200,100)",
+            func(|hw, _| hw.zone_fn(None, 200, 100, true)),
+        );
+        check(
+            "",
+            "Print Hzone(0,200,100)",
+            func(|hw, _| hw.zone_fn(Some(0), 200, 100, true)),
+        );
+        check("", "Print Mouse Click", func(|hw, _| Ok(hw.mouse_click())));
+        check("", "Print Scancode", func(|hw, _| Ok(hw.scancode())));
+    }
+
+    #[test]
+    fn menu_dialog_and_memory_keywords() {
+        check("", "Print Choice", func(|hw, _| hw.choice_fn(None)));
+        check("", "Print Choice(1)", func(|hw, _| hw.choice_fn(Some(1))));
+        check("", "Print Choice(0)", func(|hw, _| hw.choice_fn(Some(0))));
+        check("", "Print Dialog(1)", func(|hw, it| hw.dialog_fn(it, 1)));
+        check("", "Print Dialog(0)", func(|hw, it| hw.dialog_fn(it, 0)));
+        let start = |hw: &mut Hardware, it: &mut Interp| {
+            it.preset_args(&[Some(Value::Int(10))]);
+            match hw.function(
+                it,
+                Keyword {
+                    slot: 0,
+                    token: tk::START,
+                },
+            ) {
+                Ok(Value::Int(a)) => a,
+                r => panic!("{r:?}"),
+            }
+        };
+        check(
+            "",
+            "Poke Start(10),200",
+            inst(move |hw, it| {
+                let a = start(hw, it);
+                hw.poke(it, a, 200)
+            }),
+        );
+        check(
+            "",
+            "Doke Start(10),$1234",
+            inst(move |hw, it| {
+                let a = start(hw, it);
+                hw.doke(it, a, 0x1234)
+            }),
+        );
+        check(
+            "",
+            "Loke Start(10),-5",
+            inst(move |hw, it| {
+                let a = start(hw, it);
+                hw.loke(it, a, -5)
+            }),
+        );
+        let fill = "Loke Start(10),$89ABCDEF";
+        check(
+            fill,
+            "Print Peek(Start(10))",
+            func(move |hw, it| {
+                let a = start(hw, it);
+                Ok(hw.peek(it, a))
+            }),
+        );
+        check(
+            fill,
+            "Print Deek(Start(10))",
+            func(move |hw, it| {
+                let a = start(hw, it);
+                Ok(hw.deek(it, a))
+            }),
+        );
+        check(
+            fill,
+            "Print Leek(Start(10))",
+            func(move |hw, it| {
+                let a = start(hw, it);
+                Ok(hw.leek(it, a))
+            }),
+        );
     }
 }

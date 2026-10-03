@@ -44,6 +44,41 @@ impl Hardware {
         wi(scr.print_text(s))
     }
 
+    // Keywords as typed functions (the token path and compiled code call
+    // these with the parameters read; `None` is an omitted parameter).
+
+    /// `Locate x,y`.
+    pub(crate) fn locate(&mut self, x: Option<i32>, y: Option<i32>) -> R<()> {
+        wi(self.text_screen()?.locate(x, y))
+    }
+
+    /// `Pen n`.
+    pub(crate) fn pen(&mut self, n: i32) -> R<()> {
+        self.go_wn(&[27, b'P', (n as u8).wrapping_add(48)])
+    }
+
+    /// `Paper n`.
+    pub(crate) fn paper(&mut self, n: i32) -> R<()> {
+        self.go_wn(&[27, b'B', (n as u8).wrapping_add(48)])
+    }
+
+    /// `Zone(x,y)` / `Zone(screen,x,y)`, `Hzone` (`hard`) likewise.
+    pub(crate) fn zone_fn(&mut self, screen: Option<i32>, x: i32, y: i32, hard: bool) -> R<i32> {
+        let s = screen.unwrap_or(-1);
+        self.text_screen()?;
+        let Some(n) = self.screen_param(s.wrapping_add(1))? else {
+            return Ok(ENT_NUL);
+        };
+        let scr = self.screens.get(n).ok_or(Exc::Error(SCREEN_NOT_OPENED))?;
+        Ok(if n >= 8 {
+            0
+        } else if hard {
+            scr.zone_at_hard(x, y)
+        } else {
+            scr.zone_at(x, y)
+        })
+    }
+
     pub(crate) fn text_instruction(&mut self, it: &mut Interp, kw: Keyword) -> R<bool> {
         if kw.slot != 0 {
             return Ok(false);
@@ -118,7 +153,7 @@ impl Hardware {
             }
             LOCATE => {
                 let a = it.inst_args(self, kw)?;
-                wi(self.text_screen()?.locate(opt(a.int(0)), opt(a.int(1))))?;
+                self.locate(a.opt(0), a.opt(1))?;
             }
             CENTRE => {
                 let t = it.inst_args(self, kw)?.str(0);
@@ -133,14 +168,17 @@ impl Hardware {
                 }
                 self.go_wn(&[27, b'N', dx as u8, 27, b'O', dy as u8])?;
             }
-            CURS_PEN | PAPER | PEN => {
+            PEN => {
                 let n = it.inst_args(self, kw)?.int(0);
-                let l = match kw.token {
-                    CURS_PEN => b'D',
-                    PAPER => b'B',
-                    _ => b'P',
-                };
-                self.go_wn(&[27, l, (n as u8).wrapping_add(48)])?;
+                self.pen(n)?;
+            }
+            PAPER => {
+                let n = it.inst_args(self, kw)?.int(0);
+                self.paper(n)?;
+            }
+            CURS_PEN => {
+                let n = it.inst_args(self, kw)?.int(0);
+                self.go_wn(&[27, b'D', (n as u8).wrapping_add(48)])?;
             }
             CLW => self.go_wn(&[25])?,
             HOME => self.go_wn(&[12])?,
@@ -330,25 +368,12 @@ impl Hardware {
             }
             ZONE | ZONE_2 | HZONE | HZONE_2 => {
                 let a = it.func_args(self, kw)?;
-                let three = matches!(kw.token, ZONE_2 | HZONE_2);
-                let (s, x, y) = if three {
-                    (a.int(0), a.int(1), a.int(2))
+                let hard = matches!(kw.token, HZONE | HZONE_2);
+                Value::Int(if matches!(kw.token, ZONE_2 | HZONE_2) {
+                    self.zone_fn(Some(a.int(0)), a.int(1), a.int(2), hard)?
                 } else {
-                    (-1, a.int(0), a.int(1))
-                };
-                self.text_screen()?;
-                let Some(n) = self.screen_param(s.wrapping_add(1))? else {
-                    return Ok(Some(Value::Int(ENT_NUL)));
-                };
-                let scr = self.screens.get(n).ok_or(Exc::Error(SCREEN_NOT_OPENED))?;
-                let z = if n >= 8 {
-                    0
-                } else if matches!(kw.token, ZONE | ZONE_2) {
-                    scr.zone_at(x, y)
-                } else {
-                    scr.zone_at_hard(x, y)
-                };
-                Value::Int(z)
+                    self.zone_fn(None, a.int(0), a.int(1), hard)?
+                })
             }
             MOUSE_ZONE => {
                 let (mx, my) = (self.input.mouse_x, self.input.mouse_y);

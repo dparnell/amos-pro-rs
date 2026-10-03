@@ -603,23 +603,29 @@ impl Hardware {
         Ok(true)
     }
 
+    /// `Choice` (`None`: was a menu item chosen since the last call) /
+    /// `Choice(level)`: the item chosen at that level.
+    pub(crate) fn choice_fn(&mut self, level: Option<i32>) -> R<i32> {
+        let Some(n) = level else {
+            let chosen = std::mem::take(&mut self.menus.choice_pending);
+            return Ok(if chosen { -1 } else { 0 });
+        };
+        if !(1..=menus::MAX_LEVELS as i32).contains(&n) {
+            return err(errors::ILLEGAL_FUNCTION_CALL);
+        }
+        Ok(self.menus.choice[n as usize - 1] as i32)
+    }
+
     pub(crate) fn menus_function(&mut self, it: &mut Interp, kw: Keyword) -> R<Option<Value>> {
         if kw.slot != 0 {
             return Ok(None);
         }
         use tk::*;
         let v = match kw.token {
-            CHOICE => Value::Int(if std::mem::take(&mut self.menus.choice_pending) {
-                -1
-            } else {
-                0
-            }),
+            CHOICE => Value::Int(self.choice_fn(None)?),
             CHOICE_2 => {
                 let n = it.func_args(self, kw)?.int(0);
-                if !(1..=menus::MAX_LEVELS as i32).contains(&n) {
-                    return err(errors::ILLEGAL_FUNCTION_CALL);
-                }
-                Value::Int(self.menus.choice[n as usize - 1] as i32)
+                Value::Int(self.choice_fn(Some(n))?)
             }
             X_MENU | Y_MENU => {
                 let path = self.menu_path(it)?;

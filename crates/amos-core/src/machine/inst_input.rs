@@ -63,19 +63,14 @@ impl Hardware {
                     self.input.set_mouse(None, Some(v));
                 }
             }
-            LIMIT_MOUSE => self.input.limit_mouse(None),
+            LIMIT_MOUSE => self.limit_mouse(),
             LIMIT_MOUSE_2 => {
                 let n = it.inst_args(self, kw)?.int(0);
-                let s = self.screens.get(n.max(0) as usize).ok_or(Exc::Error(errors::SCREEN_NOT_OPENED))?;
-                let (x, y) = (s.display_x, s.display_y);
-                let w = s.display_w as i32;
-                // display_h is in raster lines (already halved for laced screens).
-                let h = s.display_h as i32;
-                self.input.limit_mouse(Some((x, y, x + w - 1, y + h - 1)));
+                self.limit_mouse_screen(n)?;
             }
             LIMIT_MOUSE_3 => {
                 let a = it.inst_args(self, kw)?;
-                self.input.limit_mouse(Some((a.int(0), a.int(1), a.int(2), a.int(3))));
+                self.limit_mouse_area(a.int(0), a.int(1), a.int(2), a.int(3));
             }
             TIMER if reserved => {
                 it.expect(OP_EQ)?;
@@ -84,6 +79,42 @@ impl Hardware {
             _ => return Ok(false),
         }
         Ok(true)
+    }
+
+    // Keywords as typed functions (the token path and compiled code call
+    // these with the parameters read).
+
+    /// `Limit Mouse` (no limit).
+    pub(crate) fn limit_mouse(&mut self) {
+        self.input.limit_mouse(None);
+    }
+
+    /// `Limit Mouse n`: the display area of screen `n`.
+    pub(crate) fn limit_mouse_screen(&mut self, n: i32) -> R<()> {
+        let s = self.screens.get(n.max(0) as usize).ok_or(Exc::Error(errors::SCREEN_NOT_OPENED))?;
+        let (x, y) = (s.display_x, s.display_y);
+        let w = s.display_w as i32;
+        // display_h is in raster lines (already halved for laced screens).
+        let h = s.display_h as i32;
+        self.input.limit_mouse(Some((x, y, x + w - 1, y + h - 1)));
+        Ok(())
+    }
+
+    /// `Limit Mouse x1,y1 To x2,y2`.
+    pub(crate) fn limit_mouse_area(&mut self, x1: i32, y1: i32, x2: i32, y2: i32) {
+        self.input.limit_mouse(Some((x1, y1, x2, y2)));
+    }
+
+    /// `Mouse Click`.
+    pub(crate) fn mouse_click(&mut self) -> i32 {
+        self.input.take_clicks() as i32
+    }
+
+    /// `Scancode`.
+    pub(crate) fn scancode(&mut self) -> i32 {
+        let v = self.input.scancode;
+        self.input.scancode = 0;
+        v as i32
     }
 
     pub(crate) fn input_function(&mut self, it: &mut Interp, kw: Keyword) -> R<Option<Value>> {
@@ -96,11 +127,7 @@ impl Hardware {
                 Some(k) => Value::Str(astr(&[k.ascii])),
                 None => Value::Str(empty_str()),
             },
-            SCANCODE => {
-                let v = self.input.scancode;
-                self.input.scancode = 0;
-                Value::Int(v as i32)
-            }
+            SCANCODE => Value::Int(self.scancode()),
             SCANSHIFT => Value::Int(self.input.scanshift as i32),
             KEY_STATE => {
                 let n = it.func_args(self, kw)?.int(0);
@@ -138,7 +165,7 @@ impl Hardware {
             X_MOUSE => Value::Int(self.input.mouse_x),
             Y_MOUSE => Value::Int(self.input.mouse_y),
             MOUSE_KEY => Value::Int(self.input.mouse_buttons as i32),
-            MOUSE_CLICK => Value::Int(self.input.take_clicks() as i32),
+            MOUSE_CLICK => Value::Int(self.mouse_click()),
             TIMER => Value::Int(self.timer),
             INPUT_S => {
                 // Input$(n): waits for n characters.

@@ -107,14 +107,12 @@ impl Hardware {
             }
             POKE | DOKE | LOKE => {
                 let a = it.inst_args(self, kw)?;
-                let (addr, v) = (a.int(0) as u32, a.int(1) as u32);
-                self.refresh_var_maps(it, addr, 4);
+                let (addr, v) = (a.int(0), a.int(1));
                 match kw.token {
-                    POKE => self.mem_write(addr, &[v as u8]),
-                    DOKE => self.mem_write(addr, &(v as u16).to_be_bytes()),
-                    _ => self.mem_write(addr, &v.to_be_bytes()),
+                    POKE => self.poke(it, addr, v)?,
+                    DOKE => self.doke(it, addr, v)?,
+                    _ => self.loke(it, addr, v)?,
                 }
-                self.write_back_var_maps(it, addr, 4)?;
             }
             POKE_S => {
                 let a = it.inst_args(self, kw)?;
@@ -210,14 +208,12 @@ impl Hardware {
                 Value::Int(self.banks.length(n.clamp(0, 65535) as u16).unwrap_or(0) as i32)
             }
             PEEK | DEEK | LEEK => {
-                let addr = it.func_args(self, kw)?.int(0) as u32;
-                self.refresh_var_maps(it, addr, 4);
-                let v = match kw.token {
-                    PEEK => self.mem_read(addr, 1)[0] as i32,
-                    DEEK => u16::from_be_bytes(self.mem_read(addr, 2).try_into().unwrap()) as i32,
-                    _ => u32::from_be_bytes(self.mem_read(addr, 4).try_into().unwrap()) as i32,
-                };
-                Value::Int(v)
+                let addr = it.func_args(self, kw)?.int(0);
+                Value::Int(match kw.token {
+                    PEEK => self.peek(it, addr),
+                    DEEK => self.deek(it, addr),
+                    _ => self.leek(it, addr),
+                })
             }
             PEEK_S | PEEK_S_2 => {
                 // Peek$(address,length[,stop$]): bytes up to the length or
@@ -305,6 +301,54 @@ impl Hardware {
         self.var_maps.push(VarMap { addr, base, cap, loc, ty, array });
         self.banks.poke_bytes(base, &bytes);
         addr
+    }
+
+    // Keywords as typed functions (the token path and compiled code call
+    // these with the parameters read). Memory mapped on Varptr'd variables
+    // is refreshed from / written back to them around the access.
+
+    /// Writes `data` at `addr` (`Poke`, `Doke`, `Loke`).
+    fn mem_store(&mut self, it: &mut Interp, addr: i32, data: &[u8]) -> R<()> {
+        let addr = addr as u32;
+        self.refresh_var_maps(it, addr, 4);
+        self.mem_write(addr, data);
+        self.write_back_var_maps(it, addr, 4)
+    }
+
+    /// `Poke addr,v`.
+    pub(crate) fn poke(&mut self, it: &mut Interp, addr: i32, v: i32) -> R<()> {
+        self.mem_store(it, addr, &[v as u8])
+    }
+
+    /// `Doke addr,v`.
+    pub(crate) fn doke(&mut self, it: &mut Interp, addr: i32, v: i32) -> R<()> {
+        self.mem_store(it, addr, &(v as u16).to_be_bytes())
+    }
+
+    /// `Loke addr,v`.
+    pub(crate) fn loke(&mut self, it: &mut Interp, addr: i32, v: i32) -> R<()> {
+        self.mem_store(it, addr, &(v as u32).to_be_bytes())
+    }
+
+    /// `Peek(addr)`.
+    pub(crate) fn peek(&mut self, it: &mut Interp, addr: i32) -> i32 {
+        let addr = addr as u32;
+        self.refresh_var_maps(it, addr, 4);
+        self.mem_read(addr, 1)[0] as i32
+    }
+
+    /// `Deek(addr)`.
+    pub(crate) fn deek(&mut self, it: &mut Interp, addr: i32) -> i32 {
+        let addr = addr as u32;
+        self.refresh_var_maps(it, addr, 4);
+        u16::from_be_bytes(self.mem_read(addr, 2).try_into().unwrap()) as i32
+    }
+
+    /// `Leek(addr)`.
+    pub(crate) fn leek(&mut self, it: &mut Interp, addr: i32) -> i32 {
+        let addr = addr as u32;
+        self.refresh_var_maps(it, addr, 4);
+        u32::from_be_bytes(self.mem_read(addr, 4).try_into().unwrap()) as i32
     }
 
     /// Copies variables mapped over [addr, addr+len) into memory.

@@ -150,6 +150,95 @@ impl Hardware {
         err(errors::ILLEGAL_FUNCTION_CALL)
     }
 
+    // Keywords as typed functions (the token path and compiled code call
+    // these with the parameters read; `None` is an omitted parameter).
+
+    /// `Ink c,bg,border` (all three forms).
+    pub(crate) fn ink(&mut self, c: Option<i32>, bg: Option<i32>, border: Option<i32>) -> R<()> {
+        let g = self.gr()?;
+        if let Some(c) = border {
+            g.outline = c as u8;
+        }
+        if let Some(b) = bg {
+            g.paper = b as u8;
+        }
+        if let Some(i) = c {
+            g.ink = i as u8;
+        }
+        Ok(())
+    }
+
+    /// `Plot x,y` / `Plot x,y,c`.
+    pub(crate) fn plot(&mut self, x: Option<i32>, y: Option<i32>, c: Option<i32>) -> R<()> {
+        self.draw_screen()?;
+        if let Some(c) = c {
+            if c < 0 {
+                return err(errors::ILLEGAL_FUNCTION_CALL);
+            }
+            self.gr()?.ink = c as u8;
+        }
+        let (x, y) = self.gr_xy(x, y)?;
+        self.draw_op(|g, c| g.plot(c, x, y))
+    }
+
+    /// `Draw To x,y`.
+    pub(crate) fn draw_to(&mut self, x: Option<i32>, y: Option<i32>) -> R<()> {
+        let g = self.gr()?;
+        let x = opt16(x).unwrap_or(g.x);
+        let y = opt16(y).unwrap_or(g.y);
+        self.draw_op(|g, c| g.draw_to(c, x, y))
+    }
+
+    /// `Draw x1,y1 To x2,y2`.
+    pub(crate) fn draw(
+        &mut self,
+        x1: Option<i32>,
+        y1: Option<i32>,
+        x2: Option<i32>,
+        y2: Option<i32>,
+    ) -> R<()> {
+        self.gr_xy(x1, y1)?;
+        let g = self.gr()?;
+        let x = opt16(x2).unwrap_or(g.x);
+        let y = opt16(y2).unwrap_or(g.y);
+        self.draw_op(|g, c| g.draw_to(c, x, y))
+    }
+
+    /// `Box x1,y1 To x2,y2`.
+    pub(crate) fn box_(&mut self, x1: i32, y1: i32, x2: i32, y2: i32) -> R<()> {
+        let (x1, y1, x2, y2) = (w16(x1), w16(y1), w16(x2), w16(y2));
+        self.draw_op(|g, c| g.draw_box(c, x1, y1, x2, y2))
+    }
+
+    /// `Bar x1,y1 To x2,y2`.
+    pub(crate) fn bar(&mut self, x1: i32, y1: i32, x2: i32, y2: i32) -> R<()> {
+        self.draw_screen()?;
+        let (x1, y1, x2, y2) = (w16(x1), w16(y1), w16(x2), w16(y2));
+        if x2 <= x1 || y2 <= y1 {
+            return err(errors::ILLEGAL_FUNCTION_CALL);
+        }
+        self.draw_op(|g, c| g.bar(c, x1, y1, x2, y2))
+    }
+
+    /// `Circle x,y,r`.
+    pub(crate) fn circle(&mut self, x: Option<i32>, y: Option<i32>, r: i32) -> R<()> {
+        if r == 0 {
+            return err(errors::ILLEGAL_FUNCTION_CALL);
+        }
+        let hires = self.draw_screen()?.hires;
+        let rx = if hires { w16(r << 1) } else { w16(r) };
+        let (x, y) = self.gr_xy(x, y)?;
+        self.draw_op(|g, c| g.ellipse(c, x, y, rx, w16(r)))
+    }
+
+    /// `Point(x,y)`.
+    pub(crate) fn point(&mut self, x: Option<i32>, y: Option<i32>) -> R<i32> {
+        self.draw_screen()?;
+        let (x, y) = self.gr_xy(x, y)?;
+        let s = self.draw_screen()?;
+        Ok(s.pixel(x, y).map_or(-1, |p| p as i32))
+    }
+
     pub(crate) fn draw_instruction(&mut self, it: &mut Interp, kw: Keyword) -> R<bool> {
         if kw.slot == 2 {
             return self.compact_instruction(it, kw);
@@ -160,16 +249,7 @@ impl Hardware {
         match kw.token {
             tk::INK | tk::INK_2 | tk::INK_3 => {
                 let a = it.inst_args(self, kw)?;
-                let g = self.gr()?;
-                if let Some(c) = a.opt(2) {
-                    g.outline = c as u8;
-                }
-                if let Some(b) = a.opt(1) {
-                    g.paper = b as u8;
-                }
-                if let Some(i) = a.opt(0) {
-                    g.ink = i as u8;
-                }
+                self.ink(a.opt(0), a.opt(1), a.opt(2))?;
             }
             tk::GR_WRITING => {
                 let a = it.inst_args(self, kw)?;
@@ -233,15 +313,7 @@ impl Hardware {
             }
             tk::PLOT | tk::PLOT_2 => {
                 let a = it.inst_args(self, kw)?;
-                self.draw_screen()?;
-                if let Some(c) = a.opt(2) {
-                    if c < 0 {
-                        return err(errors::ILLEGAL_FUNCTION_CALL);
-                    }
-                    self.gr()?.ink = c as u8;
-                }
-                let (x, y) = self.gr_xy(a.opt(0), a.opt(1))?;
-                self.draw_op(|g, c| g.plot(c, x, y))?;
+                self.plot(a.opt(0), a.opt(1), a.opt(2))?;
             }
             tk::GR_LOCATE => {
                 let a = it.inst_args(self, kw)?;
@@ -249,43 +321,23 @@ impl Hardware {
             }
             tk::DRAW_TO => {
                 let a = it.inst_args(self, kw)?;
-                let g = self.gr()?;
-                let x = opt16(a.opt(0)).unwrap_or(g.x);
-                let y = opt16(a.opt(1)).unwrap_or(g.y);
-                self.draw_op(|g, c| g.draw_to(c, x, y))?;
+                self.draw_to(a.opt(0), a.opt(1))?;
             }
             tk::DRAW => {
                 let a = it.inst_args(self, kw)?;
-                self.gr_xy(a.opt(0), a.opt(1))?;
-                let g = self.gr()?;
-                let x = opt16(a.opt(2)).unwrap_or(g.x);
-                let y = opt16(a.opt(3)).unwrap_or(g.y);
-                self.draw_op(|g, c| g.draw_to(c, x, y))?;
+                self.draw(a.opt(0), a.opt(1), a.opt(2), a.opt(3))?;
             }
             tk::BOX => {
                 let a = it.inst_args(self, kw)?;
-                let (x1, y1, x2, y2) = (w16(a.int(0)), w16(a.int(1)), w16(a.int(2)), w16(a.int(3)));
-                self.draw_op(|g, c| g.draw_box(c, x1, y1, x2, y2))?;
+                self.box_(a.int(0), a.int(1), a.int(2), a.int(3))?;
             }
             tk::BAR => {
                 let a = it.inst_args(self, kw)?;
-                self.draw_screen()?;
-                let (x1, y1, x2, y2) = (w16(a.int(0)), w16(a.int(1)), w16(a.int(2)), w16(a.int(3)));
-                if x2 <= x1 || y2 <= y1 {
-                    return err(errors::ILLEGAL_FUNCTION_CALL);
-                }
-                self.draw_op(|g, c| g.bar(c, x1, y1, x2, y2))?;
+                self.bar(a.int(0), a.int(1), a.int(2), a.int(3))?;
             }
             tk::CIRCLE => {
                 let a = it.inst_args(self, kw)?;
-                let r = a.int(2);
-                if r == 0 {
-                    return err(errors::ILLEGAL_FUNCTION_CALL);
-                }
-                let hires = self.draw_screen()?.hires;
-                let rx = if hires { w16(r << 1) } else { w16(r) };
-                let (x, y) = self.gr_xy(a.opt(0), a.opt(1))?;
-                self.draw_op(|g, c| g.ellipse(c, x, y, rx, w16(r)))?;
+                self.circle(a.opt(0), a.opt(1), a.int(2))?;
             }
             tk::ELLIPSE => {
                 let a = it.inst_args(self, kw)?;
@@ -585,10 +637,7 @@ impl Hardware {
         let v = match kw.token {
             tk::POINT => {
                 let a = it.func_args(self, kw)?;
-                self.draw_screen()?;
-                let (x, y) = self.gr_xy(a.opt(0), a.opt(1))?;
-                let s = self.draw_screen()?;
-                s.pixel(x, y).map_or(-1, |p| p as i32)
+                self.point(a.opt(0), a.opt(1))?
             }
             tk::XGR => (self.gr()?.x as u16) as i32,
             tk::YGR => (self.gr()?.y as u16) as i32,

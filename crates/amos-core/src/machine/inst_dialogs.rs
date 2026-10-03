@@ -591,6 +591,25 @@ impl Hardware {
         r.or_else(dia_err)
     }
 
+    /// `Dialog(n)`: the result of channel `n` (-1 while it runs).
+    pub(crate) fn dialog_fn(&mut self, it: &Interp, n: i32) -> R<i32> {
+        self.dialogs_check_program(it);
+        if n <= 0 {
+            return err(FONCALL);
+        }
+        let Some(i) = self.dialogs.channel_index(n as i64) else {
+            return dia_err(crate::interface::e::CHANNEL_NOT_DEFINED);
+        };
+        let c = &mut self.dialogs.channels[i];
+        if c.rflags & 1 == 0 {
+            Ok(-1)
+        } else {
+            let r = c.ret as u16 as i32;
+            c.ret = 0;
+            Ok(r)
+        }
+    }
+
     pub(crate) fn dialogs_function(&mut self, it: &mut Interp, kw: Keyword) -> R<Option<Value>> {
         if kw.slot != 0 {
             return Ok(None);
@@ -626,22 +645,10 @@ impl Hardware {
                 Value::Int(self.dia_run_result(it, r, Blocking::Run(n as i64))?)
             }
             DIALOG => {
+                // (The program is checked before the parameter is read.)
                 self.dialogs_check_program(it);
                 let n = it.func_args(self, kw)?.int(0);
-                if n <= 0 {
-                    return err(FONCALL);
-                }
-                let Some(i) = self.dialogs.channel_index(n as i64) else {
-                    return dia_err(e::CHANNEL_NOT_DEFINED);
-                };
-                let c = &mut self.dialogs.channels[i];
-                if c.rflags & 1 == 0 {
-                    Value::Int(-1)
-                } else {
-                    let r = c.ret as u16 as i32;
-                    c.ret = 0;
-                    Value::Int(r)
-                }
+                Value::Int(self.dialog_fn(it, n)?)
             }
             VDIALOG | VDIALOG_S => {
                 self.dialogs_check_program(it);

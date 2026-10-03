@@ -23,6 +23,15 @@ fn ec(r: Result<(), u16>) -> R<()> {
 }
 
 /// `CheckScreenNumber`: 0-7, else "valid screen numbers range 0 to 7".
+/// Coordinate conversion of `Hardware::screen_coord`.
+#[derive(Clone, Copy)]
+enum Coord {
+    XHard,
+    YHard,
+    XScreen,
+    YScreen,
+}
+
 fn check_screen(n: i32) -> R<usize> {
     if n as u32 >= 8 {
         err(lib_error(screen::E_SCREEN_NUMBER))
@@ -32,6 +41,76 @@ fn check_screen(n: i32) -> R<usize> {
 }
 
 impl Hardware {
+    // Keywords as typed functions (the token path and compiled code call
+    // these with the parameters read; `None` is an omitted parameter).
+
+    /// Screen `n`, or the current screen for `None` (no parameter).
+    fn screen_or_current(&self, n: Option<i32>) -> R<usize> {
+        match n {
+            None => self.cur_screen(),
+            Some(n) => check_screen(n),
+        }
+    }
+
+    /// `Screen To Front` / `Screen To Front n`.
+    pub(crate) fn screen_to_front(&mut self, n: Option<i32>) -> R<()> {
+        let n = self.screen_or_current(n)?;
+        ec(self.screens.to_front(n))
+    }
+
+    /// `Colour(n)`.
+    pub(crate) fn colour_fn(&mut self, n: i32) -> R<i32> {
+        Ok(self.cur_mut()?.palette[(n & 31) as usize] as i32)
+    }
+
+    /// `X Hard` / `Y Hard` / `X Screen` / `Y Screen` of `v`, on `screen`
+    /// (`None`: the current screen, the one-parameter forms).
+    fn screen_coord(&mut self, axis: Coord, screen: Option<i32>, v: i32) -> R<i32> {
+        let d3 = match screen {
+            Some(s) => s.wrapping_add(1),
+            None => {
+                self.cur_screen()?;
+                0
+            }
+        };
+        let Some(n) = self.screen_param(d3)? else {
+            return Ok(ENT_NUL);
+        };
+        let s = self
+            .screens
+            .get(n)
+            .ok_or(Exc::Error(lib_error(E_NOT_OPENED)))?;
+        // Word arithmetic as in the original.
+        let v = v as i16 as i32;
+        let r = match axis {
+            Coord::XHard => s.x_hard(v),
+            Coord::YHard => s.y_hard(v),
+            Coord::XScreen => s.x_screen(v),
+            Coord::YScreen => s.y_screen(v),
+        };
+        Ok(r as i16 as i32)
+    }
+
+    /// `X Screen(x)` / `X Screen(screen,x)`.
+    pub(crate) fn x_screen(&mut self, screen: Option<i32>, v: i32) -> R<i32> {
+        self.screen_coord(Coord::XScreen, screen, v)
+    }
+
+    /// `Y Screen(y)` / `Y Screen(screen,y)`.
+    pub(crate) fn y_screen(&mut self, screen: Option<i32>, v: i32) -> R<i32> {
+        self.screen_coord(Coord::YScreen, screen, v)
+    }
+
+    /// `X Hard(x)` / `X Hard(screen,x)`.
+    pub(crate) fn x_hard(&mut self, screen: Option<i32>, v: i32) -> R<i32> {
+        self.screen_coord(Coord::XHard, screen, v)
+    }
+
+    /// `Y Hard(y)` / `Y Hard(screen,y)`.
+    pub(crate) fn y_hard(&mut self, screen: Option<i32>, v: i32) -> R<i32> {
+        self.screen_coord(Coord::YHard, screen, v)
+    }
+
     /// The current screen number (`ScOn`), error 47 if none.
     fn cur_screen(&self) -> R<usize> {
         self.screens.current.ok_or(Exc::Error(SCREEN_NOT_OPENED))
@@ -167,16 +246,15 @@ impl Hardware {
                     s.pending_offset[1] = Some(y);
                 }
             }
-            SCREEN_TO_FRONT | SCREEN_TO_FRONT_2 | SCREEN_TO_BACK | SCREEN_TO_BACK_2
-            | SCREEN_HIDE | SCREEN_HIDE_2 | SCREEN_SHOW | SCREEN_SHOW_2 => {
+            SCREEN_TO_FRONT | SCREEN_TO_FRONT_2 => {
                 let a = it.inst_args(self, kw)?;
-                let n = if a.is_empty() {
-                    self.cur_screen()?
-                } else {
-                    check_screen(a.int(0))?
-                };
+                self.screen_to_front(if a.is_empty() { None } else { Some(a.int(0)) })?;
+            }
+            SCREEN_TO_BACK | SCREEN_TO_BACK_2 | SCREEN_HIDE | SCREEN_HIDE_2 | SCREEN_SHOW
+            | SCREEN_SHOW_2 => {
+                let a = it.inst_args(self, kw)?;
+                let n = self.screen_or_current(if a.is_empty() { None } else { Some(a.int(0)) })?;
                 ec(match kw.token {
-                    SCREEN_TO_FRONT | SCREEN_TO_FRONT_2 => self.screens.to_front(n),
                     SCREEN_TO_BACK | SCREEN_TO_BACK_2 => self.screens.to_back(n),
                     SCREEN_HIDE | SCREEN_HIDE_2 => self.screens.set_hidden(n, true),
                     _ => self.screens.set_hidden(n, false),
@@ -482,7 +560,7 @@ impl Hardware {
             SCREEN_MODE => Value::Int(self.cur_mut()?.mode() as i32),
             COLOUR_2 => {
                 let n = it.func_args(self, kw)?.int(0);
-                Value::Int(self.cur_mut()?.palette[(n & 31) as usize] as i32)
+                Value::Int(self.colour_fn(n)?)
             }
             SCREEN_WIDTH | SCREEN_HEIGHT | SCREEN_WIDTH_2 | SCREEN_HEIGHT_2 => {
                 let a = it.func_args(self, kw)?;
@@ -531,28 +609,17 @@ impl Hardware {
             X_HARD | Y_HARD | X_SCREEN | Y_SCREEN | X_HARD_2 | Y_HARD_2 | X_SCREEN_2
             | Y_SCREEN_2 => {
                 let a = it.func_args(self, kw)?;
-                let (d3, v) = if a.len() > 1 {
-                    (a.int(0).wrapping_add(1), a.int(1))
+                let (screen, v) = if a.len() > 1 {
+                    (Some(a.int(0)), a.int(1))
                 } else {
-                    self.cur_screen()?;
-                    (0, a.int(0))
+                    (None, a.int(0))
                 };
-                let Some(n) = self.screen_param(d3)? else {
-                    return Ok(Some(Value::Int(ENT_NUL)));
-                };
-                let s = self
-                    .screens
-                    .get(n)
-                    .ok_or(Exc::Error(lib_error(E_NOT_OPENED)))?;
-                // Word arithmetic as in the original.
-                let v = v as i16 as i32;
-                let r = match kw.token {
-                    X_HARD | X_HARD_2 => s.x_hard(v),
-                    Y_HARD | Y_HARD_2 => s.y_hard(v),
-                    X_SCREEN | X_SCREEN_2 => s.x_screen(v),
-                    _ => s.y_screen(v),
-                };
-                Value::Int(r as i16 as i32)
+                Value::Int(match kw.token {
+                    X_HARD | X_HARD_2 => self.x_hard(screen, v)?,
+                    Y_HARD | Y_HARD_2 => self.y_hard(screen, v)?,
+                    X_SCREEN | X_SCREEN_2 => self.x_screen(screen, v)?,
+                    _ => self.y_screen(screen, v)?,
+                })
             }
             SCIN | SCIN_2 => {
                 let a = it.func_args(self, kw)?;
