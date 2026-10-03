@@ -269,3 +269,105 @@ fn radix() {
         );
     }
 }
+
+/// The boundaries of the shortcuts of the conversions (tables, integer
+/// digit accumulation, exact digit steps, the cached scaling): every
+/// exponent with mantissa edges, values next to powers of ten, texts
+/// around 2^24 and the table ends; each value twice in a row (cache hit).
+#[test]
+fn conversion_shortcut_boundaries() {
+    use amos_core::ffp::{POW10_DOWN, POW10_UP};
+    let mut h = H::new();
+    let f = h.inst.get_typed_func::<(i32, i32, i32), i32>(&mut h.store, "float_to_asc").unwrap();
+    let a2 = h.inst.get_typed_func::<(i32, i32), i32>(&mut h.store, "a2ffp").unwrap();
+    let fixes = fixes();
+    let mut xs = vec![0u32, 0x80, 0x8000_0041, 0x8000_00C1, 0xFFFF_FF7F, 0xFFFF_FFFF, 0x8000_0001, 0x8000_0081];
+    for exp in 0..0x80u32 {
+        for m in [0x80_0000u32, 0x80_0001, 0x9F_FFFF, 0xA0_0000, 0xC8_0000, 0xCC_CCCD, 0xF9_FFFF, 0xFF_FFFE, 0xFF_FFFF]
+        {
+            xs.push((m << 8) | exp);
+            xs.push((m << 8) | 0x80 | exp);
+        }
+    }
+    for p in POW10_UP.iter().chain(POW10_DOWN.iter()) {
+        for d in -20i32..=20 {
+            let m = ((p >> 8) as i32 + d) as u32;
+            if (0x80_0000..0x100_0000).contains(&m) {
+                xs.push((m << 8) | (p & 0xFF));
+            }
+        }
+    }
+    for x in xs {
+        for &fix in &fixes {
+            let want = amos_core::ffp::format_ffp(Ffp(x), fix);
+            for _ in 0..2 {
+                h.reset();
+                let a = f.call(&mut h.store, (x as i32, fix.fix_flg() as i32, fix.exp_flg() as i32)).unwrap();
+                assert_eq!(String::from_utf8_lossy(&h.string(a)), want, "x={x:08x} fix={fix:?}");
+            }
+        }
+    }
+    let mut texts: Vec<String> = Vec::new();
+    for n in (16_777_100u32..16_777_300).chain(1_677_700..1_677_800).chain(167_772_000..167_772_100) {
+        texts.extend([n.to_string(), format!("{n}.5"), format!("-{n}e-3"), format!("0.{n}")]);
+    }
+    for e in -120i32..120 {
+        for m in ["1", "9.99", "1.5", "123456789", "0", ".1", "16777217"] {
+            texts.push(format!("{m}e{e}"));
+        }
+    }
+    for digits in 1..40 {
+        let s: String = (0..digits).map(|i| char::from(b'0' + ((i * 7 + 3) % 10) as u8)).collect();
+        texts.extend([s.clone(), format!("9{s}"), format!("{s}.{s}"), format!(".{s}e7")]);
+    }
+    for t in texts {
+        h.reset();
+        let p = h.put(t.as_bytes());
+        let got = a2.call(&mut h.store, (p + 4, t.len() as i32)).unwrap() as u32;
+        assert_eq!(got, amos_core::ffp::ascii_to_ffp(t.as_bytes()).0, "a2ffp {t:?}");
+    }
+}
+
+/// The integer shortcuts of the helpers against the FFP operations:
+/// `mul_ten` (x * 10), `sub_int` ((x - int(x)) * 10) and `norm` (scaling
+/// to [1, 10) by repeated * 10 / 10, with the specialised division).
+#[test]
+fn integer_arithmetic_of_the_helpers() {
+    let mut h = H::new();
+    let mul_ten = h.inst.get_typed_func::<i32, i32>(&mut h.store, "mul_ten").unwrap();
+    let sub_int = h.inst.get_typed_func::<(i32, i32), i32>(&mut h.store, "sub_int").unwrap();
+    let norm = h.inst.get_typed_func::<i32, ()>(&mut h.store, "norm").unwrap();
+    let ten = Ffp::TEN;
+    let step = if cfg!(debug_assertions) { 61 } else { 3 };
+    let mut xs: Vec<u32> = Vec::new();
+    for eb in 0..0x100u32 {
+        let st = if (0x3C..=0x45).contains(&eb) { step } else { step * 64 };
+        xs.extend((0x80_0000u32..0x100_0000).step_by(st as usize).map(|m| (m << 8) | eb));
+        xs.extend([0x1u32, 0x7F_FFFF, 0xFF_FFFF].map(|m| (m << 8) | eb));
+    }
+    let mut r = Rng(0xDEAD_BEEF_0BAD_F00D);
+    xs.extend((0..count(1_000_000)).map(|_| r.next() as u32));
+    for &x in &xs {
+        let got = mul_ten.call(&mut h.store, x as i32).unwrap() as u32;
+        assert_eq!(got, Ffp(x).mul(ten).0, "mul_ten {x:08x}");
+        let d = Ffp(x).to_i32() as i16 as i32;
+        let got = sub_int.call(&mut h.store, (x as i32, d)).unwrap() as u32;
+        assert_eq!(got, Ffp(x).sub(Ffp::from_i32(d)).mul(ten).0, "sub_int {x:08x}");
+        // norm of positive normalised values (as ffp2a calls it).
+        if x & 0x8000_0080 == 0x8000_0000 && x & 0x7F != 0 {
+            let (mut v, mut e) = (Ffp(x), 0);
+            while v.cmp(Ffp::ONE).is_lt() {
+                v = v.mul(ten);
+                e -= 1;
+            }
+            while !v.cmp(ten).is_lt() {
+                v = v.div(ten);
+                e += 1;
+            }
+            norm.call(&mut h.store, x as i32).unwrap();
+            let d = h.mem.data(&h.store);
+            let rd = |o: u32| i32::from_le_bytes(d[o as usize..][..4].try_into().unwrap());
+            assert_eq!((rd(layout::NORM_XN) as u32, rd(layout::NORM_E)), (v.0, e), "norm {x:08x}");
+        }
+    }
+}

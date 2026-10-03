@@ -38,6 +38,13 @@ pub enum N {
     Radix,
     Repeat,
     StrF,
+    Tab,
+    Pow10,
+    HalfDown,
+    Norm,
+    Shape,
+    SubInt,
+    MulTen,
 }
 
 const I: ValType = ValType::I32;
@@ -60,6 +67,13 @@ pub const HELPERS: &[(N, &str, &[ValType], &[ValType])] = &[
     (N::Radix, "radix", &[I, I, I], &[I]),
     (N::Repeat, "repeat", &[I, I], &[I]),
     (N::StrF, "str_f", &[F, I], &[I]),
+    (N::Tab, "tab", &[I], &[I]),
+    (N::Pow10, "pow10", &[I, I], &[I]),
+    (N::HalfDown, "half_down", &[I], &[I]),
+    (N::Norm, "norm", &[I], &[]),
+    (N::Shape, "shape", &[I, I], &[I]),
+    (N::SubInt, "sub_int", &[I, I], &[I]),
+    (N::MulTen, "mul_ten", &[I], &[I]),
 ];
 
 /// Function indices of the helper families and imports used here.
@@ -169,21 +183,28 @@ fn copy(s: &mut InstructionSink) {
 pub fn body(n: N, ix: &Idx, double_const: bool) -> Function {
     let _ = double_const;
     let locals: Vec<(u32, ValType)> = match n {
-        N::Ffp2a => vec![(6, I)],
+        N::Ffp2a => vec![(12, I)],
         N::Clean => vec![(4, I)],
         N::PushExp => vec![],
         N::ExFix => vec![(11, I)],
         N::ExVir => vec![(10, I)],
-        N::F2a => vec![(14, I)],
+        N::F2a => vec![(15, I)],
         N::FloatToAsc => vec![(8, I)],
         N::Dtoa => vec![(16, I), (1, L), (1, F)],
         N::FmtDouble => vec![(6, I)],
         N::Renorm => vec![(3, I)],
-        N::A2ffp => vec![(17, I)],
+        N::A2ffp => vec![(19, I)],
         N::Val => vec![(16, I), (2, L), (1, F)],
         N::Radix => vec![(8, I)],
         N::Repeat => vec![(3, I)],
         N::StrF => vec![(2, I)],
+        N::Tab => vec![],
+        N::Pow10 => vec![(1, I)],
+        N::HalfDown => vec![],
+        N::Norm => vec![(5, I)],
+        N::Shape => vec![(5, I)],
+        N::SubInt => vec![(4, I)],
+        N::MulTen => vec![(3, I)],
     };
     let mut f = Function::new(locals);
     let s = &mut f.instructions();
@@ -203,6 +224,15 @@ pub fn body(n: N, ix: &Idx, double_const: bool) -> Function {
         N::Radix => radix(s, ix),
         N::Repeat => repeat(s, ix),
         N::StrF => str_f(s, ix),
+        N::Tab => tab(s),
+        N::Pow10 => pow10(s, ix),
+        N::HalfDown => half_down(s, ix),
+        N::Norm => norm(s, ix),
+        N::Shape => shape(s, ix),
+        N::SubInt => sub_int(s, ix),
+        N::MulTen => {
+            emit_mul_ten(s, ix, 0, 1, 2, 3);
+        }
     }
     s.end();
     f
@@ -220,32 +250,15 @@ fn ffp2a(s: &mut InstructionSink, ix: &Idx) {
     // ffp_neg: a zero low byte is left alone.
     s.local_get(0).i32_const(0x80).i32_xor().local_get(0).local_get(0).i32_const(0xFF).i32_and().select().local_set(0);
     s.end();
-    fcmp_c(s, ix, 0, 0);
-    s.i32_const(0).i32_gt_s().if_(e());
-    {
-        s.block(e()).loop_(e());
-        fcmp_c(s, ix, 0, ONE);
-        s.i32_const(0).i32_ge_s().br_if(1);
-        s.local_get(0).i32_const(TEN).call(ix.h(H::Mul)).local_set(0);
-        s.local_get(4).i32_const(1).i32_sub().local_set(4);
-        s.br(0).end().end();
-    }
-    s.end();
-    s.block(e()).loop_(e());
-    fcmp_c(s, ix, 0, TEN);
-    s.i32_const(0).i32_lt_s().br_if(1);
-    s.local_get(0).i32_const(TEN).call(ix.h(H::Div)).local_set(0);
-    s.local_get(4).i32_const(1).i32_add().local_set(4);
-    s.br(0).end().end();
-    s.local_get(3).local_get(4).i32_add().local_set(3);
-    s.i32_const(ONE).local_set(6);
-    s.i32_const(1).local_set(7);
-    s.block(e()).loop_(e());
-    s.local_get(7).local_get(3).i32_ge_s().br_if(1);
-    s.local_get(6).i32_const(TEN).call(ix.h(H::Div)).local_set(6);
-    s.local_get(7).i32_const(1).i32_add().local_set(7);
-    s.br(0).end().end();
-    s.local_get(0).local_get(6).i32_const(TWO).call(ix.h(H::Div)).call(ix.h(H::Add)).local_set(0);
+    // Scaled to [1, 10) (cached: Str$ converts the same value twice).
+    s.local_get(0).call(ix.n(N::Norm));
+    hdr_addr(s, layout::NORM_XN);
+    s.i32_load(MemArg { offset: 0, align: 2, memory_index: 0 }).local_set(0);
+    hdr_addr(s, layout::NORM_E);
+    s.i32_load(MemArg { offset: 0, align: 2, memory_index: 0 }).local_set(4);
+    s.local_get(3).local_get(4).i32_add().i32_extend16_s().local_set(3);
+    round_half(s, ix, 0, 3);
+    s.local_set(0);
     fcmp_c(s, ix, 0, TEN);
     s.i32_const(0).i32_ge_s().if_(e());
     s.i32_const(ONE).local_set(0);
@@ -270,20 +283,46 @@ fn ffp2a(s: &mut InstructionSink, ix: &Idx) {
     s.block(e()).loop_(e());
     {
         s.local_get(7).local_get(3).i32_ge_s().br_if(1);
-        s.local_get(0).call(ix.h(H::ToLong)).i32_extend16_s().local_set(8);
+        // The digit d=8 and the next x: (x - d) * 10, done with integers for
+        // a positive normalised x below 16 (`ffp::sub_int_part`,
+        // `ffp::mul_ten`), else by `sub_int`. eb=9 sh=10 m=11 frac=12 z=13
+        // c=14
+        s.block(e());
+        {
+            s.block(e());
+            s.local_get(0).i32_const(0).i32_ge_s().br_if(0);
+            s.local_get(0).i32_const(0xFF).i32_and().local_tee(9).i32_const(0x41).i32_sub().i32_const(3).i32_le_u();
+            s.if_(e());
+            {
+                s.i32_const(0x58).local_get(9).i32_sub().local_set(10);
+                s.local_get(0).i32_const(8).i32_shr_u().local_tee(11).local_get(10).i32_shr_u().local_set(8);
+                s.local_get(11).i32_const(1).local_get(10).i32_shl().i32_const(1).i32_sub().i32_and().local_tee(12);
+                s.i32_eqz().if_(e()).i32_const(0).local_set(0).br(3).end();
+                s.local_get(12).i32_clz().i32_const(8).i32_sub().local_set(13);
+                s.local_get(12).local_get(13).i32_shl().i32_const(8).i32_shl();
+                s.local_get(9).local_get(13).i32_sub().i32_or().local_set(0);
+                emit_mul_ten(s, ix, 0, 11, 9, 14);
+                s.local_set(0).br(2);
+            }
+            s.end();
+            s.local_get(9).i32_const(2).i32_sub().i32_const(0x3E).i32_le_u().if_(e());
+            {
+                s.i32_const(0).local_set(8);
+                emit_mul_ten(s, ix, 0, 11, 9, 14);
+                s.local_set(0).br(2);
+            }
+            s.end();
+            s.end();
+            s.local_get(0).call(ix.h(H::ToLong)).i32_extend16_s().local_set(8);
+            s.local_get(0).local_get(8).call(ix.n(N::SubInt)).local_set(0);
+        }
+        s.end();
         out(s, 2, 5, |s| {
             s.local_get(8).i32_const(48).i32_add();
         });
         s.local_get(7).local_get(4).i32_eq().if_(e());
         outc(s, 2, 5, b'.');
         s.end();
-        s.local_get(0)
-            .local_get(8)
-            .call(ix.h(H::FromLong))
-            .call(ix.h(H::Sub))
-            .i32_const(TEN)
-            .call(ix.h(H::Mul))
-            .local_set(0);
         s.local_get(7).i32_const(1).i32_add().local_set(7);
         s.br(0);
     }
@@ -462,7 +501,7 @@ fn ex_vir(s: &mut InstructionSink, ix: &Idx) {
 }
 
 /// `F2a`. x=0 fix=1 exp=2 dst=3; f=4 len=5 eb=6 prec=7 slen=8 a1=9 p=10
-/// c=11 n=12 d=13 start=14 z=15 zero=16 a=17
+/// c=11 n=12 d=13 start=14 z=15 zero=16 a=17 st=18
 fn f2a(s: &mut InstructionSink, ix: &Idx) {
     s.local_get(2).i32_eqz().local_get(1).i32_const(0).i32_ge_s().i32_and().if_(e());
     {
@@ -480,23 +519,46 @@ fn f2a(s: &mut InstructionSink, ix: &Idx) {
     s.local_get(6).i32_const(0x41).i32_ge_u().if_(ri()).i32_const(7).else_();
     s.local_get(6).i32_const(0x31).i32_ge_u().if_(ri()).i32_const(10).else_().i32_const(22).end();
     s.end().local_set(7);
-    hdr_addr(s, layout::SCR_A);
-    s.local_set(17);
-    s.local_get(0).local_get(7).local_get(17).call(ix.n(N::Ffp2a)).local_set(8);
-    s.i32_const(0).local_set(10);
-    at(s, 17, 8, 10);
-    s.i32_const(b'-' as i32).i32_eq().local_set(9);
-    at(s, 17, 8, 9);
-    s.i32_const(b'0' as i32).i32_ne().if_(e());
+    // What the text of ffp2a(x, prec) starts with (`ffp::ffp2a_shape`), st=18:
+    // n > 0 or -z; read from the text for zero / odd values.
+    s.local_get(0).local_get(7).call(ix.n(N::Shape)).local_set(18);
+    s.local_get(18).i32_const(i32::MIN).i32_eq().if_(e());
     {
-        s.local_get(9).local_set(10);
-        s.block(e()).loop_(e());
+        hdr_addr(s, layout::SCR_A);
+        s.local_set(17);
+        s.local_get(0).local_get(7).local_get(17).call(ix.n(N::Ffp2a)).local_set(8);
+        s.i32_const(0).local_set(10);
         at(s, 17, 8, 10);
-        s.local_set(11);
-        s.local_get(10).i32_const(1).i32_add().local_set(10);
-        s.local_get(11).i32_eqz().local_get(11).i32_const(b'.' as i32).i32_eq().i32_or().br_if(1);
-        s.br(0).end().end();
-        s.local_get(10).local_get(9).i32_sub().local_set(12);
+        s.i32_const(b'-' as i32).i32_eq().local_set(9);
+        at(s, 17, 8, 9);
+        s.i32_const(b'0' as i32).i32_ne().if_(e());
+        {
+            s.local_get(9).local_set(10);
+            s.block(e()).loop_(e());
+            at(s, 17, 8, 10);
+            s.local_set(11);
+            s.local_get(10).i32_const(1).i32_add().local_set(10);
+            s.local_get(11).i32_eqz().local_get(11).i32_const(b'.' as i32).i32_eq().i32_or().br_if(1);
+            s.br(0).end().end();
+            s.local_get(10).local_get(9).i32_sub().local_set(18);
+        }
+        s.else_();
+        {
+            s.local_get(9).i32_const(2).i32_add().local_tee(14).local_set(10);
+            s.block(e()).loop_(e());
+            at(s, 17, 8, 10);
+            s.local_set(11);
+            s.local_get(10).i32_const(1).i32_add().local_set(10);
+            s.local_get(11).i32_eqz().local_get(11).i32_const(b'0' as i32).i32_ne().i32_or().br_if(1);
+            s.br(0).end().end();
+            s.local_get(14).local_get(10).i32_sub().local_set(18);
+        }
+        s.end();
+    }
+    s.end();
+    s.local_get(18).i32_const(0).i32_gt_s().if_(e());
+    {
+        s.local_get(18).local_set(12);
         s.local_get(2).i32_const(0).i32_ne().local_get(12).i32_const(8).i32_ge_s().i32_or().if_(e());
         s.local_get(0).local_get(12).local_get(1).local_get(3).call(ix.n(N::ExFix)).return_();
         s.end();
@@ -514,14 +576,7 @@ fn f2a(s: &mut InstructionSink, ix: &Idx) {
         s.local_get(0).local_get(13).local_get(3).call(ix.n(N::Clean)).return_();
     }
     s.end();
-    s.local_get(9).i32_const(2).i32_add().local_tee(14).local_set(10);
-    s.block(e()).loop_(e());
-    at(s, 17, 8, 10);
-    s.local_set(11);
-    s.local_get(10).i32_const(1).i32_add().local_set(10);
-    s.local_get(11).i32_eqz().local_get(11).i32_const(b'0' as i32).i32_ne().i32_or().br_if(1);
-    s.br(0).end().end();
-    s.local_get(10).local_get(14).i32_sub().local_set(15);
+    s.i32_const(0).local_get(18).i32_sub().local_set(15);
     s.i32_const(0).local_set(16);
     s.local_get(15).i32_const(22).i32_ge_s().if_(e());
     s.i32_const(6).local_set(15);
@@ -906,6 +961,9 @@ fn format_double(s: &mut InstructionSink, ix: &Idx) {
 
 /// `renormalise(x)`: x=0; neg=1 e=2 n=3
 fn renorm(s: &mut InstructionSink, ix: &Idx) {
+    // A normalised value comes back unchanged (`ffp::renormalise`).
+    s.local_get(0).i32_const(0).i32_lt_s().local_get(0).i32_const(0x7F).i32_and().i32_const(0).i32_ne().i32_and();
+    s.if_(e()).local_get(0).return_().end();
     fcmp_c(s, ix, 0, 0);
     s.i32_eqz().if_(e()).i32_const(0).return_().end();
     fcmp_c(s, ix, 0, 0);
@@ -932,7 +990,8 @@ fn renorm(s: &mut InstructionSink, ix: &Idx) {
 }
 
 /// `ascii_to_ffp(text)`: text=0 len=1; i=2 neg=3 fr=4 a5=5 dots=6 fd=7
-/// eneg=8 a4=9 v=10 p=11 q=12 eneg2=13 e=14 pw=15 scale=16 k=17 c=18
+/// eneg=8 a4=9 v=10 p=11 q=12 eneg2=13 e=14 pw=15 scale=16 t=17 c=18 vi=19
+/// exact=20
 fn a2ffp(s: &mut InstructionSink, ix: &Idx) {
     let fr_at = |s: &mut InstructionSink, idx: u32| {
         s.local_get(4).local_get(idx).i32_add().i32_load8_u(b8());
@@ -985,17 +1044,30 @@ fn a2ffp(s: &mut InstructionSink, ix: &Idx) {
     s.end();
     s.local_get(4).local_get(9).i32_add().i32_const(0).i32_store8(b8());
     // Mantissa digits.
+    // (Integers while below 2^24, as `ffp::ascii_to_ffp`.) vi=19 exact=20
     s.i32_const(4).local_set(11);
+    s.i32_const(1).local_set(20);
     s.block(e()).loop_(e());
     {
         fr_at(s, 11);
         s.i32_const(48).i32_sub().local_tee(18).i32_const(9).i32_gt_u().br_if(1);
+        s.local_get(11).i32_const(1).i32_add().local_set(11);
+        s.local_get(20).if_(e());
+        {
+            s.local_get(19).i32_const(10).i32_mul().local_get(18).i32_add().local_tee(17);
+            s.i32_const(amos_core::ffp::EXACT_INT as i32).i32_lt_u().if_(e());
+            s.local_get(17).local_set(19).br(2);
+            s.end();
+            s.i32_const(0).local_set(20);
+            s.local_get(19).call(ix.h(H::FromLong)).local_set(10);
+        }
+        s.end();
         s.local_get(10).i32_const(TEN).call(ix.h(H::Mul)).local_set(10);
         s.local_get(18).call(ix.h(H::FromLong)).local_get(10).call(ix.h(H::Add)).local_set(10);
-        s.local_get(11).i32_const(1).i32_add().local_set(11);
         s.br(0);
     }
     s.end().end();
+    s.local_get(20).if_(e()).local_get(19).call(ix.h(H::FromLong)).local_set(10).end();
     // Exponent.
     fr_at(s, 12);
     s.local_tee(18).i32_const(b'+' as i32).i32_eq().if_(e());
@@ -1018,26 +1090,13 @@ fn a2ffp(s: &mut InstructionSink, ix: &Idx) {
     s.local_get(13).if_(e()).i32_const(0).local_get(14).i32_sub().i32_extend16_s().local_set(14).end();
     s.local_get(8).if_(ri()).i32_const(0).local_get(14).i32_sub().i32_extend16_s().else_().local_get(14).end();
     s.local_get(7).i32_sub().i32_extend16_s().local_set(15);
-    s.i32_const(ONE).local_set(16);
-    s.local_get(15).i32_const(0).i32_lt_s().if_(e());
-    {
-        s.i32_const(0).local_get(15).i32_sub().local_set(17);
-        s.block(e()).loop_(e());
-        s.local_get(17).i32_eqz().br_if(1);
-        s.local_get(16).i32_const(TEN).call(ix.h(H::Div)).local_set(16);
-        s.local_get(17).i32_const(1).i32_sub().local_set(17);
-        s.br(0).end().end();
-    }
+    // 10^pw (tables of the repeated multiplications / divisions).
+    s.local_get(15).i32_const(0).i32_lt_s().if_(ri());
+    s.i32_const(0).local_get(15).i32_sub().i32_const(0).call(ix.n(N::Pow10));
     s.else_();
-    {
-        s.local_get(15).local_set(17);
-        s.block(e()).loop_(e());
-        s.local_get(17).i32_eqz().br_if(1);
-        s.local_get(16).i32_const(TEN).call(ix.h(H::Mul)).local_set(16);
-        s.local_get(17).i32_const(1).i32_sub().local_set(17);
-        s.br(0).end().end();
-    }
+    s.local_get(15).i32_const(1).call(ix.n(N::Pow10));
     s.end();
+    s.local_set(16);
     s.local_get(16).local_get(10).call(ix.h(H::Mul)).call(ix.n(N::Renorm));
     s.local_get(3).i32_const(7).i32_shl().i32_or();
 }
@@ -1352,6 +1411,261 @@ fn str_f(s: &mut InstructionSink, ix: &Idx) {
     s.else_();
     s.local_get(0).call(ix.h(H::F2b)).local_get(2).local_get(3).call(ix.n(N::FloatToAsc));
     s.end();
+}
+
+/// The FFP tables of `amos_core::ffp` (`POW10_UP`, `POW10_DOWN`,
+/// `HALF_DOWN`), one after the other.
+fn table() -> Vec<u32> {
+    use amos_core::ffp::{HALF_DOWN, POW10_DOWN, POW10_UP};
+    POW10_UP.iter().chain(POW10_DOWN.iter()).chain(HALF_DOWN.iter()).copied().collect()
+}
+
+const TLEN: i32 = amos_core::ffp::POW10_LEN as i32;
+
+/// `tab(i)`: entry `i` of `table()` (a `br_table` over constants).
+fn tab(s: &mut InstructionSink) {
+    let t = table();
+    let n = t.len() as u32;
+    for _ in 0..=n {
+        s.block(e());
+    }
+    s.local_get(0).br_table(0..n, n);
+    for v in t {
+        s.end();
+        s.i32_const(v as i32).return_();
+    }
+    s.end();
+    s.i32_const(0);
+}
+
+/// `pow10(k, up)`: 1.0 multiplied (`up`) or divided `k` times by 10 in FFP
+/// (`ffp::pow10`). k=0 up=1; v=2
+fn pow10(s: &mut InstructionSink, ix: &Idx) {
+    s.local_get(0).i32_const(TLEN).i32_lt_u().if_(e());
+    s.local_get(0).local_get(1).if_(ri()).i32_const(0).else_().i32_const(TLEN).end().i32_add();
+    s.call(ix.n(N::Tab)).return_();
+    s.end();
+    s.i32_const(TLEN - 1).local_get(1).if_(ri()).i32_const(0).else_().i32_const(TLEN).end().i32_add();
+    s.call(ix.n(N::Tab)).local_set(2);
+    s.local_get(0).i32_const(TLEN - 1).i32_sub().local_set(0);
+    s.block(e()).loop_(e());
+    s.local_get(0).i32_eqz().br_if(1);
+    s.local_get(1).if_(e());
+    s.local_get(2).i32_const(TEN).call(ix.h(H::Mul)).local_set(2);
+    s.else_();
+    s.local_get(2).i32_const(TEN).call(ix.h(H::Div)).local_set(2);
+    s.end();
+    s.local_get(0).i32_const(1).i32_sub().local_set(0);
+    s.br(0).end().end();
+    s.local_get(2);
+}
+
+/// `half_down(k)`: `pow10(k, false) / 2` (the rounding of `ffp2a`). k=0
+fn half_down(s: &mut InstructionSink, ix: &Idx) {
+    s.local_get(0).i32_const(TLEN).i32_lt_u().if_(ri());
+    s.local_get(0).i32_const(2 * TLEN).i32_add().call(ix.n(N::Tab));
+    s.else_();
+    s.local_get(0).i32_const(0).call(ix.n(N::Pow10)).i32_const(TWO).call(ix.h(H::Div));
+    s.end();
+}
+
+/// Pushes `ffp_cmp(x, c) < 0` for a constant `c` with a positive exponent
+/// byte: the exponent bytes compare as signed bytes, then the words.
+fn emit_lt_const(s: &mut InstructionSink, x: u32, c: i32) {
+    let cb = c & 0xFF;
+    s.local_get(x).i32_extend8_s().i32_const(cb).i32_lt_s();
+    s.local_get(x).i32_extend8_s().i32_const(cb).i32_eq().local_get(x).i32_const(c).i32_lt_s().i32_and();
+    s.i32_or();
+}
+
+/// Pushes `ffp_div(x, TEN)` (`ffp::div_ten`). t1..t3: scratch locals.
+fn emit_div_ten(s: &mut InstructionSink, ix: &Idx, x: u32, d4b: u32, m: u32, q1: u32) {
+    s.block(ri());
+    {
+        s.local_get(x).i32_eqz().if_(e()).i32_const(0).br(1).end();
+        // d4b = (x << 1 ^ 0x80) as i8 - 8, falling back on overflow.
+        s.local_get(x).i32_const(1).i32_shl().i32_const(0x80).i32_xor().i32_extend8_s().i32_const(8).i32_sub();
+        s.local_tee(d4b).i32_const(-128).i32_lt_s().if_(e());
+        s.local_get(x).i32_const(TEN).call(ix.h(H::Div)).br(1);
+        s.end();
+        s.local_get(x).i32_const(!0xFF).i32_and().local_set(m);
+        s.local_get(m).i32_const(16).i32_shr_u().i32_const(0xA000).i32_sub().i32_const(0x8000).i32_and().i32_eqz();
+        s.if_(e());
+        {
+            s.local_get(d4b).i32_const(125).i32_gt_s().if_(e());
+            s.local_get(x).i32_const(TEN).call(ix.h(H::Div)).br(2);
+            s.end();
+            s.local_get(d4b).i32_const(2).i32_add().local_set(d4b);
+            s.local_get(m).i32_const(1).i32_shr_u().local_set(m);
+        }
+        s.end();
+        s.local_get(m).i32_const(0xA000).i32_div_u().local_tee(q1).i32_const(0xFFFF).i32_gt_u().if_(e());
+        s.local_get(x).i32_const(TEN).call(ix.h(H::Div)).br(1);
+        s.end();
+        // eb (into d4b) = sign | ((d4b ^ 0x80) & 0xFF) >> 1
+        s.local_get(x).i32_const(0x80).i32_and();
+        s.local_get(d4b)
+            .i32_const(0x80)
+            .i32_xor()
+            .i32_const(0xFF)
+            .i32_and()
+            .i32_const(1)
+            .i32_shr_u()
+            .i32_or()
+            .local_set(d4b);
+        // d5 (into m) = q1 << 16 | ((m % $A000) << 16) / $A000
+        s.local_get(q1).i32_const(16).i32_shl();
+        s.local_get(m)
+            .i32_const(0xA000)
+            .i32_rem_u()
+            .i32_const(16)
+            .i32_shl()
+            .i32_const(0xA000)
+            .i32_div_u()
+            .i32_or()
+            .local_set(m);
+        s.local_get(q1).i32_const(0x8000).i32_and().i32_eqz().if_(e());
+        s.local_get(m).local_get(m).i32_add().local_set(m);
+        s.local_get(d4b).i32_const(1).i32_sub().i32_const(0xFF).i32_and().local_set(d4b);
+        s.end();
+        s.local_get(d4b).i32_eqz().if_(e()).i32_const(0).br(1).end();
+        s.local_get(m).i32_const(0x80).i32_add().i32_const(!0xFF).i32_and().local_get(d4b).i32_or();
+    }
+    s.end();
+}
+
+/// `norm(x)`: `ffp2a_norm` of a positive `x` into `NORM_XN` / `NORM_E`,
+/// unless `x` is `NORM_KEY` (done last time). x=0; v=1 e=2 t=3..6
+fn norm(s: &mut InstructionSink, ix: &Idx) {
+    let ld = |s: &mut InstructionSink, off: u32| {
+        hdr_addr(s, off);
+        s.i32_load(MemArg { offset: 0, align: 2, memory_index: 0 });
+    };
+    let st = |s: &mut InstructionSink, off: u32, l: u32| {
+        hdr_addr(s, off);
+        s.local_get(l).i32_store(MemArg { offset: 0, align: 2, memory_index: 0 });
+    };
+    s.local_get(0);
+    ld(s, layout::NORM_KEY);
+    s.i32_eq().if_(e()).return_().end();
+    s.local_get(0).local_set(1);
+    fcmp_c(s, ix, 1, 0);
+    s.i32_const(0).i32_gt_s().if_(e());
+    {
+        s.block(e()).loop_(e());
+        emit_lt_const(s, 1, ONE);
+        s.i32_eqz().br_if(1);
+        s.local_get(1).call(ix.n(N::MulTen)).local_set(1);
+        s.local_get(2).i32_const(1).i32_sub().local_set(2);
+        s.br(0).end().end();
+    }
+    s.end();
+    s.block(e()).loop_(e());
+    emit_lt_const(s, 1, TEN);
+    s.br_if(1);
+    emit_div_ten(s, ix, 1, 3, 4, 5);
+    s.local_set(1);
+    s.local_get(2).i32_const(1).i32_add().local_set(2);
+    s.br(0).end().end();
+    st(s, layout::NORM_KEY, 0);
+    st(s, layout::NORM_XN, 1);
+    st(s, layout::NORM_E, 2);
+}
+
+/// Pushes `ndig` of `ffp2a` for precision `prec` and exponent `e`.
+fn ndig(s: &mut InstructionSink, prec: u32, e: u32) {
+    s.local_get(prec).i32_const(0).i32_le_s().if_(ri()).i32_const(1).else_();
+    s.local_get(prec)
+        .i32_const(22)
+        .i32_gt_s()
+        .if_(ri())
+        .i32_const(23)
+        .else_()
+        .local_get(prec)
+        .i32_const(1)
+        .i32_add()
+        .end();
+    s.end();
+    s.local_get(e).i32_add().i32_extend16_s();
+}
+
+/// Pushes `x + half_down(max(ndig - 1, 0))` (the rounding of `ffp2a`).
+fn round_half(s: &mut InstructionSink, ix: &Idx, x: u32, ndig: u32) {
+    s.local_get(x);
+    s.local_get(ndig).i32_const(1).i32_sub().i32_const(0).local_get(ndig).i32_const(1).i32_gt_s().select();
+    s.call(ix.n(N::HalfDown)).call(ix.h(H::Add));
+}
+
+/// `shape(x, prec)`: `ffp2a_shape` (`n` > 0, or `-z`), `i32::MIN` when `x`
+/// is zero or not normalised (the caller reads the text instead).
+/// x=0 prec=1; e=2 nd=3 v=4 t=5 u=6
+fn shape(s: &mut InstructionSink, ix: &Idx) {
+    s.local_get(0).i32_const(0).i32_ge_s().local_get(0).i32_const(0x7F).i32_and().i32_eqz().i32_or();
+    s.if_(e()).i32_const(i32::MIN).return_().end();
+    s.local_get(0).i32_const(!0x80).i32_and().call(ix.n(N::Norm));
+    hdr_addr(s, layout::NORM_XN);
+    s.i32_load(MemArg { offset: 0, align: 2, memory_index: 0 }).local_set(4);
+    hdr_addr(s, layout::NORM_E);
+    s.i32_load(MemArg { offset: 0, align: 2, memory_index: 0 }).local_set(2);
+    ndig(s, 1, 2);
+    s.local_set(3);
+    round_half(s, ix, 4, 3);
+    s.i32_const(TEN).call(ix.h(H::Cmp)).i32_const(0).i32_ge_s().if_(e());
+    s.local_get(2).i32_const(1).i32_add().local_set(2);
+    s.end();
+    s.local_get(2).i32_const(0).i32_ge_s().if_(e()).local_get(2).i32_const(2).i32_add().return_().end();
+    s.local_get(3).i32_const(0).i32_lt_s().if_(e());
+    s.local_get(2).local_get(3).i32_sub().i32_extend16_s().local_set(2);
+    s.end();
+    // -(max(-1 - e, 0) + 1)
+    s.i32_const(-1).local_get(2).i32_sub().local_tee(5).i32_const(0).local_get(5).i32_const(0).i32_gt_s().select();
+    s.i32_const(1).i32_add().local_set(5);
+    s.i32_const(0).local_get(5).i32_sub();
+}
+
+/// Pushes `ffp_mul(x, TEN)` (`ffp::mul_ten`): integer arithmetic for a
+/// positive normalised `x` with exponent byte in [2, 0x7B].
+fn emit_mul_ten(s: &mut InstructionSink, ix: &Idx, x: u32, d7: u32, eb: u32, c: u32) {
+    s.block(ri());
+    s.local_get(x).i32_const(0xFF).i32_and().local_tee(eb).i32_const(2).i32_sub().i32_const(0x79).i32_gt_u();
+    s.local_get(x).i32_const(0).i32_ge_s().i32_or().if_(e());
+    s.local_get(x).i32_const(TEN).call(ix.h(H::Mul)).br(1);
+    s.end();
+    s.local_get(x).i32_const(8).i32_shr_u().i32_const(160).i32_mul().local_set(d7);
+    s.local_get(eb).i32_const(4).i32_add().local_set(eb);
+    s.local_get(d7).i32_const(0).i32_lt_s().if_(e());
+    s.local_get(d7).i32_const(0x80).i32_add().i32_const(!0xFF).i32_and().local_get(eb).i32_or().br(1);
+    s.end();
+    s.local_get(eb).i32_const(1).i32_sub().local_set(eb);
+    s.local_get(d7).i32_const(0x40).i32_add().local_tee(d7).i32_const(0).i32_lt_s().local_set(c);
+    s.local_get(d7).local_get(d7).i32_add().local_set(d7);
+    s.local_get(c).if_(e());
+    s.local_get(d7).i32_const(1).i32_shr_u().i32_const(i32::MIN).i32_or().local_set(d7);
+    s.local_get(eb).i32_const(1).i32_add().local_set(eb);
+    s.end();
+    s.local_get(d7).i32_const(!0xFF).i32_and().local_get(eb).i32_or();
+    s.end();
+}
+
+/// `sub_int(x, d)`: the step of `ffp2a`'s digit loop, `(x - d) * 10` with
+/// `d` the integer part of `x` (`ffp::sub_int_part` then `ffp::mul_ten`).
+/// x=0 d=1; eb=2 frac=3 sh=4 c=5
+fn sub_int(s: &mut InstructionSink, ix: &Idx) {
+    s.block(e());
+    {
+        s.local_get(0).i32_const(0xFF).i32_and().local_tee(2).i32_const(0x41).i32_sub().i32_const(3).i32_gt_u();
+        s.local_get(0).i32_const(0).i32_ge_s().i32_or().if_(e());
+        s.local_get(0).local_get(1).call(ix.h(H::FromLong)).call(ix.h(H::Sub)).local_set(0).br(1);
+        s.end();
+        s.local_get(0).i32_const(8).i32_shr_u();
+        s.i32_const(1).i32_const(24 + 0x40).local_get(2).i32_sub().i32_shl().i32_const(1).i32_sub().i32_and();
+        s.local_tee(3).i32_eqz().if_(e()).i32_const(0).return_().end();
+        s.local_get(3).i32_clz().i32_const(8).i32_sub().local_set(4);
+        s.local_get(3).local_get(4).i32_shl().i32_const(8).i32_shl();
+        s.local_get(2).local_get(4).i32_sub().i32_or().local_set(0);
+    }
+    s.end();
+    emit_mul_ten(s, ix, 0, 3, 2, 5);
 }
 
 /// A module exporting the helpers (and `a2ffp` etc.) for tests: imports

@@ -116,6 +116,12 @@ pub const PE_SCOPE: u32 = 52;
 pub const PE_PREV: u32 = 56;
 pub const MIRROR_WORDS: [u32; 9] =
     [TOP_KIND, FOR_ADDR, FOR_STEP, FOR_LIMIT, FOR_BODY, LOOP_LO, LOOP_HI, TOP_START, TOP_START_POINT];
+/// Used by the module only: the last value its `ffp2a` helper scaled to
+/// `[1, 10)` (after the sign), the scaled value and its decimal exponent
+/// (`Str$` converts the same value twice; zero memory is the entry of 0).
+pub const NORM_KEY: u32 = 180;
+pub const NORM_XN: u32 = 184;
+pub const NORM_E: u32 = 188;
 /// Scratch buffers of the number formatting helpers (128 bytes each).
 pub const SCR_A: u32 = 192;
 pub const SCR_B: u32 = 320;

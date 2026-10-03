@@ -31,12 +31,12 @@ const TEN: u32 = 0xA000_0044;
 const TWO24: u32 = 0x8000_0059;
 
 #[inline]
-fn lb(r: u32) -> u8 {
+const fn lb(r: u32) -> u8 {
     r as u8
 }
 
 #[inline]
-fn setb(r: u32, b: u8) -> u32 {
+const fn setb(r: u32, b: u8) -> u32 {
     (r & !0xFF) | b as u32
 }
 
@@ -195,7 +195,7 @@ fn normalise_sub(d7: u32, d4b: u8, d5b: u8) -> u32 {
 // Multiply (L2858A)
 // ---------------------------------------------------------------------------
 
-fn ffp_mul(x: u32, y: u32) -> u32 {
+const fn ffp_mul(x: u32, y: u32) -> u32 {
     let d5b = lb(x);
     if d5b == 0 {
         return x;
@@ -253,7 +253,7 @@ fn ffp_mul(x: u32, y: u32) -> u32 {
 // ---------------------------------------------------------------------------
 
 /// DIVU.W semantics: `None` on overflow (destination unchanged).
-fn divu(d: u32, s: u32) -> Option<u32> {
+const fn divu(d: u32, s: u32) -> Option<u32> {
     let s = s & 0xFFFF;
     let q = d / s;
     if q > 0xFFFF {
@@ -262,7 +262,7 @@ fn divu(d: u32, s: u32) -> Option<u32> {
     Some(((d % s) << 16) | q)
 }
 
-fn ffp_div(x: u32, y: u32) -> u32 {
+const fn ffp_div(x: u32, y: u32) -> u32 {
     let d5b = lb(y);
     if d5b == 0 {
         // Division by zero traps in the original; callers check first.
@@ -511,6 +511,61 @@ impl Ffp {
 }
 
 // ---------------------------------------------------------------------------
+// Tables of the conversions
+// ---------------------------------------------------------------------------
+
+/// Entries of the power of ten tables.
+pub const POW10_LEN: usize = 48;
+
+const fn pow10_table(up: bool) -> [u32; POW10_LEN] {
+    let mut t = [0; POW10_LEN];
+    let mut v = ONE;
+    let mut k = 0;
+    while k < POW10_LEN {
+        t[k] = v;
+        v = if up { ffp_mul(v, TEN) } else { ffp_div(v, TEN) };
+        k += 1;
+    }
+    t
+}
+
+const fn half_table() -> [u32; POW10_LEN] {
+    let mut t = [0; POW10_LEN];
+    let mut k = 0;
+    while k < POW10_LEN {
+        t[k] = ffp_div(POW10_DOWN[k], TWO);
+        k += 1;
+    }
+    t
+}
+
+/// `1.0` multiplied `k` times by 10 in FFP (`POW10_UP[k]`), divided `k`
+/// times by 10 (`POW10_DOWN[k]`), and that divided by 2 (`HALF_DOWN[k]`):
+/// the values `a2ffp` and `ffp2a` compute with loops that do not depend on
+/// their input, so a table of the same FFP results gives identical values.
+pub const POW10_UP: [u32; POW10_LEN] = pow10_table(true);
+pub const POW10_DOWN: [u32; POW10_LEN] = pow10_table(false);
+pub const HALF_DOWN: [u32; POW10_LEN] = half_table();
+
+/// `1.0` multiplied (`up`) or divided `k` times by 10, as the loops do.
+fn pow10(k: u32, up: bool) -> u32 {
+    let t = if up { &POW10_UP } else { &POW10_DOWN };
+    if (k as usize) < POW10_LEN {
+        return t[k as usize];
+    }
+    let mut v = t[POW10_LEN - 1];
+    for _ in POW10_LEN as u32 - 1..k {
+        v = if up { ffp_mul(v, TEN) } else { ffp_div(v, TEN) };
+    }
+    v
+}
+
+/// Largest integer accumulated exactly by `a2ffp`'s digit loop: below 2^24
+/// `v * 10 + digit` is exact in FFP (the mantissa holds it), so integer
+/// arithmetic gives the same value.
+pub const EXACT_INT: u32 = 1 << 24;
+
+// ---------------------------------------------------------------------------
 // Text -> FFP (a2ffp)
 // ---------------------------------------------------------------------------
 
@@ -562,13 +617,29 @@ pub fn ascii_to_ffp(text: &[u8]) -> Ffp {
         }
     }
     frame[a4] = 0;
-    // L280A8: digits of the mantissa.
+    // L280A8: digits of the mantissa (`v = v * 10 + digit` in FFP; exact,
+    // so done with integers, while the value stays below 2^24).
     let mut v = 0u32;
+    let mut vi = 0u32;
+    let mut exact = true;
     let mut p = mbuf;
     while (frame[p] as i8) >= b'0' as i8 && frame[p] <= b'9' {
-        v = ffp_mul(v, TEN);
-        v = ffp_add(ffp_from_long((frame[p] - b'0') as i32), v);
+        let d = (frame[p] - b'0') as u32;
         p += 1;
+        if exact {
+            let n = vi * 10 + d;
+            if n < EXACT_INT {
+                vi = n;
+                continue;
+            }
+            exact = false;
+            v = ffp_from_long(vi as i32);
+        }
+        v = ffp_mul(v, TEN);
+        v = ffp_add(ffp_from_long(d as i32), v);
+    }
+    if exact {
+        v = ffp_from_long(vi as i32);
     }
     // L28654: exponent.
     let mut q = 0;
@@ -581,33 +652,26 @@ pub fn ascii_to_ffp(text: &[u8]) -> Ffp {
     }
     let mut e: i16 = 0;
     while (frame[q] as i8) >= b'0' as i8 && frame[q] <= b'9' {
-        e = e
-            .wrapping_mul(10)
-            .wrapping_add(frame[q] as i16)
-            .wrapping_sub(0x30);
+        e = e.wrapping_mul(10).wrapping_add(frame[q] as i16).wrapping_sub(0x30);
         q += 1;
     }
     if eneg2 {
         e = e.wrapping_neg();
     }
     let pw = if eneg { e.wrapping_neg() } else { e }.wrapping_sub(fd);
-    // L28040: 10^pw.
-    let mut scale = ONE;
-    if pw < 0 {
-        for _ in 0..-(pw as i32) {
-            scale = ffp_div(scale, TEN);
-        }
-    } else {
-        for _ in 0..pw {
-            scale = ffp_mul(scale, TEN);
-        }
-    }
+    // L28040: 10^pw (repeated multiplications or divisions of 1.0).
+    let scale = if pw < 0 { pow10(-(pw as i32) as u32, false) } else { pow10(pw as u32, true) };
     let r = renormalise(ffp_mul(scale, v));
     Ffp(if neg { r | 0x80 } else { r })
 }
 
-/// `L28116`: rebuilds an FFP value through an integer mantissa.
+/// `L28116`: rebuilds an FFP value through an integer mantissa. The
+/// halvings / doublings and the final conversion are exact, so a normalised
+/// value (mantissa bit 31 set, exponent not 0) comes back unchanged.
 fn renormalise(x: u32) -> u32 {
+    if x & 0x8000_0000 != 0 && x & 0x7F != 0 {
+        return x;
+    }
     let mut x = x;
     if ffp_cmp(x, 0) == Ordering::Equal {
         return 0;
@@ -692,44 +756,71 @@ impl NegIf for i32 {
     }
 }
 
-/// `ffp2a` (`+Lib.s:26226`): C style ftoa computed in FFP.
-fn ffp2a(x: u32, prec: i16) -> Vec<u8> {
-    let mut out = Vec::new();
+/// `ffp2a`'s first part: the sign, and the value scaled to `[1, 10)` with
+/// its decimal exponent (repeated multiplications / divisions by 10). The
+/// formatting routines convert the same value up to twice: this part is
+/// done once.
+#[derive(Clone, Copy)]
+struct Norm {
+    neg: bool,
+    x: u32,
+    e: i16,
+}
+
+fn ffp2a_norm(x: u32) -> Norm {
     let mut x = x;
-    let mut ndig: i16 = if prec <= 0 {
+    let mut e: i16 = 0;
+    let neg = ffp_cmp(x, 0) == Ordering::Less;
+    if neg {
+        x = ffp_neg(x);
+    }
+    if ffp_cmp(x, 0) == Ordering::Greater {
+        while ffp_cmp(x, ONE) == Ordering::Less {
+            x = mul_ten(x);
+            e -= 1;
+        }
+    }
+    while ffp_cmp(x, TEN) != Ordering::Less {
+        x = div_ten(x);
+        e += 1;
+    }
+    Norm { neg, x, e }
+}
+
+/// Number of digits of `ffp2a` and its rounding: `x` plus half a unit of
+/// the last digit (`10^-(ndig-1) / 2`, built by divisions from 1.0: a
+/// table), and the exponent after a carry to 10.
+fn ffp2a_round(n: &Norm, prec: i16) -> (u32, i16, i16) {
+    let ndig: i16 = if prec <= 0 {
         1
     } else if prec > 22 {
         23
     } else {
         prec + 1
     };
-    let mut e: i16 = 0;
-    if ffp_cmp(x, 0) == Ordering::Less {
-        out.push(b'-');
-        x = ffp_neg(x);
-    }
-    if ffp_cmp(x, 0) == Ordering::Greater {
-        while ffp_cmp(x, ONE) == Ordering::Less {
-            x = ffp_mul(x, TEN);
-            e -= 1;
-        }
-    }
-    while ffp_cmp(x, TEN) != Ordering::Less {
-        x = ffp_div(x, TEN);
-        e += 1;
-    }
-    ndig = ndig.wrapping_add(e);
-    let mut r = ffp_from_long(1);
-    let mut i: i16 = 1;
-    while i < ndig {
-        r = ffp_div(r, TEN);
-        i += 1;
-    }
-    x = ffp_add(x, ffp_div(r, TWO));
+    let ndig = ndig.wrapping_add(n.e);
+    let k = if ndig > 1 { ndig as usize - 1 } else { 0 };
+    let half = if k < POW10_LEN { HALF_DOWN[k] } else { ffp_div(pow10(k as u32, false), TWO) };
+    let mut x = ffp_add(n.x, half);
+    let mut e = n.e;
     if ffp_cmp(x, TEN) != Ordering::Less {
         x = ONE;
         e += 1;
     }
+    (x, e, ndig)
+}
+
+/// `ffp2a` (`+Lib.s:26226`): C style ftoa computed in FFP.
+fn ffp2a(x: u32, prec: i16) -> Vec<u8> {
+    ffp2a_n(&ffp2a_norm(x), prec)
+}
+
+fn ffp2a_n(n: &Norm, prec: i16) -> Vec<u8> {
+    let mut out = Vec::with_capacity(32);
+    if n.neg {
+        out.push(b'-');
+    }
+    let (mut x, mut e, ndig) = ffp2a_round(n, prec);
     if e < 0 {
         out.extend_from_slice(b"0.");
         if ndig < 0 {
@@ -748,11 +839,108 @@ fn ffp2a(x: u32, prec: i16) -> Vec<u8> {
         if i == e {
             out.push(b'.');
         }
-        x = ffp_sub(x, ffp_from_long(d as i32));
-        x = ffp_mul(x, TEN);
+        x = mul_ten(sub_int_part(x, d as i32));
         i += 1;
     }
     out
+}
+
+/// `ffp_mul(x, TEN)` for a positive normalised `x` with exponent byte in
+/// `[2, 0x7B]` (else the general routine): the mantissa product is
+/// `M * 0xA000 / 256 = M * 160` exactly (the low word of 10 is 0), then
+/// the routine's rounding and normalisation.
+fn mul_ten(x: u32) -> u32 {
+    let eb = x & 0xFF;
+    if !(2..=0x7B).contains(&eb) || x & 0x8000_0000 == 0 {
+        return ffp_mul(x, TEN);
+    }
+    let mut d7 = (x >> 8) * 160;
+    let mut eb = eb + 4;
+    if d7 & 0x8000_0000 != 0 {
+        d7 += 0x80;
+        return (d7 & !0xFF) | eb;
+    }
+    eb -= 1;
+    d7 += 0x40;
+    let c = d7 & 0x8000_0000 != 0;
+    d7 = d7.wrapping_add(d7);
+    if c {
+        d7 = (d7 >> 1) | 0x8000_0000;
+        eb += 1;
+    }
+    (d7 & !0xFF) | eb
+}
+
+/// `ffp_div(x, TEN)` with the divisor folded in: 10 has a zero low
+/// mantissa word, so the correction step disappears and the two DIVU.W
+/// give `m * 2^16 / $A000` exactly (falls back where a DIVU.W would
+/// overflow or the exponent leaves the range).
+fn div_ten(x: u32) -> u32 {
+    if x == 0 {
+        return 0;
+    }
+    let a = ((lb(x) << 1) ^ 0x80) as i8;
+    let (diff, ov) = a.overflowing_sub(8);
+    if ov {
+        return ffp_div(x, TEN);
+    }
+    let mut d4b = diff as u8;
+    let mut m = x & !0xFF;
+    if ((m >> 16).wrapping_sub(0xA000) & 0x8000) == 0 {
+        if (d4b as i8).checked_add(2).is_none() {
+            return ffp_div(x, TEN);
+        }
+        d4b = d4b.wrapping_add(2);
+        m >>= 1;
+    }
+    let q1 = m / 0xA000;
+    if q1 > 0xFFFF {
+        return ffp_div(x, TEN);
+    }
+    let q2 = ((m % 0xA000) << 16) / 0xA000;
+    let mut eb = ((lb(x) ^ 0x44) & 0x80) | ((d4b ^ 0x80) >> 1);
+    let mut d5 = (q1 << 16) | q2;
+    if q1 & 0x8000 == 0 {
+        d5 = d5.wrapping_add(d5);
+        eb = eb.wrapping_sub(1);
+    }
+    d5 = d5.wrapping_add(0x80);
+    if eb == 0 {
+        return 0;
+    }
+    setb(d5, eb)
+}
+
+/// `x - d` (`ffp_sub(x, ffp_from_long(d))`) with `d` the integer part of
+/// `x`. For a positive normalised `x` in `[1, 16)` the difference is exact
+/// (the fraction bits of the mantissa), so it is computed directly.
+fn sub_int_part(x: u32, d: i32) -> u32 {
+    let eb = x & 0xFF;
+    if !(0x41..=0x44).contains(&eb) || x & 0x8000_0000 == 0 {
+        return ffp_sub(x, ffp_from_long(d));
+    }
+    let int_bits = eb - 0x40;
+    let frac = (x >> 8) & ((1 << (24 - int_bits)) - 1);
+    if frac == 0 {
+        return 0;
+    }
+    let shift = frac.leading_zeros() - 8;
+    ((frac << shift) << 8) | (eb - shift)
+}
+
+/// What `F2a` reads of `ffp2a(x, prec)` without making the text, for a
+/// normalised non-zero `x`: `Ok(n)` when it starts with a digit other than
+/// 0 (`n`: integer digits + 1, the '.' following them), `Err(z)` when it
+/// starts with "0." (`z`: zeros after "0." + 1, a digit other than 0 or the
+/// end following them). The first digit of a non-zero value is 1..9.
+fn ffp2a_shape(n: &Norm, prec: i16) -> Result<i16, i16> {
+    let (_, e, ndig) = ffp2a_round(n, prec);
+    if e >= 0 {
+        // ndig > e: the '.' follows digit e.
+        return Ok(e + 2);
+    }
+    let e = if ndig < 0 { e.wrapping_sub(ndig) } else { e };
+    Err((-1 - e).max(0) + 1)
 }
 
 /// `F2a` (`+Lib.s:25976`): `fix` = FixFlg word, `exp` = ExpFlg word.
@@ -773,7 +961,36 @@ fn f2a(x: u32, fix: i16, exp: i16) -> Vec<u8> {
     } else {
         22
     };
-    let s = ffp2a(x, prec);
+    let nrm = ffp2a_norm(x);
+    let shape =
+        if x & 0x8000_0000 != 0 && eb != 0 { ffp2a_shape(&nrm, prec) } else { text_shape(&ffp2a_n(&nrm, prec)) };
+    match shape {
+        Ok(n) => {
+            if exp != 0 || n >= 8 {
+                return ex_fix(&nrm, n, fix);
+            }
+            let d = (7 - n).min(5);
+            clean(&nrm, d)
+        }
+        Err(z) => {
+            let mut z = z;
+            let mut zero = false;
+            if z >= 22 {
+                z = 6;
+                zero = true;
+            } else if z >= 4 {
+                return ex_vir(&nrm, z, fix, false);
+            }
+            if exp != 0 {
+                return ex_vir(&nrm, z, fix, zero);
+            }
+            clean(&nrm, z + 6)
+        }
+    }
+}
+
+/// `F2a` reading the text of `ffp2a` (see `ffp2a_shape`).
+fn text_shape(s: &[u8]) -> Result<i16, i16> {
     let a1 = usize::from(s.first() == Some(&b'-'));
     let at = |i: usize| s.get(i).copied().unwrap_or(0);
     if at(a1) != b'0' {
@@ -786,12 +1003,7 @@ fn f2a(x: u32, fix: i16, exp: i16) -> Vec<u8> {
                 break;
             }
         }
-        let n = (p - a1) as i16;
-        if exp != 0 || n >= 8 {
-            return ex_fix(x, n, fix);
-        }
-        let d = (7 - n).min(5);
-        return clean(x, d);
+        return Ok((p - a1) as i16);
     }
     // Number < 1: count the zeros after "0." (+1).
     let start = a1 + 2;
@@ -803,23 +1015,12 @@ fn f2a(x: u32, fix: i16, exp: i16) -> Vec<u8> {
             break;
         }
     }
-    let mut z = (p - start) as i16;
-    let mut zero = false;
-    if z >= 22 {
-        z = 6;
-        zero = true;
-    } else if z >= 4 {
-        return ex_vir(x, z, fix, false);
-    }
-    if exp != 0 {
-        return ex_vir(x, z, fix, zero);
-    }
-    clean(x, z + 6)
+    Err((p - start) as i16)
 }
 
 /// `Clean`: ffp2a then strip trailing zeros (and a bare point).
-fn clean(x: u32, dec: i16) -> Vec<u8> {
-    let s = ffp2a(x, dec);
+fn clean(x: &Norm, dec: i16) -> Vec<u8> {
+    let mut s = ffp2a_n(x, dec);
     if let Some(dot) = s.iter().position(|&c| c == b'.') {
         let mut end = dot;
         for (k, &c) in s.iter().enumerate().skip(dot + 1) {
@@ -827,10 +1028,9 @@ fn clean(x: u32, dec: i16) -> Vec<u8> {
                 end = k + 1;
             }
         }
-        s[..end].to_vec()
-    } else {
-        s
+        s.truncate(end);
     }
+    s
 }
 
 fn push_exp(out: &mut Vec<u8>, sign: u8, mut d2: i16) {
@@ -845,10 +1045,10 @@ fn push_exp(out: &mut Vec<u8>, sign: u8, mut d2: i16) {
 }
 
 /// `ExFix1`: exponential form for numbers >= 1.
-fn ex_fix(x: u32, n: i16, fix: i16) -> Vec<u8> {
+fn ex_fix(x: &Norm, n: i16, fix: i16) -> Vec<u8> {
     let d2 = n - 2;
     let n2 = n.min(7);
-    let s = ffp2a(x, 9 - n2);
+    let s = ffp2a_n(x, 9 - n2);
     let mut out = Vec::new();
     let mut p = 0;
     if s.first() == Some(&b'-') {
@@ -889,12 +1089,8 @@ fn ex_fix(x: u32, n: i16, fix: i16) -> Vec<u8> {
 }
 
 /// `ExVir1`: exponential form for numbers < 1.
-fn ex_vir(x: u32, z: i16, fix: i16, zero: bool) -> Vec<u8> {
-    let (s, d2) = if zero {
-        (b"0.0000000".to_vec(), 0)
-    } else {
-        (ffp2a(x, z + 6), z)
-    };
+fn ex_vir(x: &Norm, z: i16, fix: i16, zero: bool) -> Vec<u8> {
+    let (s, d2) = if zero { (b"0.0000000".to_vec(), 0) } else { (ffp2a_n(x, z + 6), z) };
     let mut out = Vec::new();
     let mut p = 0;
     if s.first() == Some(&b'-') {
@@ -983,6 +1179,10 @@ fn float_to_asc_flags(x: u32, fix: i16, exp: i16, space: bool) -> Vec<u8> {
 }
 
 fn latin(v: Vec<u8>) -> String {
+    // Number texts are ASCII: no copy then (Latin-1 otherwise).
+    if v.is_ascii() {
+        return String::from_utf8(v).unwrap_or_default();
+    }
     v.into_iter().map(|c| c as char).collect()
 }
 
@@ -1018,11 +1218,7 @@ pub fn format_ffp(v: Ffp, fix: Fix) -> String {
 
 /// `Str$` / `Print` of an integer (`LongToAsc` signed, proportional).
 pub fn format_int(v: i32) -> String {
-    if v < 0 {
-        format!("-{}", (v as i64).unsigned_abs())
-    } else {
-        format!(" {v}")
-    }
+    if v < 0 { format!("-{}", (v as i64).unsigned_abs()) } else { format!(" {v}") }
 }
 
 // ---------------------------------------------------------------------------
@@ -1216,6 +1412,273 @@ pub fn format_double(v: f64, fix: Fix) -> String {
 }
 
 #[cfg(test)]
+#[path = "ffp_reference.rs"]
+mod reference;
+
+/// The shortcuts of the conversions against the original algorithms
+/// (`ffp_reference.rs`).
+#[cfg(test)]
+mod shortcut_tests {
+    use super::*;
+
+    struct Rng(u64);
+
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+        fn below(&mut self, n: u64) -> u64 {
+            self.next() % n
+        }
+    }
+
+    fn fixes() -> Vec<Fix> {
+        let mut v = vec![Fix::Free, Fix::ExponentFree];
+        v.extend((0..16).map(Fix::Decimals));
+        v.extend((1..16).map(Fix::Exponent));
+        v
+    }
+
+    fn check_format(x: u32, fixes: &[Fix]) {
+        for &f in fixes {
+            let want = reference::float_to_asc(x, f.fix_flg(), f.exp_flg());
+            assert_eq!(float_to_asc(x, f.fix_flg(), f.exp_flg()), want, "x={x:08x} fix={f:?}");
+        }
+        let want = reference::float_to_asc_flags(x, -1, 0, false);
+        assert_eq!(float_to_asc_flags(x, -1, 0, false), want, "listing x={x:08x}");
+    }
+
+    /// Debug builds run fewer iterations.
+    fn count(n: usize) -> usize {
+        if cfg!(debug_assertions) { n / 8 } else { n }
+    }
+
+    #[test]
+    fn tables_are_the_loops() {
+        let (mut up, mut down) = (ONE, ONE);
+        for k in 0..300u32 {
+            assert_eq!(pow10(k, true), up, "10^{k}");
+            assert_eq!(pow10(k, false), down, "10^-{k}");
+            if (k as usize) < POW10_LEN {
+                assert_eq!(HALF_DOWN[k as usize], ffp_div(down, TWO));
+            }
+            up = ffp_mul(up, TEN);
+            down = ffp_div(down, TEN);
+        }
+    }
+
+    #[test]
+    fn digit_accumulation_below_2_24_is_exact() {
+        // Every step of the integer shortcut of `a2ffp`.
+        for v in 0..EXACT_INT / 10 + 1 {
+            let fv = ffp_mul(ffp_from_long(v as i32), TEN);
+            for d in 0..10 {
+                let n = v * 10 + d;
+                if n < EXACT_INT {
+                    assert_eq!(ffp_add(ffp_from_long(d as i32), fv), ffp_from_long(n as i32), "{v}*10+{d}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn renormalise_of_normalised_values() {
+        let mut r = Rng(0x1234_5678_9ABC_DEF1);
+        // Every mantissa at a few exponents, both signs.
+        let step = if cfg!(debug_assertions) { 7 } else { 1 };
+        for exp in [0x01, 0x30, 0x40, 0x41, 0x58, 0x7F] {
+            for m in (0x80_0000u32..0x100_0000).step_by(step) {
+                for sign in [0, 0x80] {
+                    let x = (m << 8) | sign | exp;
+                    assert_eq!(renormalise(x), reference::renormalise(x), "{x:08x}");
+                }
+            }
+        }
+        for _ in 0..count(2_000_000) {
+            let x = (r.next() as u32) | 0x8000_0000;
+            if x & 0x7F != 0 {
+                assert_eq!(renormalise(x), reference::renormalise(x), "{x:08x}");
+            }
+        }
+    }
+
+    #[test]
+    fn multiplication_by_ten() {
+        let step = if cfg!(debug_assertions) { 3 } else { 1 };
+        // Every mantissa at the exponents of the digit loop and the ends.
+        for eb in [0x01, 0x02, 0x20, 0x3C, 0x3D, 0x3E, 0x3F, 0x40, 0x41, 0x42, 0x43, 0x44, 0x7A, 0x7B, 0x7C, 0x7F] {
+            for m in (0x80_0000u32..0x100_0000).step_by(step) {
+                for sign in [0, 0x80] {
+                    let x = (m << 8) | sign | eb;
+                    assert_eq!(mul_ten(x), ffp_mul(x, TEN), "{x:08x}");
+                }
+            }
+        }
+        for eb in 0..0x80u32 {
+            for m in [0x80_0000u32, 0x80_0001, 0xCC_CCCC, 0xCC_CCCD, 0xE6_6666, 0xFF_FFFF] {
+                for sign in [0, 0x80] {
+                    let x = (m << 8) | sign | eb;
+                    assert_eq!(mul_ten(x), ffp_mul(x, TEN), "{x:08x}");
+                }
+            }
+        }
+        let mut r = Rng(0x1357_2468_FEDC_BA98);
+        for _ in 0..count(2_000_000) {
+            let x = r.next() as u32;
+            assert_eq!(mul_ten(x), ffp_mul(x, TEN), "{x:08x}");
+        }
+    }
+
+    #[test]
+    fn division_by_ten() {
+        let step = if cfg!(debug_assertions) { 3 } else { 1 };
+        for eb in [0x00, 0x01, 0x03, 0x04, 0x05, 0x40, 0x41, 0x44, 0x45, 0x48, 0x5F, 0x7E, 0x7F] {
+            for m in (0x80_0000u32..0x100_0000).step_by(step) {
+                for sign in [0, 0x80] {
+                    let x = (m << 8) | sign | eb;
+                    assert_eq!(div_ten(x), ffp_div(x, TEN), "{x:08x}");
+                }
+            }
+        }
+        for eb in 0..0x100u32 {
+            for m in [0x80_0000u32, 0x80_0001, 0x9F_FFFF, 0xA0_0000, 0xA0_0001, 0xCC_CCCD, 0xFF_FFFF, 0x1, 0x7F_FFFF] {
+                let x = (m << 8) | eb;
+                assert_eq!(div_ten(x), ffp_div(x, TEN), "{x:08x}");
+            }
+        }
+        let mut r = Rng(0x9999_1111_2222_3333);
+        for _ in 0..count(4_000_000) {
+            let x = r.next() as u32;
+            assert_eq!(div_ten(x), ffp_div(x, TEN), "{x:08x}");
+        }
+    }
+
+    #[test]
+    fn integer_part_subtraction() {
+        // Every positive normalised value in [1, 16), and others.
+        let step = if cfg!(debug_assertions) { 5 } else { 1 };
+        for eb in 0x41..=0x44u32 {
+            for m in (0x80_0000u32..0x100_0000).step_by(step) {
+                let x = (m << 8) | eb;
+                let d = ffp_to_long(x);
+                assert_eq!(sub_int_part(x, d), ffp_sub(x, ffp_from_long(d)), "{x:08x}");
+            }
+        }
+        let mut r = Rng(0x2468_ACE0_1357_9BDF);
+        for _ in 0..count(1_000_000) {
+            let x = random_ffp(&mut r);
+            let d = ffp_to_long(x) as i16 as i32;
+            assert_eq!(sub_int_part(x, d), ffp_sub(x, ffp_from_long(d)), "{x:08x}");
+        }
+    }
+
+    fn random_ffp(r: &mut Rng) -> u32 {
+        let v = r.next();
+        let mant = 0x80_0000 | ((v >> 16) as u32 & 0x7F_FFFF);
+        let exp = match (v >> 40) % 4 {
+            0 => (v >> 48) as u32 & 0x7F,
+            _ => 40 + (v >> 48) as u32 % 50,
+        };
+        (mant << 8) | (((v >> 60) as u32 & 1) << 7) | exp
+    }
+
+    #[test]
+    fn formatting_matches_the_original() {
+        let fixes = fixes();
+        // Special and non-normalised values.
+        for x in [0, 0x80, 0x8000_0041, 0x8000_00C1, 0xFFFF_FF7F, 0xFFFF_FFFF, 0x8000_0001, 0x8000_0081] {
+            check_format(x, &fixes);
+        }
+        // Every exponent with mantissa edges, and both signs.
+        for exp in 0..0x80u32 {
+            for m in
+                [0x80_0000u32, 0x80_0001, 0x9F_FFFF, 0xA0_0000, 0xC8_0000, 0xCC_CCCD, 0xF9_FFFF, 0xFF_FFFE, 0xFF_FFFF]
+            {
+                for sign in [0, 0x80] {
+                    check_format((m << 8) | sign | exp, &fixes);
+                }
+            }
+        }
+        // Values next to powers of ten and to the rounding carries (9.99..).
+        for k in 0..POW10_LEN as u32 {
+            for p in [pow10(k, true), pow10(k, false)] {
+                for d in -40i32..=40 {
+                    let m = ((p >> 8) as i32 + d) as u32;
+                    if (0x80_0000..0x100_0000).contains(&m) {
+                        check_format((m << 8) | (p & 0xFF), &fixes);
+                    }
+                }
+            }
+        }
+        for t in ["9.9999995", "99999.995", "0.99999995", "9999999.5", "0.000099999995", "1e-5", "1e-4", "123456789"] {
+            check_format(reference::ascii_to_ffp(t.as_bytes()).0, &fixes);
+        }
+        // Random values.
+        let mut r = Rng(0x0F0F_1234_5678_9ABC);
+        for i in 0..count(400_000) {
+            let x = random_ffp(&mut r);
+            let f = fixes[i % fixes.len()];
+            assert_eq!(
+                float_to_asc(x, f.fix_flg(), f.exp_flg()),
+                reference::float_to_asc(x, f.fix_flg(), f.exp_flg()),
+                "x={x:08x} fix={f:?}"
+            );
+        }
+    }
+
+    fn check_text(t: &[u8]) {
+        assert_eq!(ascii_to_ffp(t), reference::ascii_to_ffp(t), "{:?}", String::from_utf8_lossy(t));
+    }
+
+    #[test]
+    fn text_conversion_matches_the_original() {
+        // Around the end of the integer shortcut (2^24 = 16777216) and of
+        // the tables, digit counts, exponent limits.
+        for n in (16_777_100u32..16_777_300).chain(1_677_700..1_677_800).chain(167_772_000..167_772_200) {
+            check_text(n.to_string().as_bytes());
+            check_text(format!("{n}.5").as_bytes());
+            check_text(format!("-{n}e-3").as_bytes());
+            check_text(format!("0.{n}").as_bytes());
+        }
+        for digits in 1..40 {
+            let s: String = (0..digits).map(|i| char::from(b'0' + ((i * 7 + 3) % 10) as u8)).collect();
+            check_text(s.as_bytes());
+            check_text(format!("9{s}").as_bytes());
+            check_text(format!("{s}.{s}").as_bytes());
+            check_text(format!(".{s}e7").as_bytes());
+        }
+        for e in -120i32..120 {
+            for m in ["1", "9.99", "1.5", "123456789", "0", ".1", "16777217"] {
+                check_text(format!("{m}e{e}").as_bytes());
+            }
+        }
+        for t in ["", "-", ".", "e", "1e", "1e+", "--1", "1..2", "1e99999", "1e-99999", "1e32767", "1e-32768", "00012"]
+        {
+            check_text(t.as_bytes());
+        }
+        let mut r = Rng(0x7777_1234_ABCD_0001);
+        let set = b"0123456789.e+-";
+        for _ in 0..count(400_000) {
+            let len = r.below(24) as usize;
+            let t: Vec<u8> = match r.below(3) {
+                0 => (0..len).map(|_| set[r.below(set.len() as u64) as usize]).collect(),
+                1 => (0..len).map(|_| b'0' + r.below(10) as u8).collect(),
+                _ => {
+                    let mut t: Vec<u8> = (0..len.max(1)).map(|_| b'0' + r.below(10) as u8).collect();
+                    t.insert(r.below(t.len() as u64 + 1) as usize, b'.');
+                    t.extend_from_slice(format!("e{}", r.below(100) as i64 - 50).as_bytes());
+                    t
+                }
+            };
+            check_text(&t);
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -1296,19 +1759,14 @@ mod tests {
         assert_eq!(Ffp(0xC90F_CE42).div(Ffp(0x9502_F962)).0, 0xACB6_0021);
         // Mixed signs with different exponents.
         assert_eq!(Ffp::from_i32(100).add(Ffp::from_i32(-1)), Ffp::from_i32(99));
-        assert_eq!(
-            Ffp::from_i32(-100).add(Ffp::from_i32(1)),
-            Ffp::from_i32(-99)
-        );
+        assert_eq!(Ffp::from_i32(-100).add(Ffp::from_i32(1)), Ffp::from_i32(-99));
         assert_eq!(Ffp::from_i32(1).sub(Ffp::from_i32(100)), Ffp::from_i32(-99));
     }
 
     #[test]
     fn arithmetic_matches_exact_rounding_mostly() {
         // Sanity: results stay within one unit of the exact value.
-        let vals = [
-            "0.1", "3.14159", "179.35", "-2.5", "1e10", "7", "-0.003", "123456",
-        ];
+        let vals = ["0.1", "3.14159", "179.35", "-2.5", "1e10", "7", "-0.003", "123456"];
         for x in vals {
             for y in vals {
                 let (fx, fy) = (ascii_to_ffp(x.as_bytes()), ascii_to_ffp(y.as_bytes()));
@@ -1317,12 +1775,7 @@ mod tests {
                         return;
                     }
                     let ulp = exact.abs() * 2f64.powi(-23);
-                    assert!(
-                        (r.to_f64() - exact).abs() <= ulp,
-                        "{x} {y}: {:08X} {} {exact}",
-                        r.0,
-                        r.to_f64()
-                    );
+                    assert!((r.to_f64() - exact).abs() <= ulp, "{x} {y}: {:08X} {} {exact}", r.0, r.to_f64());
                 };
                 check(fx.add(fy), fx.to_f64() + fy.to_f64());
                 check(fx.sub(fy), fx.to_f64() - fy.to_f64());
@@ -1338,10 +1791,7 @@ mod tests {
 
     #[test]
     fn print_free() {
-        assert_eq!(
-            format_ffp(Ffp::ONE.div(Ffp::from_i32(3)), Fix::Free),
-            " 0.3333333"
-        );
+        assert_eq!(format_ffp(Ffp::ONE.div(Ffp::from_i32(3)), Fix::Free), " 0.3333333");
         assert_eq!(p("0.1"), " 0.1");
         assert_eq!(p("1.5"), " 1.5");
         assert_eq!(p("3.14159"), " 3.14159");
@@ -1369,25 +1819,13 @@ mod tests {
         assert_eq!(format_ffp(pi, Fix::from_fix_arg(-3)), " 3.141E+00");
         assert_eq!(format_ffp(pi, Fix::from_fix_arg(16)), " 3.14159");
         assert_eq!(format_ffp(pi, Fix::from_fix_arg(-16)), " 3.14158 E+00");
-        assert_eq!(
-            format_ffp(ascii_to_ffp(b"-1.5"), Fix::from_fix_arg(2)),
-            "-1.50"
-        );
-        assert_eq!(
-            format_ffp(ascii_to_ffp(b"0.0001"), Fix::from_fix_arg(2)),
-            " 0.00"
-        );
+        assert_eq!(format_ffp(ascii_to_ffp(b"-1.5"), Fix::from_fix_arg(2)), "-1.50");
+        assert_eq!(format_ffp(ascii_to_ffp(b"0.0001"), Fix::from_fix_arg(2)), " 0.00");
         assert_eq!(format_ffp(ascii_to_ffp(b"0.5"), Fix::from_fix_arg(0)), " 0");
-        assert_eq!(
-            format_ffp(ascii_to_ffp(b"0.25"), Fix::from_fix_arg(-2)),
-            " 2.50E-01"
-        );
+        assert_eq!(format_ffp(ascii_to_ffp(b"0.25"), Fix::from_fix_arg(-2)), " 2.50E-01");
         assert_eq!(format_ffp(Ffp::ZERO, Fix::from_fix_arg(-3)), " 0.000E+00");
         assert_eq!(format_ffp(Ffp::ZERO, Fix::ExponentFree), " 0E+00");
-        assert_eq!(
-            format_ffp(ascii_to_ffp(b"12345678"), Fix::from_fix_arg(-2)),
-            " 1.23E+07"
-        );
+        assert_eq!(format_ffp(ascii_to_ffp(b"12345678"), Fix::from_fix_arg(-2)), " 1.23E+07");
         assert_eq!(Fix::from_fix_arg(i32::MIN), Fix::ExponentFree);
         assert_eq!(Fix::from_fix_arg(-1), Fix::Exponent(1));
         assert_eq!(Fix::from_fix_arg(15), Fix::Decimals(15));
@@ -1414,10 +1852,7 @@ mod tests {
         assert_eq!(format_double(1.25, Fix::from_fix_arg(2)), " 1.3");
         assert_eq!(format_double(123.4, Fix::from_fix_arg(-3)), " 1.234e+002");
         assert_eq!(format_double(1e15, Fix::Free), " 1e+015");
-        assert_eq!(
-            format_double(123456789012345.0, Fix::Free),
-            " 123456789012345"
-        );
+        assert_eq!(format_double(123456789012345.0, Fix::Free), " 123456789012345");
     }
 }
 
@@ -1432,11 +1867,7 @@ mod program_tests {
             let path = entry.unwrap().path();
             if path.is_dir() {
                 amos_files(&path, out);
-            } else if path
-                .extension()
-                .and_then(|e| e.to_str())
-                .is_some_and(|e| e.eq_ignore_ascii_case("amos"))
-            {
+            } else if path.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("amos")) {
                 out.push(path);
             }
         }
@@ -1446,8 +1877,7 @@ mod program_tests {
     /// the editor's listing format followed by `a2ffp`.
     #[test]
     fn listing_round_trip_of_program_constants() {
-        let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../AMOS-Professional-365");
+        let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../AMOS-Professional-365");
         let mut files = Vec::new();
         amos_files(&dir, &mut files);
         let mut count = 0;
