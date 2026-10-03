@@ -323,6 +323,23 @@ pub struct Call {
     pub end: usize,
 }
 
+/// Functions of the machine whose handler leaves the input state and the
+/// timer alone (`layout::IN_VALID`): reading them keeps the module's input
+/// mirror valid.
+pub fn input_read_only(token: u16) -> bool {
+    use crate::tokens::tk::*;
+    matches!(
+        token,
+        X_MOUSE | Y_MOUSE | MOUSE_KEY | TIMER | JOY | JUP | JDOWN | JLEFT | JRIGHT | FIRE | KEY_STATE | SCIN | SCIN_2
+    )
+}
+
+/// Functions of the machine whose value is always an integer.
+pub fn int_function(token: u16) -> bool {
+    use crate::tokens::tk::*;
+    matches!(token, X_MOUSE | Y_MOUSE | MOUSE_KEY | TIMER | JOY | KEY_STATE | SCIN)
+}
+
 /// Bit of a plain call's mask where the number of signature slots starts
 /// (bits below: the slots given).
 pub const PLAIN_SLOTS_SHIFT: u32 = 24;

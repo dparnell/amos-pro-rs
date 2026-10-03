@@ -148,6 +148,34 @@ pub const BRIDGE_CALL: i32 = 4;
 /// Scratch buffers of the number formatting helpers (128 bytes each).
 pub const SCR_A: u32 = 192;
 pub const SCR_B: u32 = 320;
+/// Mirror of the input state read by the polling functions (`X Mouse`,
+/// `Y Mouse`, `Mouse Key`, `Timer`, `Joy(0/1)`, `Key State`, and whether
+/// the key buffer is empty for `Inkey$`), so that the module reads them
+/// without calling the runtime. `IN_VALID`: 1 the words are up to date, 0
+/// stale (`host.input_sync` refreshes them), 2 no machine (text host: the
+/// functions go through the runtime). The runtime marks them stale after
+/// anything that may change the input state: every statement it runs
+/// (`Runtime::sync`), and every function other than the read-only ones
+/// (`structure::input_read_only`). Input events and the timer only change
+/// between frames, and every frame starts with `host.enter`.
+pub const IN_VALID: u32 = 448;
+pub const IN_MOUSE_X: u32 = 452;
+pub const IN_MOUSE_Y: u32 = 456;
+pub const IN_MOUSE_KEY: u32 = 460;
+pub const IN_TIMER: u32 = 464;
+/// `Joy(0)`, `Joy(1)` (two words).
+pub const IN_JOY: u32 = 468;
+/// Number of keys in the buffer.
+pub const IN_KEYBUF: u32 = 476;
+/// The key matrix (`InputState::key_matrix`, 16 bytes).
+pub const IN_KEYS: u32 = 480;
+/// The last `Scin(x,y)` of the runtime while the mirror is valid: 1 when
+/// set (reset by `host.input_sync`), x, y, value. The screens only change
+/// through statements and functions that mark the mirror stale.
+pub const IN_SCIN_OK: u32 = 496;
+pub const IN_SCIN_X: u32 = 500;
+pub const IN_SCIN_Y: u32 = 504;
+pub const IN_SCIN_V: u32 = 508;
 /// Start of the global variables.
 pub const GLOBALS: u32 = 512;
 

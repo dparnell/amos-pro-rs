@@ -598,6 +598,9 @@ impl<'a> Lower<'a> {
     /// Result type of a function of the subsystems.
     fn keyword_type(&self, kw: Keyword) -> Res<Ty> {
         let def = structure::keyword_def(kw).ok_or("unknown function")?;
+        if kw.slot == 0 && structure::int_function(kw.token) {
+            return Ok(Ty::Int);
+        }
         Ok(match def.kind() {
             TokenKind::Function(ValueType::Str) => Ty::Str,
             TokenKind::ReservedVariable if def.params.as_bytes().get(1) == Some(&b'2') => Ty::Str,

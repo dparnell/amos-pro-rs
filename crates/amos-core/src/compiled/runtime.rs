@@ -46,11 +46,27 @@ pub const ST_GROW: i32 = -4;
 /// stack, events, arrays...) and the rest of the machine.
 pub trait Env {
     fn parts(&mut self) -> (&mut Interp, &mut dyn Host);
+    /// The machine's hardware, when the host is one (the input mirror,
+    /// `layout::IN_VALID`).
+    fn hardware(&mut self) -> Option<&mut crate::machine::Hardware> {
+        None
+    }
 }
 
 impl Env for crate::machine::Machine {
     fn parts(&mut self) -> (&mut Interp, &mut dyn Host) {
         (&mut self.interp, &mut self.hw)
+    }
+    fn hardware(&mut self) -> Option<&mut crate::machine::Hardware> {
+        Some(&mut self.hw)
+    }
+}
+
+/// Marks the input mirror stale (`layout::IN_VALID`).
+#[inline]
+fn input_stale(mem: &mut [u8]) {
+    if ld_i32(mem, layout::IN_VALID) == 1 {
+        st_i32(mem, layout::IN_VALID, 0);
     }
 }
 
@@ -365,6 +381,7 @@ impl Runtime {
     /// frames get their locals (parameters) from the interpreter, and the
     /// header words are refreshed.
     fn sync(&mut self, it: &Interp, mem: &mut [u8]) {
+        input_stale(mem);
         let fs = &it.frame_stack;
         if self.frames.len() != fs.len() || self.frames.last() != fs.last() {
             self.sync_frames(it, mem);
@@ -1040,6 +1057,7 @@ impl Runtime {
                 self.with_code(it, hw, i, code, start, end, |it, hw| it.function_value(hw, kw))
             }
         };
+        input_stale(mem);
         match r {
             Ok(v) => Some(v),
             Err(e) => {
@@ -1083,7 +1101,14 @@ impl Runtime {
         Ok(match ty {
             // A function without parameters, evaluated as the token path
             // evaluates the operand.
-            layout::BRIDGE_CALL => it.function_value(hw, Keyword { slot: 0, token: ld_i32(mem, a + 8) as u16 })?,
+            layout::BRIDGE_CALL => {
+                let token = ld_i32(mem, a + 8) as u16;
+                let v = it.function_value(hw, Keyword { slot: 0, token });
+                if !structure::input_read_only(token) {
+                    input_stale(mem);
+                }
+                v?
+            }
             _ => Value::Str(self.str_of(mem, ld_i32(mem, a + 8))),
         })
     }
@@ -1099,6 +1124,29 @@ impl Runtime {
             self.preset_buf.push(v);
         }
         Ok(())
+    }
+
+    /// Refreshes the input mirror (`layout::IN_VALID`); returns `IN_VALID`.
+    pub fn input_sync(&mut self, env: &mut dyn Env, mem: &mut [u8]) -> i32 {
+        let Some(hw) = env.hardware() else {
+            st_i32(mem, layout::IN_VALID, 2);
+            return 2;
+        };
+        let inp = &hw.input;
+        st_i32(mem, layout::IN_MOUSE_X, inp.mouse_x);
+        st_i32(mem, layout::IN_MOUSE_Y, inp.mouse_y);
+        st_i32(mem, layout::IN_MOUSE_KEY, inp.mouse_buttons as i32);
+        st_i32(mem, layout::IN_TIMER, hw.timer);
+        st_i32(mem, layout::IN_JOY, inp.joy_state(0));
+        st_i32(mem, layout::IN_JOY + 4, inp.joy_state(1));
+        st_i32(mem, layout::IN_KEYBUF, inp.buffer.len() as i32);
+        let k = layout::IN_KEYS as usize;
+        if let Some(b) = mem.get_mut(k..k + 16) {
+            b.copy_from_slice(&inp.key_matrix);
+        }
+        st_i32(mem, layout::IN_SCIN_OK, 0);
+        st_i32(mem, layout::IN_VALID, 1);
+        1
     }
 
     /// Instruction `token` (main library, `machine::plain_args`) at `pos`,
@@ -1147,6 +1195,19 @@ impl Runtime {
             Ok(())
         };
         let r = r.and_then(|()| it.function_value(hw, Keyword { slot: 0, token: token as u16 }));
+        if !structure::input_read_only(token as u16) {
+            input_stale(mem);
+        } else if token as u16 == crate::tokens::tk::SCIN
+            && ld_i32(mem, layout::IN_VALID) == 1
+            && let (Ok(Value::Int(v)), [Some(Value::Int(x)), Some(Value::Int(y))]) = (&r, &self.preset_buf[..])
+        {
+            // Kept for the module (`layout::IN_SCIN_OK`).
+            for (w, v) in
+                [(layout::IN_SCIN_X, *x), (layout::IN_SCIN_Y, *y), (layout::IN_SCIN_V, *v), (layout::IN_SCIN_OK, 1)]
+            {
+                st_i32(mem, w, v);
+            }
+        }
         match r {
             Ok(v) => Some(v),
             Err(e) => {

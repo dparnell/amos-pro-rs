@@ -131,7 +131,15 @@ Mid$= ...) are compiled specially.
   (`--interpreted` skips it) and fall back to interpreting on failure.
 * Hosts: `amos-wasmhost` (wasmtime natively, `WebAssembly.instantiate` on
   the web) share the import list in `amos-wasmhost/src/imports.rs`
-  (interface version 13, `amos_core::compiled::ABI_VERSION`).
+  (interface version 14, `amos_core::compiled::ABI_VERSION`).
+* Polling functions read a mirror of the input state in memory
+  (`layout::IN_VALID`): `X Mouse`, `Y Mouse`, `Mouse Key`, `Timer`,
+  `Joy(0/1)`, `Key State(n)`, `Inkey$` while the key buffer is empty, and
+  the last `Scin(x,y)` of the runtime. `host.input_sync` refreshes it; the
+  runtime marks it stale after every statement it runs and every function
+  that may change the input (`structure::input_read_only`); input events
+  and the timer only change between frames. Otherwise (text hosts, other
+  parameters, errors) the direct call (`host.pfn_*`).
 * For / Next on a scalar run in the module: For pushes a pending entry
   (`layout::PE_FOR`) and writes the control stack mirror itself; a Next
   whose For is known from the program text (`StaticFor`) checks that the

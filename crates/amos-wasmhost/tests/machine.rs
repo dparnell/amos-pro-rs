@@ -254,3 +254,87 @@ fn plain_keywords_match_the_interpreter() {
     assert!(compared > 150 && covered.len() > 40, "only {compared} programs ({} keywords) compared", covered.len());
     assert!(failures.is_empty(), "{} of {compared} differ:\n{}", failures.len(), failures.join("\n"));
 }
+
+/// The same input on both machines before frame `f`: mouse moves and
+/// buttons, typed characters, keys held (Esc, cursor keys for the joystick
+/// emulation), game controllers.
+fn feed(m: &mut Machine, f: usize) {
+    use amos_core::input::{InputEvent, MouseButton, raw};
+    m.input(InputEvent::MouseMove { x: (40 + f * 37 % 600) as f32, y: (30 + f * 23 % 400) as f32 });
+    if f % 3 == 1 {
+        m.input(InputEvent::Char((b'a' + (f % 26) as u8) as char));
+    }
+    if f % 7 == 2 {
+        m.input(InputEvent::Char('x'));
+        m.input(InputEvent::Char('y'));
+    }
+    for (key, on, off) in [(raw::ESC, 2, 5), (raw::UP, 4, 9), (raw::LEFT, 6, 7)] {
+        if f % 10 == on {
+            m.input(InputEvent::Key { scancode: key, pressed: true, ch: None });
+        }
+        if f % 10 == off {
+            m.input(InputEvent::Key { scancode: key, pressed: false, ch: None });
+        }
+    }
+    let button = if f.is_multiple_of(2) { MouseButton::Left } else { MouseButton::Right };
+    m.input(InputEvent::MouseButton { button, pressed: f % 8 >= 3 && f % 8 < 6 });
+    m.hw.input.set_gamepad(0, (f * 5 % 32) as u8);
+    m.hw.input.set_gamepad(1, (f * 3 % 32) as u8);
+}
+
+/// `compare` with input fed to both machines before every frame.
+fn compare_with_input(src: &str, frames: usize) {
+    let prg = tokenise_program(src.as_bytes()).expect("tokenise");
+    let wasm = amos_compiler::compile(&prg).expect("compile");
+    common::validate(&wasm);
+    let mut a = Machine::new();
+    a.run_program(&prg).expect("test");
+    let mut b = Machine::new();
+    let mut cp = CompiledProgram::start(&mut b, &prg, &wasm).expect("start");
+    for f in 0..frames {
+        feed(&mut a, f);
+        feed(&mut b, f);
+        a.vbl();
+        cp.vbl(&mut b);
+        assert_eq!(a.state, b.state, "state at frame {f}:\n{src}");
+        assert_eq!(a.hw.log, b.hw.log, "log at frame {f}:\n{src}");
+        assert!(render_rgba(&a.frame()) == render_rgba(&b.frame()), "display differs at frame {f}:\n{src}");
+    }
+}
+
+/// The polling functions the module reads from its input mirror
+/// (`layout::IN_VALID`): values, key buffer side effects of Inkey$, the
+/// timer, joystick emulation, Scin, and everything that changes them
+/// (statements, other functions, Every handlers, interpreted
+/// instructions), tight loops and once per frame.
+#[test]
+fn polling_functions_match_the_interpreter() {
+    let progs = [
+        // Once per frame.
+        "Curs Off\nDo\nA$=Inkey$ : If A$<>\"\" Then Print A$;Scancode;Scanshift;\nPrint X Mouse;Y Mouse;Mouse Key;Joy(0);Joy(1);Jup(1);Fire(0);Key State(69);Key State(76);Timer\nWait Vbl\nLoop",
+        // Tight polling loops (the budget ends the frame).
+        "Curs Off\nDo\nInc N : A$=Inkey$ : If A$<>\"\" Then Print N mod 97;A$;\nIf Mouse Key Then Inc M\nIf N mod 5000=0 Then Print M;Timer;Joy(1);Key State(76);\nLoop",
+        "Curs Off\nDo : N=Scin(X Mouse,Y Mouse) : K=Mouse Key : Inc C : If C mod 3000=0 Then Print N;K;\nLoop",
+        "Curs Off\nDo : A$=Inkey$ : J=Joy(1) : T=Timer : K=Key State(69) : Inc C : If A$<>\"\" or C mod 4000=0 Then Print A$;J;T;K;\nLoop",
+        "Curs Off\nDo\nRepeat : Inc W : Until Mouse Key<>0 or W>20000\nPrint W;Mouse Key; : W=0\nWait Vbl\nLoop",
+        // The program changes what the functions read.
+        "Curs Off\nDo\nX Mouse=X Mouse+3 : Print X Mouse;\nY Mouse=50 : Print Y Mouse;\nPut Key \"ab\" : Print Inkey$;Inkey$;Inkey$=\"\";\nTimer=Timer+5 : Print Timer;\nClear Key : Print Inkey$=\"\";\nWait Vbl\nLoop",
+        "Curs Off\nLimit Mouse 150,60 To 160,70\nDo : Print X Mouse;Y Mouse; : A=X Mouse+Y Mouse : Limit Mouse : B=X Mouse : Print A;B; : Limit Mouse 150,60 To 160,70 : Wait Vbl : Loop",
+        "Curs Off\nDo : C=Mouse Click : K=Mouse Key : If C Then Print C;K;\nI$=Inkey$ : S=Scancode : If S Then Print S;\nLoop",
+        "Curs Off\nDo\nPrint Inkey$+Inkey$;Len(Inkey$+Inkey$+Inkey$);\nWait Vbl\nLoop",
+        // Joy / Key State with every kind of parameter, errors.
+        "Curs Off\nDo\nFor P=-1 To 3 : Print Joy(P); : Next\nFor K=60 To 80 : Print Key State(K); : Next\nPrint Joy(1.7);Key State(69.2)\nWait Vbl\nLoop",
+        "Curs Off\nWait 5\nPrint Key State(128)",
+        "Curs Off\nWait 5\nK=-1 : Print Key State(K)",
+        // Scin while the screens change (moved, opened, closed).
+        "Curs Off\nScreen Open 1,320,100,16,Lowres\nDo\nScreen Display 1,,40+(T mod 4)*30,,\nS=Scin(X Mouse,Y Mouse) : R=Scin(200,80) : Inc T\nFor I=1 To 3 : Print Scin(X Mouse,Y Mouse);Scin(200,80+I*10); : Next\nWait Vbl\nLoop",
+        "Curs Off\nScreen Open 1,320,100,16,Lowres : Screen Display 1,,60,,\nDo : S=Scin(200,80) : Inc C : If C=3000 Then Screen Close 1\nIf C mod 2000=0 Then Print S;\nIf C=6000 Then Screen Open 1,320,50,16,Lowres : Screen Display 1,,70,,\nLoop",
+        "Screen Close 0\nWait 3\nPrint Scin(10,10)",
+        // Every handlers and interpreted instructions in between.
+        "Curs Off\nEvery 3 Gosub E\nDo : T=Timer : K=Key State(69) : If T<Q Then Print T;Q;\nQ=T : Loop\nE: Timer=0 : Clear Key : Every On : Return",
+        "Curs Off\nDo : A$=Inkey$ : If A$<>\"\" Then Print A$;\nX=X Mouse : Inc N : If N mod 3000=0 Then Put Key \"q\"\nLoop",
+    ];
+    for p in progs {
+        compare_with_input(p, 40);
+    }
+}

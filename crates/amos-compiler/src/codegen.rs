@@ -84,6 +84,7 @@ imports! {
     PfnF = "host" "pfn_f" (i i i i) -> f;
     PfnN = "host" "pfn_n" (i i i i) -> f;
     PfnS = "host" "pfn_s" (i i i i) -> i;
+    InputSync = "host" "input_sync" () -> i;
     PushI = "host" "push_i" (i);
     PushF = "host" "push_f" (f);
     PushS = "host" "push_s" (i);
@@ -238,6 +239,25 @@ struct StaticFor {
     /// Step and limit when they are constants.
     step: Option<i32>,
     limit: Option<i32>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum InputKind {
+    /// A word of the mirror.
+    Word(u32),
+    Joy,
+    KeyState,
+    Inkey,
+    /// `Scin(x,y)`: the last value of the runtime for the same x, y.
+    Scin,
+}
+
+/// `Gen::input_fn`: the function and its direct call.
+#[derive(Clone, Copy, Debug)]
+struct InputFn {
+    kind: InputKind,
+    token: i32,
+    mask: i32,
 }
 
 /// An integer constant expression (as `as_int` converts it).
@@ -1130,6 +1150,10 @@ impl<'a> Gen<'a> {
             }
             ExprKind::Bin(op, a, b) => self.binop(*op, a, b, e.ty),
             ExprKind::Native(nf, args) => self.native(*nf, args, e.ty),
+            ExprKind::Call(fpos, args) if let Some(f) = self.input_fn(*fpos, args, e.ty) => {
+                self.input_call(f, args);
+                self.err_check();
+            }
             ExprKind::Call(fpos, args) => {
                 let plain = self.plain_call(*fpos, true, args.len());
                 let fused = if plain.is_some() { self.fused_args(args) } else { Vec::new() };
@@ -2106,6 +2130,138 @@ impl<'a> Gen<'a> {
         self.call(Imp::GosubLabel);
         self.status_jump_expect(expected);
         Ok(())
+    }
+
+    /// A polling function the module reads from the input mirror
+    /// (`layout::IN_VALID`): `X Mouse`, `Y Mouse`, `Mouse Key`, `Timer`,
+    /// `Joy(n)` and `Key State(n)` with an integer parameter, `Inkey$`.
+    fn input_fn(&self, fpos: usize, args: &[Expr], ty: Ty) -> Option<InputFn> {
+        use tk::*;
+        let (token, mask) = self.plain_call(fpos, true, args.len())?;
+        let int_args = |n: usize| {
+            args.len() == n
+                && args.iter().all(|a| a.ty == Ty::Int)
+                && self.bridge_top + n as u32 <= layout::BRIDGE_SLOTS
+        };
+        let int_arg = int_args(1);
+        let kind = match token as u16 {
+            X_MOUSE if args.is_empty() => InputKind::Word(layout::IN_MOUSE_X),
+            Y_MOUSE if args.is_empty() => InputKind::Word(layout::IN_MOUSE_Y),
+            MOUSE_KEY if args.is_empty() => InputKind::Word(layout::IN_MOUSE_KEY),
+            TIMER if args.is_empty() => InputKind::Word(layout::IN_TIMER),
+            JOY if int_arg => InputKind::Joy,
+            KEY_STATE if int_arg => InputKind::KeyState,
+            INKEY_S if args.is_empty() && ty == Ty::Str => InputKind::Inkey,
+            SCIN if int_args(2) && mask as u32 >> structure::PLAIN_SLOTS_SHIFT == 2 => InputKind::Scin,
+            _ => return None,
+        };
+        if kind != InputKind::Inkey && ty != Ty::Int {
+            return None;
+        }
+        Some(InputFn { kind, token, mask })
+    }
+
+    /// `input_fn` call: the value from the mirror when it is valid (and,
+    /// for `Joy` / `Key State`, the parameter in the mirrored range; for
+    /// `Inkey$`, the key buffer empty: no side effect), else the direct
+    /// call (`host.pfn_*`), which also gives the errors.
+    fn input_call(&mut self, f: InputFn, args: &[Expr]) {
+        let a = self.tmp(ValType::I32);
+        let b = self.tmp(ValType::I32);
+        for (e, l) in args.iter().zip([a, b]) {
+            self.expr(e);
+            self.set(l);
+        }
+        // Valid mirror (refreshed first when stale)?
+        let t = self.tmp(ValType::I32);
+        self.hdr(layout::IN_VALID);
+        self.w(W::LocalTee(t));
+        self.w(W::I32Eqz);
+        self.if_(BlockType::Result(ValType::I32));
+        self.call(Imp::InputSync);
+        self.else_();
+        self.get(t);
+        self.end();
+        self.release(t, ValType::I32);
+        self.i32c(1);
+        self.w(W::I32Eq);
+        match f.kind {
+            InputKind::Joy | InputKind::KeyState => {
+                self.get(a);
+                self.i32c(if f.kind == InputKind::Joy { 2 } else { 128 });
+                self.w(W::I32LtU);
+                self.w(W::I32And);
+            }
+            InputKind::Inkey => {
+                self.hdr(layout::IN_KEYBUF);
+                self.w(W::I32Eqz);
+                self.w(W::I32And);
+            }
+            InputKind::Scin => {
+                self.hdr(layout::IN_SCIN_OK);
+                self.w(W::I32And);
+                self.hdr(layout::IN_SCIN_X);
+                self.get(a);
+                self.w(W::I32Eq);
+                self.w(W::I32And);
+                self.hdr(layout::IN_SCIN_Y);
+                self.get(b);
+                self.w(W::I32Eq);
+                self.w(W::I32And);
+            }
+            InputKind::Word(_) => {}
+        }
+        self.if_(BlockType::Result(ValType::I32));
+        match f.kind {
+            InputKind::Word(w) => self.hdr(w),
+            InputKind::Joy => {
+                self.get(L_BASE);
+                self.get(a);
+                self.i32c(4);
+                self.w(W::I32Mul);
+                self.w(W::I32Add);
+                self.w(W::I32Load(mem32(layout::IN_JOY)));
+            }
+            InputKind::KeyState => {
+                // -1 when bit `n & 7` of byte `n >> 3` is set.
+                self.i32c(0);
+                self.get(L_BASE);
+                self.get(a);
+                self.i32c(3);
+                self.w(W::I32ShrU);
+                self.w(W::I32Add);
+                self.w(W::I32Load8U(MemArg { offset: layout::IN_KEYS as u64, align: 0, memory_index: 0 }));
+                self.get(a);
+                self.i32c(7);
+                self.w(W::I32And);
+                self.w(W::I32ShrU);
+                self.i32c(1);
+                self.w(W::I32And);
+                self.w(W::I32Sub);
+            }
+            // The empty string.
+            InputKind::Inkey => self.i32c(0),
+            InputKind::Scin => self.hdr(layout::IN_SCIN_V),
+        }
+        self.else_();
+        let base = self.bridge_top;
+        for (k, l) in [a, b].into_iter().take(args.len()).enumerate() {
+            let slot = self.layout.bridge + (base + k as u32) * layout::BRIDGE_SLOT;
+            self.get(L_BASE);
+            self.get(l);
+            self.w(W::I32Store(mem32(slot + 8)));
+            self.get(L_BASE);
+            self.i32c(layout::BRIDGE_INT);
+            self.w(W::I32Store(mem32(slot)));
+        }
+        self.i32c(self.pos as i32);
+        self.i32c(f.token);
+        self.i32c(f.mask);
+        self.i32c(base as i32);
+        self.call(if f.kind == InputKind::Inkey { Imp::PfnS } else { Imp::PfnI });
+        self.end();
+        self.release(a, ValType::I32);
+        self.release(b, ValType::I32);
     }
 
     /// Pushes `PE_KIND` of the top pending entry (`PEND_COUNT` > 0).
