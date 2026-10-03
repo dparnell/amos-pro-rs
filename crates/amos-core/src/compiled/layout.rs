@@ -36,8 +36,9 @@ pub const SCOPE: u32 = 32;
 /// every operation (the control stack only changes in the runtime), so
 /// `Next` and jumps run without calling the runtime in the common case.
 ///
-/// Top entry is a For loop on an integer scalar: absolute address of the
-/// variable (0 otherwise), step, limit and point of the loop body.
+/// Top entry is a For loop on a scalar in memory (`TOP_FOR` integer,
+/// `TOP_FOR_FLOAT` float): absolute address of the variable (0 otherwise),
+/// step, limit and point of the loop body.
 pub const FOR_ADDR: u32 = 36;
 pub const FOR_STEP: u32 = 40;
 pub const FOR_LIMIT: u32 = 44;
@@ -54,6 +55,7 @@ pub const TOP_FOR: i32 = 1;
 pub const TOP_REPEAT: i32 = 2;
 pub const TOP_DO: i32 = 3;
 pub const TOP_WHILE: i32 = 4;
+pub const TOP_FOR_FLOAT: i32 = 5;
 /// Top While loop: position and point of its While instruction.
 pub const TOP_START: u32 = 116;
 pub const TOP_START_POINT: u32 = 120;
@@ -104,8 +106,12 @@ pub const PARAM_S: u32 = 172;
 pub const ERR_PROC: u32 = 176;
 /// A pending entry (`PEND_ENTRY` bytes): return position, return point,
 /// the control stack mirror words it hid (`MIRROR_WORDS`, restored when it
-/// returns), then its kind: -1 for a Gosub, else the procedure index,
-/// followed (procedures) by the `FP`, `SCOPE` and `PEND_PROC` of the caller.
+/// returns), then its kind: -1 for a Gosub, `PE_FOR` for a For loop on a
+/// scalar of the current frame, else the procedure index, followed
+/// (procedures) by the `FP`, `SCOPE` and `PEND_PROC` of the caller. A For
+/// entry has its body and exit positions in place of the return position
+/// and point, and its variable slot, limit and step at `PE_FP`, `PE_SCOPE`
+/// and `PE_PREV`.
 pub const PEND_ENTRY: u32 = 64;
 pub const PE_RET: u32 = 0;
 pub const PE_POINT: u32 = 4;
@@ -114,6 +120,7 @@ pub const PE_KIND: u32 = 44;
 pub const PE_FP: u32 = 48;
 pub const PE_SCOPE: u32 = 52;
 pub const PE_PREV: u32 = 56;
+pub const PE_FOR: i32 = -2;
 pub const MIRROR_WORDS: [u32; 9] =
     [TOP_KIND, FOR_ADDR, FOR_STEP, FOR_LIMIT, FOR_BODY, LOOP_LO, LOOP_HI, TOP_START, TOP_START_POINT];
 /// Used by the module only: the last value its `ffp2a` helper scaled to

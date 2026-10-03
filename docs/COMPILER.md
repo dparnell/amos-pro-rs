@@ -131,7 +131,17 @@ Mid$= ...) are compiled specially.
   (`--interpreted` skips it) and fall back to interpreting on failure.
 * Hosts: `amos-wasmhost` (wasmtime natively, `WebAssembly.instantiate` on
   the web) share the import list in `amos-wasmhost/src/imports.rs`
-  (interface version 12, `amos_core::compiled::ABI_VERSION`).
+  (interface version 13, `amos_core::compiled::ABI_VERSION`).
+* For / Next on a scalar run in the module: For pushes a pending entry
+  (`layout::PE_FOR`) and writes the control stack mirror itself; a Next
+  whose For is known from the program text (`StaticFor`) checks that the
+  mirror's top is that loop (`TOP_FOR` / `TOP_FOR_FLOAT` and its body
+  position), steps the variable in memory as the interpreter does
+  (`float_to_int`, wrapping add, `int_to_float`), compares with the step
+  and limit (constants when the For has constants) and jumps straight back
+  to the body; at the end it drops the entry itself when still pending,
+  else calls `host.next_done`. Anything else (test point work, another
+  loop on top, loops on array elements) takes the general path.
 * Gosub / Return and procedure calls / End Proc / Pop Proc run in the
   module: a call the stack surely has room for becomes a *pending* entry in
   memory (locals and parameters in the procedure's memory frame, Param /

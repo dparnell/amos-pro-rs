@@ -420,14 +420,15 @@ impl Runtime {
             Some(Ctl::For { var, step: s, limit: l, body, exit }) => {
                 lo = *body as i32;
                 hi = *exit as i32;
-                if var.index.is_none() && !self.loc_resident(it, var) && self.loc_type(it, var) == 0 {
+                let ty = if var.index.is_none() && !self.loc_resident(it, var) { self.loc_type(it, var) } else { 2 };
+                if ty < 2 {
                     let bp = self.point_quiet(*body);
                     if bp >= 0 {
                         addr = (self.base + self.loc_addr(it, var)) as i32;
                         step = *s;
                         limit = *l;
                         body_point = bp;
-                        kind = layout::TOP_FOR;
+                        kind = if ty == 0 { layout::TOP_FOR } else { layout::TOP_FOR_FLOAT };
                     }
                 }
             }
@@ -694,12 +695,25 @@ impl Runtime {
             let ret = ld_i32(mem, e + layout::PE_RET) as usize;
             let kind = ld_i32(mem, e + layout::PE_KIND);
             // The module checked the room (entries are at most 42 bytes).
-            if kind < 0 {
+            if kind == layout::PE_FOR {
+                // As `for_push`.
+                let var = VarLoc {
+                    slot: ld_i32(mem, e + layout::PE_FP) as u16,
+                    index: None,
+                    frame: it.frame_stack.len().saturating_sub(1),
+                };
+                let (limit, step) = (ld_i32(mem, e + layout::PE_SCOPE), ld_i32(mem, e + layout::PE_PREV));
+                let exit = ld_i32(mem, e + layout::PE_POINT) as usize;
+                let _ = it.push_ctl(Ctl::For { var, step, limit, body: ret, exit });
+            } else if kind < 0 {
                 let _ = it.push_ctl(Ctl::Gosub { ret });
             } else {
                 let _ = self.push_frame(it, kind as usize, ret);
             }
         }
+        // The module wrote the mirror of these entries: the cached key no
+        // longer says what the mirror words hold.
+        self.mirror_key = None;
         st_i32(mem, layout::PEND_COUNT, 0);
         st_i32(mem, layout::PEND_PROC, 0);
         st_i32(mem, layout::CTL_LEN, it.ctl.len() as i32);

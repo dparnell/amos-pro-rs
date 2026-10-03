@@ -72,6 +72,10 @@ const SYNTHETIC: &[(&str, &str)] = &[
         "procedures",
         "Do\nFor I=1 To 100 : P[I] : S=S+Param : Next\nLoop\nProcedure P[N]\nIf N<2 Then Pop Proc[N]\nEnd Proc[N*2+1]",
     ),
+    ("for/next integer", "Do\nFor I=1 To 1000 : A=A+I : Next I\nLoop"),
+    ("for/next float", "Do\nX#=0 : For F#=1 To 1000 : X#=X#+F# : Next F#\nLoop"),
+    ("for/next nested", "Do\nFor I=1 To 100 : For J=1 To 5 : Inc N : Next J : Next I\nLoop"),
+    ("for/next with keyword", "Do\nFor I=0 To 199 : Plot I,I/2 : Next I\nLoop"),
     ("busy wait (Scin, X/Y Mouse, Mouse Key)", "Do : N=Scin(X Mouse,Y Mouse) : K=Mouse Key : Loop"),
     ("inkey$ / joy / timer", "Do : A$=Inkey$ : J=Joy(1) : T=Timer : K=Key State(69) : Loop"),
     (

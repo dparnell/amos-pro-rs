@@ -717,3 +717,84 @@ fn loop_regions() {
         }
     }
 }
+
+/// For loops whose `Next` the module runs itself (`StaticFor`: the loop
+/// entry pushed by the module, the variable stepped in place, the loop
+/// dropped by the module when its entry is still pending), against the
+/// interpreter in everything that can observe or disturb a loop; at
+/// several budgets (yields everywhere) and split in functions.
+#[test]
+fn static_for_loops() {
+    let progs = [
+        // Integer and float variables, steps, limits, constant or not.
+        "For I=1 To 5 : Print I; : Next I : Print I",
+        "For I=5 To 1 Step -2 : Print I; : Next : Print I",
+        "S=3 : L=10 : For I=1 To L Step S : Print I; : Next : Print I",
+        "S=-3 : For I=10 To 1 Step S : Print I; : Next : Print I",
+        "For I=3 To 1 : Print \"never\" : Next : Print I",
+        "For F#=1 To 4 : Print F#; : Next : Print F#",
+        "For F#=0.5 To 3.7 Step 1 : Print F#; : Next : Print F#",
+        "For F#=5 To -5 Step -2 : Print F#; : Next : Print F#",
+        "X#=0 : For F#=1 To 1000 : X#=X#+F# : Next : Print X#;F#",
+        "Set Double Precision\nFor F#=1.5 To 6 Step 2 : Print F#; : Next : Print F#",
+        // Float variables beyond 2^24 (FFP rounding of the stepped value).
+        "C=0 : For F#=16777210 To 16777230 : Print F#; : Inc C : If C>12 Then Exit\nNext : Print F#;C",
+        "Set Double Precision\nFor F#=16777214 To 16777220 : Print F#; : Next : Print F#",
+        "C=0 : For F#=-16777220 To -16777200 Step 3 : Print F#; : Inc C : If C>10 Then Exit\nNext : Print C",
+        // The variable, the step's and the limit's variables changed in the body.
+        "For I=1 To 10 : I=I+2 : Print I; : Next : Print I",
+        "L=5 : For I=1 To L : L=2 : Print I; : Next : Print I;L",
+        "S=2 : For I=1 To 9 Step S : S=-1 : Print I; : Next : Print I",
+        "For F#=1 To 10 : F#=F#*2 : Print F#; : Next : Print F#",
+        "For I=1 To 3 : I=I-1 : C=C+1 : If C>5 Then I=10\nNext : Print I;C",
+        // Step 0 and integer overflow at the limit (the interpreter's
+        // wrapping add: these loops only end by Exit).
+        "C=0 : For I=1 To 5 Step 0 : Inc C : If C=7 Then Exit\nNext : Print I;C",
+        "C=0 : For I=2147483645 To 2147483647 : Print I; : Inc C : If C=6 Then Exit\nNext : Print C",
+        "C=0 : For I=-2147483646 To -2147483648 Step -1 : Print I; : Inc C : If C=5 Then Exit\nNext : Print C",
+        // Exit / Exit If, nested loops of the same and other kinds.
+        "For I=1 To 10 : For J=1 To 10 : Exit If J=3,2 : Next : Next : Print I;J",
+        "For I=1 To 3 : For J=1 To 10 : Exit If J=2 : Next : Print J; : Next : Print I",
+        "For I=1 To 3 : For I=1 To 2 : Print I; : Next : Next : Print I",
+        "For I=1 To 3 : J=0 : Repeat : Inc J : Until J=2 : While J<4 : Inc J : Wend : Print I;J; : Next",
+        "For I=1 To 3 : For J=I To 3 : For K=J To 3 : Inc N : Next : Next : Next : Print N",
+        // Goto out of a loop (dropped by the jump), into a loop (Next
+        // without For), back to the For.
+        "For K=1 To 3000 : For I=1 To 5 : If I=2 Then Goto OUT\nNext\nOUT: Next : Print K;I",
+        "Goto IN\nFor I=1 To 3\nIN: Print I;\nNext",
+        "C=0\nAGAIN: For I=1 To 3\nInc C : If C<5000 Then Goto AGAIN\nNext : Print C;I",
+        "For I=1 To 2 : Repeat : Next",
+        // Gosubs and procedures in the body, Return / Pop Proc leaving loops.
+        "For I=1 To 3 : Gosub L : Print I; : Next : End\nL: For J=1 To 5 : If J=2 Then Return\nNext J : Return",
+        "For K=1 To 2000 : Gosub L : Next : Print K;J : End\nL: For J=1 To 5 : If J=3 Then Return\nNext : Return",
+        "For I=1 To 3 : P[I] : Next : Print I : End\nProcedure P[N]\nFor I=1 To N : Print N*10+I; : Next\nEnd Proc",
+        "For K=1 To 2000 : P : Next : Print K : End\nProcedure P\nFor J=1 To 5 : If J=3 Then Pop Proc\nNext : End Proc",
+        "R[3]\nProcedure R[N]\nFor I=1 To 2 : If N>0 Then R[N-1]\nPrint N;I;\nNext\nEnd Proc",
+        "R[0]\nProcedure R[N]\nFor I=1 To 1 : R[N+1] : Next\nEnd Proc",
+        "Gosub A : Print \"end\" : End\nA: For I=1 To 3 : Gosub B : Next : Return\nB: For J=1 To 2 : Print I;J; : Next : Return",
+        // Errors in the body, handled; Resume, Resume Next.
+        "On Error Goto H\nFor I=1 To 5 : A=10/(I-3) : Print A; : Next : Print \"end\" : End\nH: Print \"h\"; : Resume Next",
+        "On Error Goto H\nN=0\nFor I=1 To 4 : A=10/(I-2-N) : Print A; : Next : End\nH: N=N+1 : If N<4 Then Resume\nPrint \"stop\";I",
+        "Trap For I=1 To 3 : Next : Print I;Errtrap",
+        // Yields in the body, Every.
+        "For I=1 To 3 : Wait Vbl : Print I; : Next",
+        "Every 1 Gosub E\nFor I=1 To 20000 : A=A+1 : Next : Every Off : Print A;C>0 : End\nE: For K=1 To 3 : Inc C : Next : Every On : Return",
+        "Every 1 Proc E\nFor F#=1 To 9000 : A=A+1 : Next : Every Off : Print A;C>0 : End\nProcedure E\nFor K=1 To 2 : Inc C : Next : Every On\nEnd Proc",
+        // Loops on array elements (the runtime's path) next to scalar ones.
+        "Dim A(3) : For A(1)=1 To 3 : For I=1 To 2 : Print A(1)*10+I; : Next : Next : Print A(1)",
+    ];
+    for p in progs {
+        same(p);
+        // (Long loops: budgets that keep the frame count reasonable.)
+        let budgets: &[usize] = if p.contains("Every") {
+            &[40, 97, 1000]
+        } else if p.contains("000") {
+            &[7, 13, 40, 1000]
+        } else {
+            &[1, 2, 3, 5, 9, 1000]
+        };
+        for &b in budgets {
+            same_budget(p, b);
+        }
+    }
+}

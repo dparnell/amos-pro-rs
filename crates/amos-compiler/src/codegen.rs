@@ -221,6 +221,35 @@ struct Gen<'a> {
     /// Parameters of the function being compiled (locals before them).
     nparams: u32,
     options: crate::Options,
+    /// The For loop of each `Next` (by instruction index) that is known
+    /// statically (`static_fors`).
+    next_for: std::collections::HashMap<usize, StaticFor>,
+}
+
+/// A For loop on a scalar variable and its `Next`, found in the program
+/// text: when the top of the control stack is that loop (the mirror says
+/// a For whose body is `body`), its variable type, step and limit are the
+/// ones of the For instruction.
+#[derive(Clone, Copy, Debug)]
+struct StaticFor {
+    body: usize,
+    body_point: u32,
+    float: bool,
+    /// Step and limit when they are constants.
+    step: Option<i32>,
+    limit: Option<i32>,
+}
+
+/// An integer constant expression (as `as_int` converts it).
+fn const_int(e: &Expr) -> Option<i32> {
+    match &e.kind {
+        ExprKind::Int(v) => Some(*v),
+        ExprKind::Neg(a) => match a.kind {
+            ExprKind::Int(v) => Some(v.wrapping_neg()),
+            _ => None,
+        },
+        _ => None,
+    }
 }
 
 fn mem32(offset: u32) -> MemArg {
@@ -747,7 +776,22 @@ impl<'a> Gen<'a> {
         if self.double {
             self.w(W::F64ConvertI32S);
         } else {
+            // Below 2^24 in magnitude the FFP value is exact (`Ffp::from_i32`
+            // only drops bits beyond 24).
+            let t = self.tmp(ValType::I32);
+            self.w(W::LocalTee(t));
+            self.i32c(0x00FF_FFFF);
+            self.w(W::I32Add);
+            self.i32c(0x01FF_FFFE);
+            self.w(W::I32LeU);
+            self.if_(BlockType::Result(ValType::F64));
+            self.get(t);
+            self.w(W::F64ConvertI32S);
+            self.else_();
+            self.get(t);
             self.helper(H::I2f);
+            self.end();
+            self.release(t, ValType::I32);
         }
     }
 
@@ -2064,6 +2108,123 @@ impl<'a> Gen<'a> {
         Ok(())
     }
 
+    /// Pushes `PE_KIND` of the top pending entry (`PEND_COUNT` > 0).
+    fn pending_top_kind(&mut self) {
+        self.get(L_BASE);
+        self.hdr(layout::PEND_COUNT);
+        self.i32c(1);
+        self.w(W::I32Sub);
+        self.i32c(layout::PEND_ENTRY as i32);
+        self.w(W::I32Mul);
+        self.w(W::I32Add);
+        self.i32c(self.layout.pending as i32);
+        self.w(W::I32Add);
+        self.w(W::I32Load(mem32(layout::PE_KIND)));
+    }
+
+    /// `Next` of the For loop `sf` (`StaticFor`), when nothing is pending at
+    /// the test point and the top of the control stack is that loop: the
+    /// variable stepped as `Interp` does (`float_to_int`, wrapping add,
+    /// `int_to_float` for a float), a direct jump back to the body, else the
+    /// loop dropped (by the module when its entry is still pending). Opens
+    /// an `if` whose `else` the caller fills with the general case.
+    fn static_next(&mut self, sf: StaticFor, pos: i32) {
+        self.hdr(layout::ATT);
+        self.w(W::I32Eqz);
+        self.hdr(layout::TOP_KIND);
+        self.i32c(if sf.float { layout::TOP_FOR_FLOAT } else { layout::TOP_FOR });
+        self.w(W::I32Eq);
+        self.w(W::I32And);
+        self.hdr(layout::LOOP_LO);
+        self.i32c(sf.body as i32);
+        self.w(W::I32Eq);
+        self.w(W::I32And);
+        self.if_(BlockType::Empty);
+        let (a, v) = (self.tmp(ValType::I32), self.tmp(ValType::I32));
+        self.hdr(layout::FOR_ADDR);
+        self.set(a);
+        self.get(a);
+        self.get(a);
+        if sf.float {
+            self.w(W::F64Load(mem64(0)));
+            self.w(W::I32TruncSatF64S);
+        } else {
+            self.w(W::I32Load(mem32(0)));
+        }
+        match sf.step {
+            Some(c) => self.i32c(c),
+            None => self.hdr(layout::FOR_STEP),
+        }
+        self.w(W::I32Add);
+        self.w(W::LocalTee(v));
+        if sf.float {
+            self.int_to_float();
+            self.w(W::F64Store(mem64(0)));
+        } else {
+            self.w(W::I32Store(mem32(0)));
+        }
+        self.release(a, ValType::I32);
+        // Not done: `v <= limit` (step >= 0) or `v >= limit`.
+        let limit = |g: &mut Self| match sf.limit {
+            Some(c) => g.i32c(c),
+            None => g.hdr(layout::FOR_LIMIT),
+        };
+        match sf.step {
+            Some(c) => {
+                self.get(v);
+                limit(self);
+                self.w(if c >= 0 { W::I32LeS } else { W::I32GeS });
+            }
+            None => {
+                self.hdr(layout::FOR_STEP);
+                self.i32c(0);
+                self.w(W::I32GeS);
+                self.if_(BlockType::Result(ValType::I32));
+                self.get(v);
+                limit(self);
+                self.w(W::I32LeS);
+                self.else_();
+                self.get(v);
+                limit(self);
+                self.w(W::I32GeS);
+                self.end();
+            }
+        }
+        self.release(v, ValType::I32);
+        self.if_(BlockType::Empty);
+        self.jump_point(sf.body_point);
+        self.end();
+        // Done: drop the loop.
+        self.hdr(layout::PEND_COUNT);
+        self.hdr(layout::PEND_PROC);
+        self.w(W::I32GtS);
+        self.if_(BlockType::Empty);
+        {
+            let e = self.tmp(ValType::I32);
+            self.get(L_BASE);
+            self.hdr(layout::PEND_COUNT);
+            self.i32c(1);
+            self.w(W::I32Sub);
+            self.w(W::LocalTee(e));
+            self.w(W::I32Store(mem32(layout::PEND_COUNT)));
+            self.get(L_BASE);
+            self.get(e);
+            self.i32c(layout::PEND_ENTRY as i32);
+            self.w(W::I32Mul);
+            self.w(W::I32Add);
+            self.i32c(self.layout.pending as i32);
+            self.w(W::I32Add);
+            self.set(e);
+            self.restore_mirror(e);
+            self.release(e, ValType::I32);
+        }
+        self.else_();
+        self.i32c(pos);
+        self.call(Imp::NextDone);
+        self.status_check();
+        self.end();
+    }
+
     /// Pushes 1 if `target` is in the range of the top loop (no loop to
     /// drop by `after_jump`).
     fn in_loop_range(&mut self, target: usize) {
@@ -2218,6 +2379,74 @@ impl<'a> Gen<'a> {
                     None => self.i32c(1),
                 }
                 self.set(stp);
+                // On a scalar, when the stack surely has room: a pending
+                // entry and its mirror, written by the module.
+                let native = matches!(lv, LValue::Scalar { .. }) && ty < 2;
+                if native {
+                    let body_point = self.point_of(*body)?;
+                    self.room_check();
+                    self.if_(BlockType::Empty);
+                    let e = self.tmp(ValType::I32);
+                    self.get(L_BASE);
+                    self.hdr(layout::PEND_COUNT);
+                    self.i32c(layout::PEND_ENTRY as i32);
+                    self.w(W::I32Mul);
+                    self.w(W::I32Add);
+                    self.i32c(self.layout.pending as i32);
+                    self.w(W::I32Add);
+                    self.set(e);
+                    for (off, v) in [
+                        (layout::PE_RET, *body as i32),
+                        (layout::PE_POINT, *exit as i32),
+                        (layout::PE_KIND, layout::PE_FOR),
+                        (layout::PE_FP, lv.slot() as i32),
+                    ] {
+                        self.get(e);
+                        self.i32c(v);
+                        self.w(W::I32Store(mem32(off)));
+                    }
+                    for (off, t) in [(layout::PE_SCOPE, lim), (layout::PE_PREV, stp)] {
+                        self.get(e);
+                        self.get(t);
+                        self.w(W::I32Store(mem32(off)));
+                    }
+                    for (k, &w) in layout::MIRROR_WORDS.iter().enumerate() {
+                        self.get(e);
+                        self.hdr(w);
+                        self.w(W::I32Store(mem32(layout::PE_MIRROR + k as u32 * 4)));
+                    }
+                    self.release(e, ValType::I32);
+                    self.get(L_BASE);
+                    self.hdr(layout::PEND_COUNT);
+                    self.i32c(1);
+                    self.w(W::I32Add);
+                    self.w(W::I32Store(mem32(layout::PEND_COUNT)));
+                    // The mirror `Runtime::mirror` gives this entry.
+                    self.get(L_BASE);
+                    let off = self.var_addr(lv.slot());
+                    self.i32c(off as i32);
+                    self.w(W::I32Add);
+                    self.w(W::I32Store(mem32(layout::FOR_ADDR)));
+                    for (w, t) in [(layout::FOR_STEP, stp), (layout::FOR_LIMIT, lim)] {
+                        self.get(L_BASE);
+                        self.get(t);
+                        self.w(W::I32Store(mem32(w)));
+                    }
+                    let kind = if ty == 1 { layout::TOP_FOR_FLOAT } else { layout::TOP_FOR };
+                    for (w, v) in [
+                        (layout::TOP_KIND, kind),
+                        (layout::FOR_BODY, body_point as i32),
+                        (layout::LOOP_LO, *body as i32),
+                        (layout::LOOP_HI, *exit as i32),
+                        (layout::TOP_START, 0),
+                        (layout::TOP_START_POINT, 0),
+                    ] {
+                        self.get(L_BASE);
+                        self.i32c(v);
+                        self.w(W::I32Store(mem32(w)));
+                    }
+                    self.else_();
+                }
                 self.i32c(pos);
                 self.i32c(lv.slot() as i32);
                 self.get(flat);
@@ -2227,18 +2456,26 @@ impl<'a> Gen<'a> {
                 self.i32c(*exit as i32);
                 self.call(Imp::ForPush);
                 self.status_check();
+                if native {
+                    self.end();
+                }
                 self.release(flat, ValType::I32);
                 self.release(lim, ValType::I32);
                 self.release(stp, ValType::I32);
             }
             Stmt::Next => {
+                let sf = self.next_for.get(&k).copied();
+                if let Some(sf) = sf {
+                    self.static_next(sf, pos);
+                    self.else_();
+                }
                 // Fast path: nothing to do at the test point and the top of
                 // the control stack is a For on an integer variable.
                 self.hdr(layout::ATT);
                 self.w(W::I32Eqz);
-                self.hdr(layout::FOR_ADDR);
-                self.i32c(0);
-                self.w(W::I32Ne);
+                self.hdr(layout::TOP_KIND);
+                self.i32c(layout::TOP_FOR);
+                self.w(W::I32Eq);
                 self.w(W::I32And);
                 self.if_(BlockType::Result(ValType::I32));
                 let (a, v) = (self.tmp(ValType::I32), self.tmp(ValType::I32));
@@ -2276,6 +2513,9 @@ impl<'a> Gen<'a> {
                 self.call(Imp::Next);
                 self.end();
                 self.status_check();
+                if sf.is_some() {
+                    self.end();
+                }
             }
             Stmt::LoopStart { do_loop, body, exit } => {
                 self.i32c(pos);
@@ -2501,6 +2741,14 @@ impl<'a> Gen<'a> {
                 self.hdr(layout::PEND_PROC);
                 self.w(W::I32GtS);
                 self.w(W::I32And);
+                self.if_(BlockType::Result(ValType::I32));
+                // (A pending For loop on top: the runtime drops it.)
+                self.pending_top_kind();
+                self.i32c(-1);
+                self.w(W::I32Eq);
+                self.else_();
+                self.i32c(0);
+                self.end();
                 self.if_(BlockType::Empty);
                 {
                     let e = self.tmp(ValType::I32);
@@ -3043,6 +3291,38 @@ impl<'a> Gen<'a> {
         Ok(())
     }
 
+    /// The For loops on a scalar (`StaticFor`), by the instruction index of
+    /// their `Next`: the instruction before the For's exit, in its scope.
+    fn static_fors(&self, stmts: &[Stmt]) -> Result<std::collections::HashMap<usize, StaticFor>, CompileError> {
+        let mut out = std::collections::HashMap::new();
+        for (k, st) in stmts.iter().enumerate() {
+            let Stmt::For { lv: LValue::Scalar { ty, .. }, limit, step, body, exit, .. } = st else { continue };
+            if *ty > 1 {
+                continue;
+            }
+            let after = self.instrs.partition_point(|i| i.pos < *exit);
+            if after == 0 || self.instrs.get(after).is_some_and(|i| i.pos != *exit) {
+                continue;
+            }
+            let n = after - 1;
+            if n <= k || !matches!(stmts.get(n), Some(Stmt::Next)) || self.instrs[n].scope != self.instrs[k].scope {
+                continue;
+            }
+            let sf = StaticFor {
+                body: *body,
+                body_point: self.point_of(*body)?,
+                float: *ty == 1,
+                step: match step {
+                    None => Some(1),
+                    Some(e) => const_int(e),
+                },
+                limit: const_int(limit),
+            };
+            out.insert(n, sf);
+        }
+        Ok(out)
+    }
+
     /// The functions of the program: `run`, then (for large programs, see
     /// `Options::split_min`) the functions of consecutive top level units
     /// (loop regions are not cut; larger ones are left out), which
@@ -3050,6 +3330,7 @@ impl<'a> Gen<'a> {
     /// parameters, locals after them, code).
     fn functions(&mut self, stmts: &[Stmt]) -> Result<Vec<Function>, CompileError> {
         self.regions = self.loop_regions(stmts)?;
+        self.next_for = self.static_fors(stmts)?;
         let n = self.instrs.len() as u32;
         if n >= self.options.split_min {
             // A region is compiled in one function: the large ones would
@@ -3460,6 +3741,7 @@ pub fn module(
         chunk: None,
         nparams: 1,
         options: *options,
+        next_for: Default::default(),
     };
     let fns = g.functions(stmts)?;
     let mut code = CodeSection::new();
