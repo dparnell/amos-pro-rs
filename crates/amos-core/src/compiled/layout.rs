@@ -190,6 +190,10 @@ pub const IN_MZONE_V: u32 = 516;
 /// frames (fades, colour cycling).
 pub const IN_COLOUR_N: u32 = 520;
 pub const IN_COLOUR_V: u32 = 524;
+/// The same for `Choice(n)`: menu choices only change at test points
+/// (menus), through statements, and between frames.
+pub const IN_CHOICE_N: u32 = 528;
+pub const IN_CHOICE_V: u32 = 532;
 /// Start of the global variables.
 pub const GLOBALS: u32 = 576;
 

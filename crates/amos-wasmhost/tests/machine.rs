@@ -391,6 +391,12 @@ fn multi_wait_and_colour_match_the_interpreter() {
         "Curs Off\nFade 3 To 1\nDo : C=Colour(1) : Inc N : If N mod 1000=0 Then Print C;\nLoop",
         "Curs Off\nFlash 1,\"(F00,2)(0F0,2)\"\nDo : C=Colour(1) : Multi Wait : Inc N : If N mod 1000=0 Then Print C;\nLoop",
         "Curs Off\nWait 3\nPrint Colour(40);Colour(-1)",
+        // n = -1 is never served from the cache (0 marks it empty).
+        "Curs Off\nColour 31,$ABC\nDo : A=Colour(-1) : Inc N : If N mod 3000=0 Then Print A;Colour(1);\nLoop",
+        // Choice(n) kept while the mirror is valid; menus driven by the fed
+        // mouse (right button), choices read in a tight loop.
+        "Curs Off\nMenu$(1)=\" A \" : Menu$(1,1)=\" one \" : Menu$(1,2)=\" two \" : Menu$(2)=\" B \" : Menu$(2,1)=\" three \"\nMenu On\nDo : C=Choice(1) : D=Choice(2) : Inc N\nIf N mod 3000=0 Then Print C;D;Choice;\nIf N mod 9000=0 Then Menu Off : Menu On\nLoop",
+        "Curs Off\nWait 3\nPrint Choice(1);Choice(2)\nOn Error Goto H : Print Choice(0) : Print Choice(9) : End\nH: Print \"e\";Errn; : Resume Next",
     ];
     for p in progs {
         compare_with_input(p, 12);
@@ -415,4 +421,40 @@ fn direct_typed_keywords_match_the_interpreter() {
     for p in progs {
         compare_with_input(p, 50);
     }
+}
+
+/// `Choice(n)` kept by the module while the input mirror is valid: menu
+/// items chosen by their keys (`Menu Key`) between the reads of a tight
+/// loop, so that the choices change many times.
+#[test]
+fn menu_choices_match_the_interpreter() {
+    use amos_core::input::InputEvent;
+    let src = "Curs Off\nMenu$(1)=\" A \" : Menu$(1,1)=\" one \" : Menu$(1,2)=\" two \" : Menu$(2)=\" B \" : Menu$(2,1)=\" three \"\n\
+               Menu Key(1,1) To \"b\" : Menu Key(1,2) To \"e\" : Menu Key(2,1) To \"h\"\nMenu On\n\
+               Do : C=Choice(1) : Inc N\nIf C<>OC Then Print C;Choice(2);N>0; : OC=C\nLoop";
+    let prg = tokenise_program(src.as_bytes()).expect("tokenise");
+    let wasm = amos_compiler::compile(&prg).expect("compile");
+    let mut a = Machine::new();
+    a.run_program(&prg).expect("test");
+    let mut b = Machine::new();
+    let mut cp = CompiledProgram::start(&mut b, &prg, &wasm).expect("start");
+    // b, e, h on the Amiga keyboard: Choice(1) 1, 1, 2, 1, 1, 2...
+    let keys = [(0x35, 'b'), (0x25, 'h'), (0x12, 'e'), (0x25, 'h'), (0x35, 'b'), (0x25, 'h')];
+    let mut changes = 0;
+    for f in 0..40 {
+        if f % 6 == 2 {
+            let (raw, ch) = keys[(f / 6) % keys.len()];
+            for m in [&mut a, &mut b] {
+                m.input(InputEvent::Key { scancode: raw, pressed: true, ch: Some(ch) });
+                m.input(InputEvent::Key { scancode: raw, pressed: false, ch: None });
+            }
+        }
+        a.vbl();
+        cp.vbl(&mut b);
+        assert_eq!(a.hw.log, b.hw.log, "log at frame {f}");
+        assert_eq!(a.state, b.state, "state at frame {f}");
+        changes = a.hw.log.len();
+    }
+    // The choices did change (the loop printed several pairs).
+    assert!(changes >= 4, "{:?}", a.hw.log);
 }

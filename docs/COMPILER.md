@@ -131,7 +131,7 @@ Mid$= ...) are compiled specially.
   (`--interpreted` skips it) and fall back to interpreting on failure.
 * Hosts: `amos-wasmhost` (wasmtime natively, `WebAssembly.instantiate` on
   the web) share the import list in `amos-wasmhost/src/imports.rs`
-  (interface version 19, `amos_core::compiled::ABI_VERSION`).
+  (interface version 20, `amos_core::compiled::ABI_VERSION`).
 * Polling functions read a mirror of the input state in memory
   (`layout::IN_VALID`): `X Mouse`, `Y Mouse`, `Mouse Key`, `Timer`,
   `Joy(0/1)`, `Key State(n)`, `Inkey$` while the key buffer is empty, and
@@ -163,6 +163,40 @@ Mid$= ...) are compiled specially.
   precision `Val` through `amos_core::softdouble` (the original's
   `AscToDouble` with the not correctly rounded double routines of its C
   runtime, in i64 integer arithmetic; no host call since version 9).
+* Keywords of the machine run without a token stream when
+  `machine::plain_args` allows it: `host.plain_keyword` / `host.pfn_*`
+  (and `host.plain_batch` for runs of them) give the parameters with
+  `Interp::preset_ints` / `preset_buf`; the hottest ones call their typed
+  functions on `Hardware` directly (`compiled/runtime/direct.rs`: Locate,
+  Pen, Ink, Plot, Draw, Bar, Box, Circle, Cls, Screen, Centre, Text, Bob,
+  Sprite, Zone, X/Y Screen, Colour, Choice, Peek/Poke, the collisions,
+  Dialog...) when their parameters are integers (strings borrowed from the
+  module's memory for the call). Polling functions also read the input
+  mirror and its caches (Scin, Mouse Zone, Colour(n), Choice(n));
+  `Multi Wait` and the other instructions the machine does nothing for are
+  skipped. The maths functions call the host's `f64` library through a
+  pure import (`rt.math`); `Sqr` is native.
+* On the web the imports are this module's exported wasm functions
+  (`amos_<module>_<name>`), so calls between the two instances do not go
+  through JavaScript.
+* Speed (release builds, `cargo run --release -p amos-wasmhost --example
+  suite -- 200 0 -` and the full list; frames of 200 000 instructions;
+  ratios are interpreted / compiled time on a loaded machine):
+
+  | Workload | Native | Web (node) |
+  |---|---|---|
+  | all 194 examples, 200 frames | 4.2x | 5.4x |
+  | maths + arrays | 4.3x | 10x |
+  | strings | 5.6x | 16x |
+  | procedures | 15x | 17x |
+  | For/Next integer / float / nested | 12x / 4.4x / 28x | 15x / 8x / 27x |
+  | For/Next with a keyword | 2.9x | 6x |
+  | busy wait / Inkey$ polling | 25x / 37x | 35x / 48x |
+  | plot/draw, bar/box/circle, locate/print | 1.2-1.4x | 1.4-1.5x |
+
+  The examples still near 1x (Help_55, 3D_Scroller, AMAL_3, Menus_7 at
+  1.2-1.3x) spend their time in the machine (text output, bobs, sprite
+  collisions, audio), which both run the same.
 * Checks: differential tests (`cargo test -p amos-wasmhost`), the native
   frame-by-frame comparison of all examples (`cargo run -p amos-wasmhost
   --example compare`), and the same comparison in the real web runtime under

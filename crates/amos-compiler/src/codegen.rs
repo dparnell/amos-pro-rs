@@ -268,6 +268,8 @@ enum InputKind {
     MouseZone,
     /// `Colour(n)`: the last value of the runtime for the same n.
     Colour,
+    /// `Choice(n)`: the same.
+    Choice,
 }
 
 /// `Gen::input_fn`: the function and its direct call.
@@ -2288,6 +2290,7 @@ impl<'a> Gen<'a> {
             KEY_SHIFT if args.is_empty() => InputKind::KeyShift,
             MOUSE_ZONE if args.is_empty() => InputKind::MouseZone,
             COLOUR_2 if int_arg => InputKind::Colour,
+            CHOICE_2 if int_arg => InputKind::Choice,
             JOY if int_arg => InputKind::Joy,
             KEY_STATE if int_arg => InputKind::KeyState,
             INKEY_S if args.is_empty() && ty == Ty::Str => InputKind::Inkey,
@@ -2352,12 +2355,19 @@ impl<'a> Gen<'a> {
                 self.hdr(layout::IN_MZONE_OK);
                 self.w(W::I32And);
             }
-            InputKind::Colour => {
-                self.hdr(layout::IN_COLOUR_N);
+            InputKind::Colour | InputKind::Choice => {
+                // Kept for n when the word is n + 1 (0: nothing kept, so
+                // not for n = -1).
+                let w = if f.kind == InputKind::Colour { layout::IN_COLOUR_N } else { layout::IN_CHOICE_N };
+                self.hdr(w);
                 self.get(a);
                 self.i32c(1);
                 self.w(W::I32Add);
                 self.w(W::I32Eq);
+                self.w(W::I32And);
+                self.hdr(w);
+                self.i32c(0);
+                self.w(W::I32Ne);
                 self.w(W::I32And);
             }
             InputKind::Word(_) | InputKind::KeyShift => {}
@@ -2400,6 +2410,7 @@ impl<'a> Gen<'a> {
             InputKind::Scin => self.hdr(layout::IN_SCIN_V),
             InputKind::MouseZone => self.hdr(layout::IN_MZONE_V),
             InputKind::Colour => self.hdr(layout::IN_COLOUR_V),
+            InputKind::Choice => self.hdr(layout::IN_CHOICE_V),
         }
         self.else_();
         let base = self.bridge_top;

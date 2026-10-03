@@ -1258,6 +1258,7 @@ impl Runtime {
         st_i32(mem, layout::IN_SCIN_OK, 0);
         st_i32(mem, layout::IN_MZONE_OK, 0);
         st_i32(mem, layout::IN_COLOUR_N, 0);
+        st_i32(mem, layout::IN_CHOICE_N, 0);
         st_i32(mem, layout::IN_VALID, 1);
         1
     }
@@ -1478,6 +1479,13 @@ impl Runtime {
         };
         if !structure::input_read_only(token as u16) {
             input_stale(mem);
+        } else if token as u16 == crate::tokens::tk::CHOICE_2
+            && ld_i32(mem, layout::IN_VALID) == 1
+            && let (Ok(Value::Int(v)), Some(n)) = (&r, self.last_int)
+        {
+            // Kept for the module (`layout::IN_CHOICE_N`).
+            st_i32(mem, layout::IN_CHOICE_V, *v);
+            st_i32(mem, layout::IN_CHOICE_N, n.wrapping_add(1));
         } else if token as u16 == crate::tokens::tk::COLOUR_2
             && ld_i32(mem, layout::IN_VALID) == 1
             && let (Ok(Value::Int(v)), Some(n)) = (&r, self.last_int)
