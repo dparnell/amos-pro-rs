@@ -165,6 +165,9 @@ pub struct TextState {
 
 type WR = Result<(), u16>;
 
+/// Pen, paper, disabled planes, flags, writing mode and source of a glyph.
+type GlyphStyle = (u8, u8, u8, u16, u8, u8);
+
 /// The 8 bits of a glyph row as a word whose byte k is $FF when bit 7-k
 /// is set (pixel k of the row), in memory order.
 #[inline]
@@ -1112,7 +1115,12 @@ impl Screen {
         #[allow(clippy::needless_range_loop)] // (r indexes the glyph rows)
         for r in 0..8 {
             let i = (y as usize + r) * bw + x0 as usize;
-            for (px, &c) in bm[i..i + 8 * n].as_chunks_mut::<8>().0.iter_mut().zip(&text[..n]) {
+            for (px, &c) in bm[i..i + 8 * n]
+                .as_chunks_mut::<8>()
+                .0
+                .iter_mut()
+                .zip(&text[..n])
+            {
                 let m = expand_bits(font[c as usize][r]);
                 *px = ((u64::from_ne_bytes(*px) & kp) | (fg & m) | (bg & !m)).to_ne_bytes();
             }
@@ -1183,6 +1191,71 @@ impl Screen {
             return;
         }
         // Slow path (YaFlag, +W.s:15680), plane by plane.
+        if !self.glyph_planes(x, y, g, (pen, paper, keep, flags, wmode, wsel)) {
+            self.glyph_planes_clipped(x, y, g, (pen, paper, keep, flags, wmode, wsel));
+        }
+    }
+
+    /// `draw_glyph` with writing mode flags, 8 pixels at a time; false (and
+    /// nothing done) when the cell is not entirely inside the bitmap.
+    fn glyph_planes(&mut self, x: i32, y: i32, g: &[u8; 8], style: GlyphStyle) -> bool {
+        let (pen, paper, keep, flags, wmode, wsel) = style;
+        let under = flags & 4 != 0;
+        if let (Some(_), Some(_)) = (self.span(x, y, 8), self.span(x, y + 7, 8)) {
+            // The cell is inside the bitmap: the same plane by plane rules
+            // on 8 pixels at a time (byte k of a word is pixel k).
+            let rep = |b: u8| u64::from_ne_bytes([b; 8]);
+            let mask = rep(self.colour_mask());
+            let planes = self.planes;
+            let (t, w) = (self.target_index(), self.width as usize);
+            let bm = &mut self.bitmaps[t];
+            let mut shade: u16 = if flags & 2 != 0 { 0xAAAA } else { 0xFFFF };
+            for (r, &row) in g.iter().enumerate() {
+                let sh = shade as u8;
+                shade = shade.rotate_right(1);
+                let i = (y as usize + r) * w + x as usize;
+                let px: &mut [u8; 8] = (&mut bm[i..i + 8]).try_into().unwrap();
+                let old = u64::from_ne_bytes(*px);
+                let mut new = old;
+                for p in 0..planes {
+                    if keep & (1 << p) != 0 {
+                        continue;
+                    }
+                    let pm = if paper & (1 << p) != 0 { 0xFFu8 } else { 0 };
+                    let qm = if pen & (1 << p) != 0 { 0xFFu8 } else { 0 };
+                    let src = if under && r == 7 {
+                        qm & sh
+                    } else {
+                        let gb = row & sh;
+                        let (a, b) = (!gb & pm, gb & qm);
+                        match wsel {
+                            1 => a,
+                            2 => b,
+                            _ => a | b,
+                        }
+                    };
+                    let bit = rep(1 << p);
+                    let (s8, d) = (expand_bits(src) & bit, old & bit);
+                    let res = match wmode {
+                        0 => s8,
+                        1 => d | s8,
+                        2 => d ^ s8,
+                        3 => d & s8,
+                        _ => d,
+                    };
+                    new = (new & !bit) | res;
+                }
+                *px = (new & mask).to_ne_bytes();
+            }
+            return true;
+        }
+        false
+    }
+
+    /// `draw_glyph` with writing mode flags, pixel by pixel, plane by plane
+    /// (clipped cells; the reference of `glyph_planes`).
+    fn glyph_planes_clipped(&mut self, x: i32, y: i32, g: &[u8; 8], style: GlyphStyle) {
+        let (pen, paper, keep, flags, wmode, wsel) = style;
         let under = flags & 4 != 0;
         let mut shade: u16 = if flags & 2 != 0 { 0xAAAA } else { 0xFFFF };
         for r in 0..8 {
@@ -1706,6 +1779,39 @@ mod tests {
 
     fn row(s: &Screen, y: i32, x0: i32, n: i32) -> Vec<u8> {
         (x0..x0 + n).map(|x| s.pixel(x, y).unwrap()).collect()
+    }
+
+    /// Glyphs in every writing mode, source, shade / underline flag and
+    /// plane mask, 8 pixels at a time, against the pixel by pixel version.
+    #[test]
+    fn glyph_planes_match_pixel_by_pixel() {
+        let mut seed = 3u32;
+        let mut rnd = |n: u32| {
+            seed = seed.wrapping_mul(1103515245).wrapping_add(12345);
+            (seed >> 8) % n
+        };
+        for colours in [2, 4, 8, 16, 32, 64] {
+            for _ in 0..400 {
+                let mut a = Screen::new(0, 64, 16, colours, 0);
+                for p in a.bitmaps[0].iter_mut() {
+                    *p = rnd(256) as u8;
+                }
+                let mut b = a.clone();
+                let g: [u8; 8] = std::array::from_fn(|_| rnd(256) as u8);
+                let style = (
+                    rnd(256) as u8,
+                    rnd(256) as u8,
+                    rnd(64) as u8,
+                    0x8000 | rnd(8) as u16,
+                    rnd(6) as u8,
+                    rnd(4) as u8,
+                );
+                let (x, y) = (rnd(57) as i32, rnd(9) as i32);
+                assert!(a.glyph_planes(x, y, &g, style));
+                b.glyph_planes_clipped(x, y, &g, style);
+                assert!(a.bitmaps[0] == b.bitmaps[0], "{colours} {style:?}");
+            }
+        }
     }
 
     #[test]
