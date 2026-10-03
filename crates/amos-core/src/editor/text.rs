@@ -15,7 +15,7 @@
 use crate::banks::Bank;
 use crate::detok::detok_line;
 use crate::program::{Program, proc_flags, read_u16};
-use crate::tokenise::{TokeniseError, tokenise_line};
+use crate::tokenise::{TokeniseError, tokenise_line_with};
 use crate::tokens::*;
 
 /// Maximum length of an edited line (`Ed_PKey`, +Edit.s:1794).
@@ -133,8 +133,9 @@ pub fn is_folded(line: &[u8]) -> bool {
     is_proc_line(line) && line[10] & proc_flags::FOLDED != 0
 }
 
-fn tokenise(text: &[u8]) -> EResult<(Vec<u8>, bool)> {
-    match tokenise_line(text) {
+/// Tokenises a line; `double`: the program is in double precision.
+fn tokenise(text: &[u8], double: bool) -> EResult<(Vec<u8>, bool)> {
+    match tokenise_line_with(text, double) {
         Ok(Some(t)) => Ok((t.line, t.double_precision)),
         Ok(None) => Ok((vec![2, 0, 0, 0], false)),
         Err(TokeniseError::LineTooLong) => Err(EditError::LineTooLong),
@@ -379,7 +380,7 @@ impl Doc {
     /// then shown listed again (normalised).
     pub fn commit(&mut self) -> EResult {
         let Some(text) = self.edit.clone() else { return Ok(()) };
-        let (line, dp) = tokenise(&text)?;
+        let (line, dp) = tokenise(&text, self.math_flags & 0x80 != 0)?;
         self.edit = None;
         if dp {
             self.math_flags |= 0x83;
@@ -475,7 +476,7 @@ impl Doc {
         if joined.len() >= MAX_LINE_CHARS {
             return Err(EditError::LineTooLong);
         }
-        let (line, _) = tokenise(&joined)?;
+        let (line, _) = tokenise(&joined, self.math_flags & 0x80 != 0)?;
         self.begin();
         if self.y < self.lines.len() {
             self.splice(self.y, 1, vec![]);
@@ -503,8 +504,8 @@ impl Doc {
         let text = self.current_text();
         let x = self.x.min(text.len());
         let (left, right) = (text[..x].to_vec(), text[x..].to_vec());
-        let (l1, dp1) = tokenise(&left)?;
-        let (l2, dp2) = tokenise(&right)?;
+        let (l1, dp1) = tokenise(&left, self.math_flags & 0x80 != 0)?;
+        let (l2, dp2) = tokenise(&right, self.math_flags & 0x80 != 0)?;
         if dp1 || dp2 {
             self.math_flags |= 0x83;
         }
@@ -819,7 +820,7 @@ impl Doc {
         for raw in text.split(|&c| c == b'\n') {
             let raw = raw.strip_suffix(b"\r").unwrap_or(raw);
             let l: Vec<u8> = raw.iter().map(|&c| if c == b'\t' { b' ' } else { c }).collect();
-            lines.push(tokenise(&l)?.0);
+            lines.push(tokenise(&l, self.math_flags & 0x80 != 0)?.0);
         }
         if text.ends_with(b"\n") {
             lines.pop();

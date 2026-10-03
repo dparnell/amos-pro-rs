@@ -386,8 +386,15 @@ fn is_var_char(c: u8) -> bool {
 /// Tokenises one line of text (Latin-1 bytes, no line terminator).
 /// Blank lines are kept (with their indentation) as the editor does.
 pub fn tokenise_line(text: &[u8]) -> Result<Option<Tokenised>, TokeniseError> {
+    tokenise_line_with(text, false)
+}
+
+/// Tokenises a line of a program that is already in double precision
+/// (`double`): like the original editor, whose `MathFlags` stay set once
+/// `Set Double Precision` was tokenised, float constants become doubles.
+pub fn tokenise_line_with(text: &[u8], double: bool) -> Result<Option<Tokenised>, TokeniseError> {
     let mut o = Out { buf: vec![0, 0] };
-    let mut double_precision = false;
+    let mut double_precision = double;
     let at = |i: usize| text.get(i).copied().unwrap_or(0);
 
     // Indent.
@@ -615,7 +622,7 @@ pub fn tokenise_program(text: &[u8]) -> Result<crate::program::Program, (usize, 
         let raw = raw.strip_suffix(b"\r").unwrap_or(raw);
         // Tabs are expanded to spaces as the editor does on load.
         let line: Vec<u8> = raw.iter().map(|&c| if c == b'\t' { b' ' } else { c }).collect();
-        match tokenise_line(&line) {
+        match tokenise_line_with(&line, prg.math_flags & 0x80 != 0) {
             Ok(Some(t)) => {
                 if t.double_precision {
                     prg.math_flags |= 0x83;
@@ -749,5 +756,20 @@ mod tests {
             }
         }
         v
+    }
+}
+
+#[cfg(test)]
+mod double_precision_tests {
+    use super::*;
+
+    /// Float constants after `Set Double Precision` are doubles on every
+    /// following line, not only on the line of the instruction.
+    #[test]
+    fn double_constants_on_later_lines() {
+        let prg = tokenise_program(b"Set Double Precision\nC#=0.86\n").unwrap();
+        let second = prg.lines().nth(1).unwrap().1;
+        assert!(second.windows(2).any(|w| w == TK_DFL.to_be_bytes()), "{second:?}");
+        assert!(!second.windows(2).any(|w| w == TK_FL.to_be_bytes()));
     }
 }

@@ -579,7 +579,8 @@ impl Editor {
 
     /// Tokenises and starts a direct mode line (`Esc_R`).
     fn direct_run(&mut self, m: &mut Machine, line: &[u8]) -> bool {
-        let tok = match crate::tokenise::tokenise_line(line) {
+        let double = m.interp.double;
+        let tok = match crate::tokenise::tokenise_line_with(line, double) {
             Ok(Some(t)) => t.line,
             Ok(None) => return false,
             Err(_) => {
