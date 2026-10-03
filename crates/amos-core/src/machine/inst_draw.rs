@@ -68,23 +68,21 @@ impl Hardware {
         mut f: impl FnMut(&mut GrState, &mut Canvas),
     ) -> R<()> {
         let s = self.draw_screen()?;
-        let targets = if autoback {
-            s.autoback_targets()
-        } else {
-            vec![s.logic]
-        };
-        let saved = s.gr.clone();
         let (w, h, planes) = (s.width, s.height, s.planes);
-        for (k, &bi) in targets.iter().enumerate() {
-            let mut other;
-            let g: &mut GrState = if k == 0 {
-                &mut s.gr
-            } else {
-                other = saved.clone();
-                &mut other
-            };
-            let mut c = Canvas::new(&mut s.bitmaps[bi], w, h, planes);
-            f(g, &mut c);
+        // Autoback: the operation again into the physic bitmap, from the
+        // graphic state as it was before (`autoback_targets` order).
+        if autoback && s.autoback != 0 && s.is_double_buffered() {
+            let saved = s.gr.clone();
+            let (logic, physic) = (s.logic, s.physic);
+            let mut c = Canvas::new(&mut s.bitmaps[logic], w, h, planes);
+            f(&mut s.gr, &mut c);
+            let mut other = saved;
+            let mut c = Canvas::new(&mut s.bitmaps[physic], w, h, planes);
+            f(&mut other, &mut c);
+        } else {
+            let logic = s.logic;
+            let mut c = Canvas::new(&mut s.bitmaps[logic], w, h, planes);
+            f(&mut s.gr, &mut c);
         }
         s.version += 1;
         Ok(())

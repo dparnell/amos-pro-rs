@@ -198,6 +198,64 @@ interpreted instructions, load independent):
     -> 158.6, Locate 164.2 -> 155.0, busy wait 121.6 -> 115.3, Joy / Key
     State 122.4 -> 112.5 M instructions per frame.
 
+17. **Drawing primitives** (`gfx/draw.rs`, `machine/inst_draw.rs`). The
+    previous implementations are kept as `gfx/draw_reference.rs` (test
+    only); `primitives_match_the_reference` runs 20 000 random cases (Plot,
+    Draw, line runs, Box, Bar, Ellipse, Polygon, Paint, Text) over random
+    canvas sizes and planes, all writing modes, line patterns and counters,
+    1 and multi plane fill patterns, Set Paint and clip windows, and
+    compares the pixels and the whole graphic state afterwards.
+    * the clip rectangle and draw mode are decided once per primitive
+      (`Writer`) instead of per pixel;
+    * lines: when both ends are inside the clip rectangle no pixel is
+      clipped (the line stays in their bounding box); with a full / empty
+      line style every pixel gets the same operation and the pattern
+      position is advanced once (Bresenham visits max(|dx|,|dy|)+1
+      points); other styles keep a local pattern position;
+    * Bar / Polygon fills: whole spans with the operation decided once
+      (memset for solid fills, row of pattern bits for patterns);
+    * Ellipse / Circle: points drawn as generated (writing the ink is
+      idempotent); COMPLEMENT marks done pixels in a bitset instead of
+      sorting all points;
+    * Paint: solid fills colour the region in place (filled pixels stop
+      matching the seed: no visited array), patterned fills scan rows;
+    * graphic Text: unclipped cells written directly;
+    * `draw_op`: no `Vec` of targets and no clone of the graphic state
+      (with its pattern) unless Autoback draws twice.
+
+    Millions of CPU instructions per frame (200 000 interpreted
+    instructions; compiled with `spin`, interpreted with `perf`):
+
+    | loop | compiled before | after | interpreted before | after |
+    |---|---|---|---|---|
+    | Plot 10,20 | 157.3 | 125.8 | 145.0 | 114.1 |
+    | Draw 0,0 To 300,150 | 2149 | 646 | 2150 | 648 |
+    | same, Set Line $F0F0 | 2179 | 1159 | 2180 | 1160 |
+    | same, Gr Writing 2 | 2179 | 707 | 2180 | 709 |
+    | Box 10,10 To 200,150 | 4715 | 1249 | 4716 | 1250 |
+    | Bar 10,10 To 200,150 | 1010 | 922 | 1011 | 924 |
+    | same, Set Pattern 2 | 194 200 | 7 608 | 194 210 | 7 610 |
+    | same, Set Paint 1 | 5230 | 2020 | 5231 | 2020 |
+    | Circle 160,100,60 | 6836 | 1387 | 6830 | 1381 |
+    | Ellipse, Gr Writing 2 | 9583 | 3061 | 9573 | 3062 |
+    | Polygon (triangle) | 88 408 | 4 845 | 88 373 | 4 812 |
+    | Cls + Circle + Paint | 21 664 | 8 839 | 21 594 | 8 795 |
+    | Text 10,50,"Hello world" | 1648 | 1361 | 1634 | 1348 |
+    | Polyline | 3628 | 1109 | 3595 | 1076 |
+    | Draw with Double Buffer + Autoback | 4117 | 1143 | 4118 | 1145 |
+    | suite plot/draw | 938 | 374 | 948 | 385 |
+    | suite bar/box/circle | 2237 | 680 | 2269 | 715 |
+
+    `suite -- 100 20 -` (ms): plot/draw 3113 -> 2259 compiled, 3209 ->
+    2382 interpreted; bar/box/circle 8850 -> 3108 compiled, 9044 -> 3257
+    interpreted.
+18. **Preset parameters written in place** (`interp/params.rs`,
+    separate change): `inst_args` / `func_args` fill the returned `Args`
+    from the preset as they do from the tokens (`take_preset_into`), no
+    `Args` moved through a `Result`. Same instruction count, fewer cycles
+    (store forwarding of the 176 byte copy): compiled Plot loop 4.28 ->
+    3.97 G cycles over 200 frames, Ink 3.52 -> 3.26.
+
 ## API notes for the compiler side
 
 * `Interp::function_value(hw, kw)` (interp/expr.rs): value of the function

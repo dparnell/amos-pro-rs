@@ -1,6 +1,8 @@
 //! Display subsystem: screens, text windows, drawing, sprites and bobs.
 
 pub mod draw;
+#[cfg(test)]
+mod draw_reference;
 pub mod effects;
 pub mod font;
 pub mod screen;
