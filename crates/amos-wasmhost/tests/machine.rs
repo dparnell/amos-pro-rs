@@ -89,8 +89,8 @@ fn modules_of_other_programs_are_refused() {
 
 /// Every keyword compiled code calls directly (`machine::plain_args`, the
 /// parameters given with `Interp::preset_args`): all parameters, the first
-/// one omitted, a float for an integer, a negative value (errors), and
-/// angles after Degree, on full
+/// one omitted, a float for an integer, a negative value (errors), angles
+/// after Degree, and functions without parameters as parameters, on full
 /// machines, against the interpreter (state, log and display).
 #[test]
 fn plain_keywords_match_the_interpreter() {
@@ -141,6 +141,25 @@ fn plain_keywords_match_the_interpreter() {
             v[0] = "-1".into();
             variants.push(v);
         }
+        // Functions without parameters as parameters (evaluated by the
+        // runtime in direct calls, `layout::BRIDGE_CALL`), alone, with
+        // constants, and with a parameter the module evaluates.
+        if !types.is_empty() {
+            let fused = |i: usize, t: u8| match t {
+                b'2' => "Inkey$".to_string(),
+                _ => ["X Mouse", "Y Mouse", "Mouse Key"][i % 3].to_string(),
+            };
+            variants.push(types.iter().enumerate().map(|(i, &t)| fused(i, t)).collect());
+            let mut v = variants[0].clone();
+            v[0] = fused(0, types[0]);
+            variants.push(v);
+            if types.len() >= 2 && types[1] != b'2' {
+                let mut v = variants[0].clone();
+                v[0] = fused(0, types[0]);
+                v[1] = "Rnd(3)".into();
+                variants.push(v);
+            }
+        }
         let name = def.name;
         for (k, vals) in variants.iter().enumerate() {
             let args = join(vals);
@@ -175,6 +194,11 @@ fn plain_keywords_match_the_interpreter() {
             cp = Some(CompiledProgram::start(&mut m, &prg, &wasm).ok()?);
         } else {
             m.run_program(&prg).ok()?;
+        }
+        // Some input for the functions read in the parameters.
+        m.input(amos_core::input::InputEvent::MouseMove { x: 200.0, y: 120.0 });
+        for c in "kz".chars() {
+            m.input(amos_core::input::InputEvent::Char(c));
         }
         let mut frames = Vec::new();
         for _ in 0..3 {

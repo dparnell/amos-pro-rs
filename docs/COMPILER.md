@@ -80,9 +80,15 @@ parameters from the token stream) by giving them a small synthetic token
 stream built from the argument values, so every keyword the interpreter
 supports works in compiled code from day one. Keywords whose handler reads
 its parameters only through `inst_args` / `func_args`
-(`amos_core::machine::plain_args`) skip the token stream: the runtime
-passes the values with `Interp::preset_args` (omitted parameters as `None`;
-keywords without parameters get no preset) and calls the handler directly.
+(`amos_core::machine::plain_args`) skip the token stream: the module calls
+`host.plain_keyword` / `host.pfn_*` with the token and the given slots
+(`structure::plain_mask`, no call-site lookup), and the runtime passes the
+values with `Interp::preset_args` (omitted parameters as `None`; keywords
+without parameters get no preset) and calls the handler directly. Functions
+without parameters given as parameters of such a call (`Scin(X Mouse,Y
+Mouse)`) are evaluated by the runtime in the same host call
+(`layout::BRIDGE_CALL`) when the other parameters are constants or
+variables, so the evaluation order is the interpreter's.
 Keywords with special syntax
 or variable parameters (Input, Read, Swap, Inc, Dim, Varptr, Channel, Menu$,
 Mid$= ...) are compiled specially.
@@ -125,7 +131,7 @@ Mid$= ...) are compiled specially.
   (`--interpreted` skips it) and fall back to interpreting on failure.
 * Hosts: `amos-wasmhost` (wasmtime natively, `WebAssembly.instantiate` on
   the web) share the import list in `amos-wasmhost/src/imports.rs`
-  (interface version 11, `amos_core::compiled::ABI_VERSION`).
+  (interface version 12, `amos_core::compiled::ABI_VERSION`).
 * Gosub / Return and procedure calls / End Proc / Pop Proc run in the
   module: a call the stack surely has room for becomes a *pending* entry in
   memory (locals and parameters in the procedure's memory frame, Param /

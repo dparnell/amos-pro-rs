@@ -15,6 +15,13 @@
     def!(l, "host" "fn_f" |rt, env, mem, p: i32, f: i32, b: i32| -> f64 { rt.fn_f(env, mem, p, f, b) });
     def!(l, "host" "fn_n" |rt, env, mem, p: i32, f: i32, b: i32| -> f64 { rt.fn_n(env, mem, p, f, b) });
     def!(l, "host" "fn_s" |rt, env, mem, p: i32, f: i32, b: i32| -> i32 { rt.fn_s(env, mem, p, f, b) });
+    def!(l, "host" "plain_keyword" |rt, env, mem, p: i32, t: i32, k: i32, b: i32| -> i32 {
+        rt.plain_keyword(env, mem, p, t, k, b)
+    });
+    def!(l, "host" "pfn_i" |rt, env, mem, p: i32, t: i32, k: i32, b: i32| -> i32 { rt.pfn_i(env, mem, p, t, k, b) });
+    def!(l, "host" "pfn_f" |rt, env, mem, p: i32, t: i32, k: i32, b: i32| -> f64 { rt.pfn_f(env, mem, p, t, k, b) });
+    def!(l, "host" "pfn_n" |rt, env, mem, p: i32, t: i32, k: i32, b: i32| -> f64 { rt.pfn_n(env, mem, p, t, k, b) });
+    def!(l, "host" "pfn_s" |rt, env, mem, p: i32, t: i32, k: i32, b: i32| -> i32 { rt.pfn_s(env, mem, p, t, k, b) });
     def!(l, "host" "push_i" |rt, env, mem, v: i32| { rt.push_i(v) });
     def!(l, "host" "push_f" |rt, env, mem, v: f64| { rt.push_f(v) });
     def!(l, "host" "push_s" |rt, env, mem, v: i32| { rt.push_s(mem, v) });

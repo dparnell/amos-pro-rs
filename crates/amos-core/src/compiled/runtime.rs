@@ -21,7 +21,7 @@ use std::hash::{BuildHasherDefault, Hasher};
 use std::rc::Rc;
 
 use super::layout::{self, Layout};
-use super::structure::{self, Call, Instr};
+use super::structure::{self, Call, Instr, PLAIN_SLOTS_SHIFT};
 use crate::errors;
 use crate::ffp::Ffp;
 use crate::interp::value::{AStr, Value, Var, astr, float_to_int};
@@ -144,7 +144,8 @@ struct Site {
     /// The handler reads its parameters only through `inst_args` /
     /// `func_args` (`machine::plain_args`): called directly, the values
     /// given with `Interp::preset_args`, without a token stream.
-    plain: bool,
+    /// `structure::plain_mask` of the call, if it is one.
+    plain: Option<i32>,
 }
 
 /// Runtime state of one compiled program.
@@ -660,12 +661,18 @@ impl Runtime {
     /// them (the procedures' locals are already in their memory frames).
     /// The hosts call it before every import, so the runtime always sees the
     /// complete control stack.
+    #[inline]
     pub fn flush(&mut self, env: &mut dyn Env, mem: &mut [u8]) {
         let set = ld_i32(mem, layout::PARAM_SET);
         let n = ld_i32(mem, layout::PEND_COUNT);
-        if set == 0 && n <= 0 {
-            return;
+        if set != 0 || n > 0 {
+            self.flush_entries(env, mem, set, n);
         }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn flush_entries(&mut self, env: &mut dyn Env, mem: &mut [u8], set: i32, n: i32) {
         let (it, _) = env.parts();
         if set != 0 {
             st_i32(mem, layout::PARAM_SET, 0);
@@ -832,48 +839,13 @@ impl Runtime {
                     structure::instruction_call(&self.prg.code, p)
                 };
                 let n = call.as_ref().map_or(0, |c| c.slots.iter().filter(|s| s.present).count());
-                let plain = call.as_ref().is_some_and(|c| crate::machine::plain_args(c.kw));
+                let plain = call.as_ref().and_then(|c| structure::plain_mask(c, function));
                 self.sites.push(Site { call: call.map(Rc::new), n, code: None, kinds: Vec::new(), end: 0, plain });
                 self.site_at.insert(p, self.sites.len() as u32 - 1);
                 self.sites.len() - 1
             }
         };
         self.sites[i].call.is_some().then_some(i)
-    }
-
-    /// The parameters of plain call site `i` for `Interp::preset_args`, in
-    /// `self.preset_buf`: the values (bridge slots from `base`, or popped
-    /// from the stack) in the signature's places, `None` for an omitted one.
-    fn preset(&mut self, i: usize, mem: &mut [u8], base: i32) {
-        let n = self.sites[i].n;
-        let first = self.stack.len().saturating_sub(n);
-        let mut buf = std::mem::take(&mut self.preset_buf);
-        buf.clear();
-        let call = self.sites[i].call.as_ref().expect("bridged call");
-        let mut k = 0u32;
-        for slot in &call.slots {
-            if !slot.present {
-                buf.push(None);
-                continue;
-            }
-            let v = if base >= 0 {
-                let a = self.layout.bridge + (base as u32 + k) * layout::BRIDGE_SLOT;
-                match ld_i32(mem, a) {
-                    layout::BRIDGE_INT => Value::Int(ld_i32(mem, a + 8)),
-                    layout::BRIDGE_FLOAT => Value::Float(ld_f64(mem, a + 8)),
-                    layout::BRIDGE_DYN_INT => Value::Int(ld_f64(mem, a + 8) as i32),
-                    _ => Value::Str(self.str_of(mem, ld_i32(mem, a + 8))),
-                }
-            } else {
-                self.stack.get(first + k as usize).cloned().unwrap_or(Value::Int(0))
-            };
-            buf.push(Some(v));
-            k += 1;
-        }
-        if base < 0 {
-            self.stack.truncate(first);
-        }
-        self.preset_buf = buf;
     }
 
     /// The token stream of call site `i` (at `p`) with the parameter values
@@ -1005,16 +977,17 @@ impl Runtime {
         it.inst_pos = pos;
         let r = match self.site(pos, false) {
             None => Err(Exc::Message("Compiled program: bad keyword call".into())),
-            Some(i) if self.sites[i].plain => {
-                // Directly, the parameters given (none for a keyword
-                // without parameters: its handler may not read them).
-                let call = self.sites[i].call.as_ref().expect("bridged call");
-                let (kw, params) = (call.kw, !call.slots.is_empty());
-                if params {
-                    self.preset(i, mem, base);
-                    it.preset_args(&self.preset_buf);
-                }
-                hw.instruction(it, kw).map(|_| ST_CONTINUE)
+            // Directly, the parameters given (none for a keyword without
+            // parameters: its handler may not read them).
+            Some(i) if self.sites[i].plain.is_some() => {
+                let mask = self.sites[i].plain.unwrap_or(0);
+                let kw = self.sites[i].call.as_ref().expect("bridged call").kw;
+                let r = if mask as u32 >> PLAIN_SLOTS_SHIFT != 0 {
+                    self.plain_preset(it, hw, mem, mask as u32, base).map(|()| it.preset_args(&self.preset_buf))
+                } else {
+                    Ok(())
+                };
+                r.and_then(|()| hw.instruction(it, kw)).map(|_| ST_CONTINUE)
             }
             Some(i) => {
                 let call = self.sites[i].call.as_ref().expect("bridged call");
@@ -1034,14 +1007,15 @@ impl Runtime {
         let fpos = fpos as usize;
         let r = match self.site(fpos, true) {
             None => Err(Exc::Message("Compiled program: bad function call".into())),
-            Some(i) if self.sites[i].plain => {
-                let call = self.sites[i].call.as_ref().expect("bridged call");
-                let (kw, params) = (call.kw, !call.slots.is_empty());
-                if params {
-                    self.preset(i, mem, base);
-                    it.preset_args(&self.preset_buf);
-                }
-                it.function_value(hw, kw)
+            Some(i) if self.sites[i].plain.is_some() => {
+                let mask = self.sites[i].plain.unwrap_or(0);
+                let kw = self.sites[i].call.as_ref().expect("bridged call").kw;
+                let r = if mask as u32 >> PLAIN_SLOTS_SHIFT != 0 {
+                    self.plain_preset(it, hw, mem, mask as u32, base).map(|()| it.preset_args(&self.preset_buf))
+                } else {
+                    Ok(())
+                };
+                r.and_then(|()| it.function_value(hw, kw))
             }
             Some(i) => {
                 let call = self.sites[i].call.as_ref().expect("bridged call");
@@ -1061,8 +1035,126 @@ impl Runtime {
         }
     }
 
+    /// The parameters of a plain call for `Interp::preset_args`, in
+    /// `self.preset_buf`: `mask` has bit k set when slot k of the signature
+    /// is given, and the number of slots from bit `PLAIN_SLOTS_SHIFT`; the
+    /// values are in the bridge slots from `base` (or on the stack).
+    fn plain_preset(&mut self, it: &mut Interp, hw: &mut dyn Host, mem: &mut [u8], mask: u32, base: i32) -> R<()> {
+        let slots = mask >> PLAIN_SLOTS_SHIFT;
+        self.preset_buf.clear();
+        if base < 0 {
+            return self.plain_preset_stack(mask);
+        }
+        let mut a = self.layout.bridge + base as u32 * layout::BRIDGE_SLOT;
+        for s in 0..slots {
+            if mask & (1 << s) == 0 {
+                self.preset_buf.push(None);
+                continue;
+            }
+            let v = match ld_i32(mem, a) {
+                layout::BRIDGE_INT => Value::Int(ld_i32(mem, a + 8)),
+                layout::BRIDGE_FLOAT => Value::Float(ld_f64(mem, a + 8)),
+                layout::BRIDGE_DYN_INT => Value::Int(ld_f64(mem, a + 8) as i32),
+                ty => self.slot_value(it, hw, mem, a, ty)?,
+            };
+            self.preset_buf.push(Some(v));
+            a += layout::BRIDGE_SLOT;
+        }
+        Ok(())
+    }
+
+    /// A bridge slot holding a string or a call (`plain_preset`).
+    #[inline(never)]
+    fn slot_value(&mut self, it: &mut Interp, hw: &mut dyn Host, mem: &mut [u8], a: u32, ty: i32) -> R<Value> {
+        Ok(match ty {
+            // A function without parameters, evaluated as the token path
+            // evaluates the operand.
+            layout::BRIDGE_CALL => it.function_value(hw, Keyword { slot: 0, token: ld_i32(mem, a + 8) as u16 })?,
+            _ => Value::Str(self.str_of(mem, ld_i32(mem, a + 8))),
+        })
+    }
+
+    /// `plain_preset` with the values on the stack.
+    #[cold]
+    fn plain_preset_stack(&mut self, mask: u32) -> R<()> {
+        let slots = mask >> PLAIN_SLOTS_SHIFT;
+        let n = (mask & ((1 << PLAIN_SLOTS_SHIFT) - 1)).count_ones() as usize;
+        let mut values = self.stack.split_off(self.stack.len().saturating_sub(n)).into_iter();
+        for s in 0..slots {
+            let v = if mask & (1 << s) == 0 { None } else { Some(values.next().unwrap_or(Value::Int(0))) };
+            self.preset_buf.push(v);
+        }
+        Ok(())
+    }
+
+    /// Instruction `token` (main library, `machine::plain_args`) at `pos`,
+    /// called directly with its parameters (`plain_preset`).
+    pub fn plain_keyword(
+        &mut self,
+        env: &mut dyn Env,
+        mem: &mut [u8],
+        pos: i32,
+        token: i32,
+        mask: i32,
+        base: i32,
+    ) -> i32 {
+        let (it, hw) = env.parts();
+        let pos = pos as usize;
+        it.inst_pos = pos;
+        let mask = mask as u32;
+        let r = if mask >> PLAIN_SLOTS_SHIFT != 0 {
+            self.plain_preset(it, hw, mem, mask, base).map(|()| it.preset_args(&self.preset_buf))
+        } else {
+            Ok(())
+        };
+        let r = r.and_then(|()| hw.instruction(it, Keyword { slot: 0, token: token as u16 }));
+        let r = r.map(|_| ST_CONTINUE);
+        self.result(it, hw, mem, r, pos)
+    }
+
+    /// Value of the function `token` (main library, `machine::plain_args`)
+    /// called directly in the instruction at `pos`. `None` (and a pending
+    /// error) on error.
+    fn plain_function(
+        &mut self,
+        env: &mut dyn Env,
+        mem: &mut [u8],
+        pos: i32,
+        token: i32,
+        mask: i32,
+        base: i32,
+    ) -> Option<Value> {
+        let (it, hw) = env.parts();
+        it.inst_pos = pos as usize;
+        let mask = mask as u32;
+        let r = if mask >> PLAIN_SLOTS_SHIFT != 0 {
+            self.plain_preset(it, hw, mem, mask, base).map(|()| it.preset_args(&self.preset_buf))
+        } else {
+            Ok(())
+        };
+        let r = r.and_then(|()| it.function_value(hw, Keyword { slot: 0, token: token as u16 }));
+        match r {
+            Ok(v) => Some(v),
+            Err(e) => {
+                self.set_pending(mem, e);
+                None
+            }
+        }
+    }
+
     pub fn fn_i(&mut self, env: &mut dyn Env, mem: &mut [u8], pos: i32, fpos: i32, base: i32) -> i32 {
-        match self.function(env, mem, pos, fpos, base) {
+        let v = self.function(env, mem, pos, fpos, base);
+        self.conv_i(env, mem, v)
+    }
+
+    /// `fn_i` for a function called directly (`plain_function`).
+    pub fn pfn_i(&mut self, env: &mut dyn Env, mem: &mut [u8], pos: i32, token: i32, mask: i32, base: i32) -> i32 {
+        let v = self.plain_function(env, mem, pos, token, mask, base);
+        self.conv_i(env, mem, v)
+    }
+
+    fn conv_i(&mut self, _env: &mut dyn Env, mem: &mut [u8], v: Option<Value>) -> i32 {
+        match v {
             Some(Value::Int(i)) => i,
             Some(Value::Float(f)) => float_to_int(f),
             Some(Value::Str(_)) => {
@@ -1074,7 +1166,18 @@ impl Runtime {
     }
 
     pub fn fn_f(&mut self, env: &mut dyn Env, mem: &mut [u8], pos: i32, fpos: i32, base: i32) -> f64 {
-        match self.function(env, mem, pos, fpos, base) {
+        let v = self.function(env, mem, pos, fpos, base);
+        self.conv_f(env, mem, v)
+    }
+
+    /// `fn_f` for a function called directly (`plain_function`).
+    pub fn pfn_f(&mut self, env: &mut dyn Env, mem: &mut [u8], pos: i32, token: i32, mask: i32, base: i32) -> f64 {
+        let v = self.plain_function(env, mem, pos, token, mask, base);
+        self.conv_f(env, mem, v)
+    }
+
+    fn conv_f(&mut self, env: &mut dyn Env, mem: &mut [u8], v: Option<Value>) -> f64 {
+        match v {
             Some(Value::Float(f)) => f,
             Some(Value::Int(i)) => {
                 let (it, _) = env.parts();
@@ -1090,7 +1193,18 @@ impl Runtime {
 
     /// Numeric result of unknown type: the type goes to the `TAG` word.
     pub fn fn_n(&mut self, env: &mut dyn Env, mem: &mut [u8], pos: i32, fpos: i32, base: i32) -> f64 {
-        match self.function(env, mem, pos, fpos, base) {
+        let v = self.function(env, mem, pos, fpos, base);
+        self.conv_n(env, mem, v)
+    }
+
+    /// `fn_n` for a function called directly (`plain_function`).
+    pub fn pfn_n(&mut self, env: &mut dyn Env, mem: &mut [u8], pos: i32, token: i32, mask: i32, base: i32) -> f64 {
+        let v = self.plain_function(env, mem, pos, token, mask, base);
+        self.conv_n(env, mem, v)
+    }
+
+    fn conv_n(&mut self, _env: &mut dyn Env, mem: &mut [u8], v: Option<Value>) -> f64 {
+        match v {
             Some(Value::Int(i)) => {
                 st_i32(mem, layout::TAG, 0);
                 i as f64
@@ -1108,7 +1222,18 @@ impl Runtime {
     }
 
     pub fn fn_s(&mut self, env: &mut dyn Env, mem: &mut [u8], pos: i32, fpos: i32, base: i32) -> i32 {
-        match self.function(env, mem, pos, fpos, base) {
+        let v = self.function(env, mem, pos, fpos, base);
+        self.conv_s(env, mem, v)
+    }
+
+    /// `fn_s` for a function called directly (`plain_function`).
+    pub fn pfn_s(&mut self, env: &mut dyn Env, mem: &mut [u8], pos: i32, token: i32, mask: i32, base: i32) -> i32 {
+        let v = self.plain_function(env, mem, pos, token, mask, base);
+        self.conv_s(env, mem, v)
+    }
+
+    fn conv_s(&mut self, _env: &mut dyn Env, mem: &mut [u8], v: Option<Value>) -> i32 {
+        match v {
             Some(Value::Str(s)) => self.alloc(mem, s),
             Some(_) => {
                 self.set_pending(mem, Exc::Error(errors::TYPE_MISMATCH));

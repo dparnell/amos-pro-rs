@@ -127,12 +127,17 @@ pub const NORM_E: u32 = 188;
 /// `BRIDGE_STR` or `BRIDGE_DYN_INT`) and the value at +8 (`i32`, `f64`,
 /// string handle, or an integer as an `f64`). Each call site writes from a
 /// fixed slot (calls inside its parameters use the following slots).
+/// `BRIDGE_CALL` (direct calls only, `host.plain_*` / `host.pfn_*`): the
+/// value of the main library function without parameters whose token is at
+/// +8 (`machine::plain_args`), evaluated by the runtime when it reads the
+/// slot.
 pub const BRIDGE_SLOT: u32 = 16;
 pub const BRIDGE_SLOTS: u32 = 64;
 pub const BRIDGE_INT: i32 = 0;
 pub const BRIDGE_FLOAT: i32 = 1;
 pub const BRIDGE_STR: i32 = 2;
 pub const BRIDGE_DYN_INT: i32 = 3;
+pub const BRIDGE_CALL: i32 = 4;
 /// Scratch buffers of the number formatting helpers (128 bytes each).
 pub const SCR_A: u32 = 192;
 pub const SCR_B: u32 = 320;

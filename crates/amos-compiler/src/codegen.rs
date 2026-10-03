@@ -79,6 +79,11 @@ imports! {
     FnF = "host" "fn_f" (i i i) -> f;
     FnN = "host" "fn_n" (i i i) -> f;
     FnS = "host" "fn_s" (i i i) -> i;
+    PlainKeyword = "host" "plain_keyword" (i i i i) -> i;
+    PfnI = "host" "pfn_i" (i i i i) -> i;
+    PfnF = "host" "pfn_f" (i i i i) -> f;
+    PfnN = "host" "pfn_n" (i i i i) -> f;
+    PfnS = "host" "pfn_s" (i i i i) -> i;
     PushI = "host" "push_i" (i);
     PushF = "host" "push_f" (f);
     PushS = "host" "push_s" (i);
@@ -789,15 +794,60 @@ impl<'a> Gen<'a> {
         }
     }
 
+    /// The token and `structure::plain_mask` of the call at `p` (`function`
+    /// or instruction) with `n` parameters given, when compiled code may
+    /// call its handler directly (`host.plain_keyword`, `host.pfn_*`).
+    fn plain_call(&self, p: usize, function: bool, n: usize) -> Option<(i32, i32)> {
+        let code = &self.prg.code;
+        let call = if function { structure::function_call(code, p) } else { structure::instruction_call(code, p) }?;
+        let mask = structure::plain_mask(&call, function)?;
+        (call.slots.iter().filter(|s| s.present).count() == n).then_some((call.kw.token as i32, mask))
+    }
+
+    /// The parameters of a direct call that the runtime evaluates itself
+    /// (`layout::BRIDGE_CALL`): functions without parameters called
+    /// directly (`X Mouse`, `Mouse Key`...), their token. The runtime
+    /// evaluates them after the module evaluated the other parameters, so
+    /// only when those cannot call the machine or fail (constants and
+    /// variables); empty when nothing is evaluated by the runtime.
+    fn fused_args(&self, args: &[Expr]) -> Vec<Option<i32>> {
+        fn simple(e: &Expr) -> bool {
+            match &e.kind {
+                ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Var(_) => true,
+                ExprKind::Neg(a) => matches!(a.kind, ExprKind::Int(_) | ExprKind::Float(_)),
+                _ => false,
+            }
+        }
+        if self.bridge_top + args.len() as u32 > layout::BRIDGE_SLOTS {
+            return Vec::new();
+        }
+        let fused: Vec<Option<i32>> = args
+            .iter()
+            .map(|a| match &a.kind {
+                ExprKind::Call(fp, inner) if inner.is_empty() => self
+                    .plain_call(*fp, true, 0)
+                    .filter(|&(_, mask)| mask as u32 >> structure::PLAIN_SLOTS_SHIFT == 0)
+                    .map(|(token, _)| token),
+                _ => None,
+            })
+            .collect();
+        let any = fused.iter().any(Option::is_some);
+        if !any || args.iter().zip(&fused).any(|(a, f)| f.is_none() && !simple(a)) {
+            return Vec::new();
+        }
+        fused
+    }
+
     /// Pushes a value of type `ty` on the runtime parameter stack.
     /// Evaluates the parameters of a keyword bridge call into the bridge
     /// slots (`layout::BRIDGE_SLOT`) and returns the first slot; -1 if they
     /// do not fit (then pushed on the runtime's stack).
-    fn bridge_args(&mut self, args: &[Expr]) -> i32 {
+    fn bridge_args(&mut self, args: &[Expr], fused: &[Option<i32>]) -> i32 {
         let base = self.bridge_top;
         if args.is_empty() {
             return base as i32;
         }
+        debug_assert!(fused.is_empty() || base + args.len() as u32 <= layout::BRIDGE_SLOTS);
         if base + args.len() as u32 > layout::BRIDGE_SLOTS {
             for a in args {
                 self.expr(a);
@@ -809,6 +859,16 @@ impl<'a> Gen<'a> {
         self.bridge_top = base + args.len() as u32;
         for (k, a) in args.iter().enumerate() {
             let slot = self.layout.bridge + (base + k as u32) * layout::BRIDGE_SLOT;
+            if let Some(&Some(token)) = fused.get(k) {
+                // Evaluated by the runtime (`layout::BRIDGE_CALL`).
+                self.get(L_BASE);
+                self.i32c(token);
+                self.w(W::I32Store(mem32(slot + 8)));
+                self.get(L_BASE);
+                self.i32c(layout::BRIDGE_CALL);
+                self.w(W::I32Store(mem32(slot)));
+                continue;
+            }
             match a.ty {
                 Ty::Int | Ty::Str => {
                     let t = self.tmp(ValType::I32);
@@ -1027,15 +1087,33 @@ impl<'a> Gen<'a> {
             ExprKind::Bin(op, a, b) => self.binop(*op, a, b, e.ty),
             ExprKind::Native(nf, args) => self.native(*nf, args, e.ty),
             ExprKind::Call(fpos, args) => {
-                let base = self.bridge_args(args);
+                let plain = self.plain_call(*fpos, true, args.len());
+                let fused = if plain.is_some() { self.fused_args(args) } else { Vec::new() };
+                let base = self.bridge_args(args, &fused);
                 self.i32c(self.pos as i32);
-                self.i32c(*fpos as i32);
-                self.i32c(base);
-                match e.ty {
-                    Ty::Int => self.call(Imp::FnI),
-                    Ty::Float => self.call(Imp::FnF),
-                    Ty::Str => self.call(Imp::FnS),
-                    Ty::Dyn => self.call(Imp::FnN),
+                match plain {
+                    // The keyword handler called directly.
+                    Some((token, mask)) => {
+                        self.i32c(token);
+                        self.i32c(mask);
+                        self.i32c(base);
+                        match e.ty {
+                            Ty::Int => self.call(Imp::PfnI),
+                            Ty::Float => self.call(Imp::PfnF),
+                            Ty::Str => self.call(Imp::PfnS),
+                            Ty::Dyn => self.call(Imp::PfnN),
+                        }
+                    }
+                    None => {
+                        self.i32c(*fpos as i32);
+                        self.i32c(base);
+                        match e.ty {
+                            Ty::Int => self.call(Imp::FnI),
+                            Ty::Float => self.call(Imp::FnF),
+                            Ty::Str => self.call(Imp::FnS),
+                            Ty::Dyn => self.call(Imp::FnN),
+                        }
+                    }
                 }
                 self.err_check();
                 if e.ty == Ty::Dyn {
@@ -2779,10 +2857,22 @@ impl<'a> Gen<'a> {
                 self.status_check();
             }
             Stmt::Keyword(args) => {
-                let base = self.bridge_args(args);
+                let plain = self.plain_call(pos as usize, false, args.len());
+                let fused = if plain.is_some() { self.fused_args(args) } else { Vec::new() };
+                let base = self.bridge_args(args, &fused);
                 self.i32c(pos);
-                self.i32c(base);
-                self.call(Imp::Keyword);
+                match plain {
+                    Some((token, mask)) => {
+                        self.i32c(token);
+                        self.i32c(mask);
+                        self.i32c(base);
+                        self.call(Imp::PlainKeyword);
+                    }
+                    None => {
+                        self.i32c(base);
+                        self.call(Imp::Keyword);
+                    }
+                }
                 self.status_check();
             }
             Stmt::Interp => {

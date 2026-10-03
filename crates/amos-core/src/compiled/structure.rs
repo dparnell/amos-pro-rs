@@ -323,6 +323,26 @@ pub struct Call {
     pub end: usize,
 }
 
+/// Bit of a plain call's mask where the number of signature slots starts
+/// (bits below: the slots given).
+pub const PLAIN_SLOTS_SHIFT: u32 = 24;
+
+/// Mask of a call compiled code may make directly (`host.plain_*`, the
+/// parameters given with `Interp::preset_args`): the keyword is one of
+/// `machine::plain_args` (main library), and not a reserved variable being
+/// assigned. Bit k is set when slot k is given; the number of slots is from
+/// bit [`PLAIN_SLOTS_SHIFT`].
+pub fn plain_mask(call: &Call, function: bool) -> Option<i32> {
+    if !crate::machine::plain_args(call.kw) || call.slots.len() >= PLAIN_SLOTS_SHIFT as usize {
+        return None;
+    }
+    if !function && keyword_def(call.kw).is_none_or(|d| d.kind() == crate::tokens::TokenKind::ReservedVariable) {
+        return None;
+    }
+    let given = call.slots.iter().enumerate().filter(|(_, s)| s.present).fold(0u32, |m, (k, _)| m | 1 << k);
+    Some((given | (call.slots.len() as u32) << PLAIN_SLOTS_SHIFT) as i32)
+}
+
 /// Function call at `p` as the interpreter reads it (`operand_value` then
 /// `fn_args`). `None` for functions with a special syntax (`Fn`, `Match`,
 /// `Varptr`...) that the bridge cannot rebuild.
