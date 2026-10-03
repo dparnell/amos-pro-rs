@@ -377,3 +377,22 @@ fn keyword_batches_match_the_interpreter() {
         compare_with_input(p, 10);
     }
 }
+
+/// `Multi Wait` & co (nothing to do: skipped by compiled code) in polling
+/// loops, and `Colour(n)` kept while the input mirror is valid, with the
+/// palette changed by statements, by another screen becoming current and
+/// between frames (Fade, Flash).
+#[test]
+fn multi_wait_and_colour_match_the_interpreter() {
+    let progs = [
+        "Curs Off\nDo : Multi Wait : Inc N : If Mouse Key Then Print N;\nAmos To Front : Amos Lock : Amos Unlock\nLoop",
+        "Curs Off\nDo : C=Colour(1) : D=Colour(2) : Inc N\nIf N mod 3000=0 Then Print C;D;Colour(1);\nIf N mod 7000=0 Then Colour 1,N and $FFF\nIf N mod 11000=0 Then Palette $123,$456\nLoop",
+        "Curs Off\nScreen Open 1,320,100,16,Lowres : Colour 1,$F00\nDo : Inc N : C=Colour(1) : If N mod 2000=0 Then Print C;\nIf N mod 5000=0 Then Screen N mod 2\nLoop",
+        "Curs Off\nFade 3 To 1\nDo : C=Colour(1) : Inc N : If N mod 1000=0 Then Print C;\nLoop",
+        "Curs Off\nFlash 1,\"(F00,2)(0F0,2)\"\nDo : C=Colour(1) : Multi Wait : Inc N : If N mod 1000=0 Then Print C;\nLoop",
+        "Curs Off\nWait 3\nPrint Colour(40);Colour(-1)",
+    ];
+    for p in progs {
+        compare_with_input(p, 12);
+    }
+}

@@ -184,6 +184,12 @@ pub const IN_SCIN_V: u32 = 508;
 /// mirror stale.
 pub const IN_MZONE_OK: u32 = 512;
 pub const IN_MZONE_V: u32 = 516;
+/// The last `Colour(n)` of the runtime while the mirror is valid: n + 1
+/// (0: none; reset by `host.input_sync`), value. Palettes only change
+/// through statements, functions that mark the mirror stale, and between
+/// frames (fades, colour cycling).
+pub const IN_COLOUR_N: u32 = 520;
+pub const IN_COLOUR_V: u32 = 524;
 /// Start of the global variables.
 pub const GLOBALS: u32 = 576;
 

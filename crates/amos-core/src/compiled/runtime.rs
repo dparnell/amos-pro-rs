@@ -32,6 +32,7 @@ use crate::interp::{
 use crate::tokens::*;
 
 mod arrays;
+mod direct;
 mod strings;
 pub use arrays::HeapKind;
 
@@ -51,6 +52,11 @@ pub trait Env {
     fn hardware(&mut self) -> Option<&mut crate::machine::Hardware> {
         None
     }
+    /// The interpreter and the machine's hardware, when the host is one
+    /// (keywords called through their typed functions, `runtime/direct.rs`).
+    fn hardware_parts(&mut self) -> Option<(&mut Interp, &mut crate::machine::Hardware)> {
+        None
+    }
 }
 
 impl Env for crate::machine::Machine {
@@ -59,6 +65,9 @@ impl Env for crate::machine::Machine {
     }
     fn hardware(&mut self) -> Option<&mut crate::machine::Hardware> {
         Some(&mut self.hw)
+    }
+    fn hardware_parts(&mut self) -> Option<(&mut Interp, &mut crate::machine::Hardware)> {
+        Some((&mut self.interp, &mut self.hw))
     }
 }
 
@@ -69,6 +78,9 @@ fn input_stale(mem: &mut [u8]) {
         st_i32(mem, layout::IN_VALID, 0);
     }
 }
+
+/// The bits of a plain mask saying which parameters are given.
+const SLOTS_GIVEN: u32 = (1 << PLAIN_SLOTS_SHIFT) - 1;
 
 /// Bits of the `op` of [`math`] after the token.
 pub const MATH_DOUBLE: i32 = 1 << 16;
@@ -243,6 +255,8 @@ pub struct Runtime {
     preset_buf: Vec<Option<Value>>,
     /// The two integer parameters of the last plain call (`Scin`).
     last_xy: Option<(i32, i32)>,
+    /// The integer parameter of the last plain call with one (`Colour`).
+    last_int: Option<i32>,
     /// `batch_info` by point.
     batch_infos: Vec<Option<(usize, u16, u32)>>,
     stopped: Option<StopInfo>,
@@ -289,6 +303,7 @@ impl Runtime {
             mirror_gen: None,
             preset_buf: Vec::new(),
             last_xy: None,
+            last_int: None,
             batch_infos: Vec::new(),
             stopped: None,
             frame_pool: Vec::new(),
@@ -1133,6 +1148,7 @@ impl Runtime {
         let slots = (mask >> PLAIN_SLOTS_SHIFT) as usize;
         let given = mask & ((1 << PLAIN_SLOTS_SHIFT) - 1);
         self.last_xy = None;
+        self.last_int = None;
         if base >= 0 {
             // All the given parameters integers?
             let mut vals = [0i32; PLAIN_SLOTS_SHIFT as usize];
@@ -1155,6 +1171,9 @@ impl Runtime {
             if ints {
                 if slots == 2 && given == 3 {
                     self.last_xy = Some((vals[0], vals[1]));
+                }
+                if slots == 1 && given == 1 {
+                    self.last_int = Some(vals[0]);
                 }
                 it.preset_ints(&vals[..slots], given);
                 return Ok(());
@@ -1238,6 +1257,7 @@ impl Runtime {
         }
         st_i32(mem, layout::IN_SCIN_OK, 0);
         st_i32(mem, layout::IN_MZONE_OK, 0);
+        st_i32(mem, layout::IN_COLOUR_N, 0);
         st_i32(mem, layout::IN_VALID, 1);
         1
     }
@@ -1251,26 +1271,25 @@ impl Runtime {
     /// next one when the stack changed). `TAG` receives the number of
     /// instructions started after the first (their time budget).
     pub fn plain_batch(&mut self, env: &mut dyn Env, mem: &mut [u8], first: i32, n: i32, base: i32) -> i32 {
-        let (it, hw) = env.parts();
         let mut base = base;
         for j in 0..n.max(0) {
             let point = (first + j) as usize;
             let Some((pos, token, mask)) = self.batch_info(point) else {
                 st_i32(mem, layout::TAG, j);
                 let r = Err(Exc::Message("Compiled program: bad keyword batch".into()));
+                let (it, hw) = env.parts();
                 return self.result(it, hw, mem, r, self.instrs.get(point).map_or(0, |i| i.pos));
             };
             st_i32(mem, layout::TAG, j);
-            it.inst_pos = pos;
-            let r = if mask >> PLAIN_SLOTS_SHIFT != 0 { self.plain_preset(it, hw, mem, mask, base) } else { Ok(()) };
-            base += (mask & ((1 << PLAIN_SLOTS_SHIFT) - 1)).count_ones() as i32;
-            let before = (it.ctl_generation(), it.param_e);
-            let r = r.and_then(|()| hw.instruction(it, Keyword { slot: 0, token }));
+            let (r, changed) = self.plain_inst_call(env, mem, pos, token, mask, base);
+            base += (mask & SLOTS_GIVEN).count_ones() as i32;
             if r.is_err() {
+                let (it, hw) = env.parts();
                 return self.result(it, hw, mem, r.map(|_| ST_CONTINUE), pos);
             }
-            if before != (it.ctl_generation(), it.param_e) {
+            if changed {
                 // As `plain_keyword` (sync), then on at the next one.
+                let (it, _) = env.parts();
                 self.sync(it, mem);
                 if j + 1 < n {
                     return first + j + 1;
@@ -1310,22 +1329,69 @@ impl Runtime {
         mask: i32,
         base: i32,
     ) -> i32 {
-        let (it, hw) = env.parts();
         let pos = pos as usize;
-        it.inst_pos = pos;
-        let mask = mask as u32;
-        let r = if mask >> PLAIN_SLOTS_SHIFT != 0 { self.plain_preset(it, hw, mem, mask, base) } else { Ok(()) };
-        // The handlers of the machine leave the state `sync` mirrors alone
-        // except the control stack (On Menu) and Param (Comp Compile):
-        // nothing else to mirror when those did not change.
-        let before = (it.ctl_generation(), it.param_e);
-        let r = r.and_then(|()| hw.instruction(it, Keyword { slot: 0, token: token as u16 }));
-        if r.is_ok() && before == (it.ctl_generation(), it.param_e) {
+        let (r, changed) = self.plain_inst_call(env, mem, pos, token as u16, mask as u32, base);
+        if r.is_ok() && !changed {
             input_stale(mem);
             return ST_CONTINUE;
         }
-        let r = r.map(|_| ST_CONTINUE);
-        self.result(it, hw, mem, r, pos)
+        let (it, hw) = env.parts();
+        self.result(it, hw, mem, r.map(|_| ST_CONTINUE), pos)
+    }
+
+    /// Runs the plain instruction `token` at `pos` (`plain_keyword`): through
+    /// its typed function when it has one and its parameters are integers
+    /// (`direct`), else with a preset. Also says whether the state `sync`
+    /// mirrors changed: the handlers of the machine leave it alone except
+    /// the control stack (On Menu) and Param (Comp Compile).
+    fn plain_inst_call(
+        &mut self,
+        env: &mut dyn Env,
+        mem: &mut [u8],
+        pos: usize,
+        token: u16,
+        mask: u32,
+        base: i32,
+    ) -> (R<()>, bool) {
+        let mut vals = [0i32; PLAIN_SLOTS_SHIFT as usize];
+        if direct::has_instruction(token)
+            && self.read_ints(mem, mask, base, &mut vals)
+            && let Some((it, hw)) = env.hardware_parts()
+        {
+            it.inst_pos = pos;
+            let before = (it.ctl_generation(), it.param_e);
+            let a = direct::Ints { vals: &vals[..(mask >> PLAIN_SLOTS_SHIFT) as usize], given: mask & SLOTS_GIVEN };
+            let r = direct::instruction(hw, it, token, a);
+            return (r, before != (it.ctl_generation(), it.param_e));
+        }
+        let (it, hw) = env.parts();
+        it.inst_pos = pos;
+        let r = if mask >> PLAIN_SLOTS_SHIFT != 0 { self.plain_preset(it, hw, mem, mask, base) } else { Ok(()) };
+        let before = (it.ctl_generation(), it.param_e);
+        let r = r.and_then(|()| hw.instruction(it, Keyword { slot: 0, token }));
+        (r, before != (it.ctl_generation(), it.param_e))
+    }
+
+    /// The parameters of a plain call when all the given ones are integers
+    /// (`base` >= 0), in `vals`.
+    fn read_ints(&self, mem: &[u8], mask: u32, base: i32, vals: &mut [i32; PLAIN_SLOTS_SHIFT as usize]) -> bool {
+        if base < 0 {
+            return false;
+        }
+        let (slots, given) = ((mask >> PLAIN_SLOTS_SHIFT) as usize, mask & SLOTS_GIVEN);
+        let mut a = self.layout.bridge + base as u32 * layout::BRIDGE_SLOT;
+        for (s, v) in vals.iter_mut().enumerate().take(slots) {
+            if given & (1 << s) == 0 {
+                continue;
+            }
+            match ld_i32(mem, a) {
+                layout::BRIDGE_INT => *v = ld_i32(mem, a + 8),
+                layout::BRIDGE_DYN_INT => *v = ld_f64(mem, a + 8) as i32,
+                _ => return false,
+            }
+            a += layout::BRIDGE_SLOT;
+        }
+        true
     }
 
     /// Value of the function `token` (main library, `machine::plain_args`)
@@ -1340,13 +1406,32 @@ impl Runtime {
         mask: i32,
         base: i32,
     ) -> Option<Value> {
-        let (it, hw) = env.parts();
-        it.inst_pos = pos as usize;
         let mask = mask as u32;
-        let r = if mask >> PLAIN_SLOTS_SHIFT != 0 { self.plain_preset(it, hw, mem, mask, base) } else { Ok(()) };
-        let r = r.and_then(|()| it.function_value(hw, Keyword { slot: 0, token: token as u16 }));
+        let mut vals = [0i32; PLAIN_SLOTS_SHIFT as usize];
+        let r = if direct::has_function(token as u16)
+            && self.read_ints(mem, mask, base, &mut vals)
+            && let Some((it, hw)) = env.hardware_parts()
+        {
+            it.inst_pos = pos as usize;
+            let (slots, given) = ((mask >> PLAIN_SLOTS_SHIFT) as usize, mask & SLOTS_GIVEN);
+            self.last_xy = None;
+            self.last_int = (slots == 1 && given == 1).then_some(vals[0]);
+            direct::function(hw, it, token as u16, direct::Ints { vals: &vals[..slots], given })
+        } else {
+            let (it, hw) = env.parts();
+            it.inst_pos = pos as usize;
+            let r = if mask >> PLAIN_SLOTS_SHIFT != 0 { self.plain_preset(it, hw, mem, mask, base) } else { Ok(()) };
+            r.and_then(|()| it.function_value(hw, Keyword { slot: 0, token: token as u16 }))
+        };
         if !structure::input_read_only(token as u16) {
             input_stale(mem);
+        } else if token as u16 == crate::tokens::tk::COLOUR_2
+            && ld_i32(mem, layout::IN_VALID) == 1
+            && let (Ok(Value::Int(v)), Some(n)) = (&r, self.last_int)
+        {
+            // Kept for the module (`layout::IN_COLOUR_N`).
+            st_i32(mem, layout::IN_COLOUR_V, *v);
+            st_i32(mem, layout::IN_COLOUR_N, n.wrapping_add(1));
         } else if token as u16 == crate::tokens::tk::MOUSE_ZONE
             && ld_i32(mem, layout::IN_VALID) == 1
             && let Ok(Value::Int(v)) = &r

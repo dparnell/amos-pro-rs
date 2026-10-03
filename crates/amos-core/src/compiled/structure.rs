@@ -352,7 +352,20 @@ pub fn input_read_only(token: u16) -> bool {
             | PEEK
             | DEEK
             | LEEK
+            | COLOUR_2
     )
+}
+
+/// Instruction at `p` that the machine does nothing for (`Hardware::
+/// system_instruction`: there is no Workbench or multitasking): `Multi
+/// Wait`, `Amos To Front` / `To Back`, `Amos Lock` / `Unlock`. Compiled
+/// code skips them (their time budget is still counted).
+pub fn noop_instruction(code: &[u8], p: usize) -> bool {
+    use crate::tokens::tk::*;
+    let (kw, q) = keyword_at(code, p);
+    kw.slot == 0
+        && matches!(kw.token, MULTI_WAIT | AMOS_TO_FRONT | AMOS_TO_BACK | AMOS_LOCK | AMOS_UNLOCK)
+        && is_end(rd(code, q))
 }
 
 /// Functions of the machine whose value is always an integer.
@@ -379,6 +392,7 @@ pub fn int_function(token: u16) -> bool {
             | PEEK
             | DEEK
             | LEEK
+            | COLOUR_2
     )
 }
 

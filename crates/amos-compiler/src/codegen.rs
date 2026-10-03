@@ -266,6 +266,8 @@ enum InputKind {
     Scin,
     /// `Mouse Zone`: the last value of the runtime.
     MouseZone,
+    /// `Colour(n)`: the last value of the runtime for the same n.
+    Colour,
 }
 
 /// `Gen::input_fn`: the function and its direct call.
@@ -2283,6 +2285,7 @@ impl<'a> Gen<'a> {
             TIMER if args.is_empty() => InputKind::Word(layout::IN_TIMER),
             KEY_SHIFT if args.is_empty() => InputKind::KeyShift,
             MOUSE_ZONE if args.is_empty() => InputKind::MouseZone,
+            COLOUR_2 if int_arg => InputKind::Colour,
             JOY if int_arg => InputKind::Joy,
             KEY_STATE if int_arg => InputKind::KeyState,
             INKEY_S if args.is_empty() && ty == Ty::Str => InputKind::Inkey,
@@ -2347,6 +2350,14 @@ impl<'a> Gen<'a> {
                 self.hdr(layout::IN_MZONE_OK);
                 self.w(W::I32And);
             }
+            InputKind::Colour => {
+                self.hdr(layout::IN_COLOUR_N);
+                self.get(a);
+                self.i32c(1);
+                self.w(W::I32Add);
+                self.w(W::I32Eq);
+                self.w(W::I32And);
+            }
             InputKind::Word(_) | InputKind::KeyShift => {}
         }
         self.if_(BlockType::Result(ValType::I32));
@@ -2386,6 +2397,7 @@ impl<'a> Gen<'a> {
             InputKind::Inkey => self.i32c(0),
             InputKind::Scin => self.hdr(layout::IN_SCIN_V),
             InputKind::MouseZone => self.hdr(layout::IN_MZONE_V),
+            InputKind::Colour => self.hdr(layout::IN_COLOUR_V),
         }
         self.else_();
         let base = self.bridge_top;
@@ -3543,6 +3555,8 @@ impl<'a> Gen<'a> {
                 self.call(Imp::Wait);
                 self.status_check();
             }
+            // Instructions the machine does nothing for (`Multi Wait`...).
+            Stmt::Keyword(args) if args.is_empty() && structure::noop_instruction(&self.prg.code, pos as usize) => {}
             Stmt::Keyword(args) => {
                 if let Some(batch) = self.batches.get(&k).cloned() {
                     self.keyword_batch(k, &batch)?;
