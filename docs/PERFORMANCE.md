@@ -182,6 +182,22 @@ interpreted instructions, load independent):
     keywords Copy / Fill / Hunt / Bsave / Ssave are skipped: an omitted end
     address is a 2 GB range).
 
+16. **Argument handling**: the parameter types of a keyword come from a
+    table indexed by token (`tokens::param_types_of`, tested against
+    `TokenDef::param_types` for every slot and token); `inst_args` /
+    `func_args` fill the `Args` they return in place (`args_into`,
+    `preset_into`) instead of copying the list through two `Result`s; the
+    preset is one vector kept in `Interp` plus a flag; parameters already of
+    the signature's type skip the conversion; the inline slots of `ArgVec`
+    past its length are not dropped (they hold `Int(0)`). A pooled
+    (thread local) vector was tried and was slower (TLS access on macOS).
+    Interpreted: `Ink 2` loop 90.6 -> 83.2, busy wait (Scin, X/Y Mouse,
+    Mouse Key) 131.4 -> 121.4, Joy / Key State 112.5 -> 102.9 M
+    instructions per frame; suite: busy wait 532 -> 441 ms, inkey$ / joy /
+    timer 507 -> 380 ms. Compiled (`spin`): Ink 109.5 -> 102.9, Plot 167.8
+    -> 158.6, Locate 164.2 -> 155.0, busy wait 121.6 -> 115.3, Joy / Key
+    State 122.4 -> 112.5 M instructions per frame.
+
 ## API notes for the compiler side
 
 * `Interp::function_value(hw, kw)` (interp/expr.rs): value of the function

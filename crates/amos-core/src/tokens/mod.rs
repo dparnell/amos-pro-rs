@@ -166,6 +166,26 @@ fn token_index() -> &'static [Vec<u16>; EXTENSION_SLOTS] {
     })
 }
 
+/// Parameter type letters of a keyword (`TokenDef::param_types`, "" when
+/// unknown), from a table indexed by token: read at every instruction and
+/// function call.
+#[inline]
+pub fn param_types_of(kw: Keyword) -> &'static str {
+    static SIGS: OnceLock<[Vec<&'static str>; EXTENSION_SLOTS]> = OnceLock::new();
+    if kw.slot == 0 && kw.token & 0x8000 != 0 {
+        return kw.def().map_or("", |d| d.param_types());
+    }
+    let sigs = SIGS.get_or_init(|| {
+        std::array::from_fn(|slot| {
+            token_index()[slot]
+                .iter()
+                .map(|&i| if i == u16::MAX { "" } else { EXTENSIONS[slot][i as usize].param_types() })
+                .collect()
+        })
+    });
+    sigs.get(kw.slot as usize).and_then(|v| v.get(kw.token as usize)).copied().unwrap_or("")
+}
+
 /// All variants of the overloaded keyword `token` (in table order); a
 /// single element slice for keywords without overloads.
 pub fn overload_group(slot: usize, token: u16) -> &'static [TokenDef] {
@@ -241,6 +261,16 @@ pub fn keyword_index() -> &'static KeywordIndex {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn param_types_table_matches_the_definitions() {
+        for slot in 0..EXTENSION_SLOTS as u8 + 2 {
+            for token in 0..=u16::MAX {
+                let kw = Keyword { slot, token };
+                assert_eq!(param_types_of(kw), kw.def().map_or("", |d| d.param_types()), "{kw:?}");
+            }
+        }
+    }
 
     #[test]
     fn known_tokens() {

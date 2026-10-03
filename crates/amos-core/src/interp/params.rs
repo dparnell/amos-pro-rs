@@ -13,12 +13,27 @@ const INLINE_ARGS: usize = 6;
 #[derive(Debug, Default)]
 pub struct ArgVec {
     len: usize,
-    inline: [Value; INLINE_ARGS],
+    /// The values while there are at most `INLINE_ARGS`; the slots past
+    /// `len` hold `Value::Int(0)`, which needs no dropping (see `Drop`).
+    inline: std::mem::ManuallyDrop<[Value; INLINE_ARGS]>,
     /// All the values once there are more than `INLINE_ARGS`.
     spill: Vec<Value>,
 }
 
+impl Drop for ArgVec {
+    #[inline]
+    fn drop(&mut self) {
+        // Only the slots in use can hold strings (taken values and unused
+        // slots are `Value::Int(0)`).
+        let n = self.len.min(INLINE_ARGS);
+        for v in &mut self.inline[..n] {
+            drop(std::mem::take(v));
+        }
+    }
+}
+
 impl ArgVec {
+    #[inline(always)]
     pub fn push(&mut self, v: Value) {
         if self.spill.is_empty() && self.len < INLINE_ARGS {
             self.inline[self.len] = v;
@@ -41,6 +56,7 @@ impl ArgVec {
 
 impl std::ops::Deref for ArgVec {
     type Target = [Value];
+    #[inline]
     fn deref(&self) -> &[Value] {
         if self.spill.is_empty() {
             &self.inline[..self.len]
@@ -51,6 +67,7 @@ impl std::ops::Deref for ArgVec {
 }
 
 impl std::ops::DerefMut for ArgVec {
+    #[inline]
     fn deref_mut(&mut self) -> &mut [Value] {
         if self.spill.is_empty() {
             &mut self.inline[..self.len]
@@ -66,6 +83,7 @@ impl std::ops::DerefMut for ArgVec {
 pub struct Args(pub ArgVec);
 
 impl Args {
+    #[inline]
     pub fn len(&self) -> usize {
         self.0.len()
     }
@@ -74,6 +92,7 @@ impl Args {
         self.0.is_empty()
     }
 
+    #[inline]
     pub fn int(&self, i: usize) -> i32 {
         match self.0.get(i) {
             Some(Value::Int(v)) => *v,
@@ -83,11 +102,13 @@ impl Args {
     }
 
     /// Integer parameter, or `None` when omitted.
+    #[inline]
     pub fn opt(&self, i: usize) -> Option<i32> {
         let v = self.int(i);
         if v == ENT_NUL { None } else { Some(v) }
     }
 
+    #[inline]
     pub fn float(&self, i: usize) -> f64 {
         match self.0.get(i) {
             Some(Value::Int(v)) => *v as f64,
@@ -96,6 +117,7 @@ impl Args {
         }
     }
 
+    #[inline]
     pub fn str(&self, i: usize) -> AStr {
         match self.0.get(i) {
             Some(Value::Str(s)) => s.clone(),
@@ -116,8 +138,14 @@ impl Interp {
     /// Reads parameters following the signature `sig` (type chars separated
     /// by `,` or `t` for `To`), as the patched `Parameters` routines do.
     pub fn args(&mut self, hw: &mut dyn Host, sig: &str) -> R<ArgVec> {
-        let sig = sig.as_bytes();
         let mut out = ArgVec::default();
+        self.args_into(hw, sig, &mut out)?;
+        Ok(out)
+    }
+
+    /// `args` into `out` (no copy of the list on return).
+    pub fn args_into(&mut self, hw: &mut dyn Host, sig: &str, out: &mut ArgVec) -> R<()> {
+        let sig = sig.as_bytes();
         let mut i = 0;
         while i < sig.len() {
             let ty = sig[i];
@@ -139,33 +167,48 @@ impl Interp {
             }
             i += 2;
         }
-        Ok(out)
+        Ok(())
     }
 
     /// Reads the parameters of the instruction `kw` (pc after the token),
     /// or takes the ones given to [`Interp::preset_args`].
     pub fn inst_args(&mut self, hw: &mut dyn Host, kw: Keyword) -> R<Args> {
-        let sig = kw.def().map_or("", |d| d.param_types());
-        if let Some(mut values) = self.preset.take() {
-            let r = self.preset_to_args(sig, &mut values);
-            values.clear();
-            self.preset_spare = values;
-            return Ok(Args(r?));
+        let sig = param_types_of(kw);
+        if self.preset_set {
+            return self.take_preset(sig);
         }
-        Ok(Args(self.args(hw, sig)?))
+        let mut out = Args::default();
+        self.args_into(hw, sig, &mut out.0)?;
+        Ok(out)
     }
 
     /// Reads the parameters of the function `kw` (pc after the token), or
     /// takes the ones given to [`Interp::preset_args`].
     pub fn func_args(&mut self, hw: &mut dyn Host, kw: Keyword) -> R<Args> {
-        let sig = kw.def().map_or("", |d| d.param_types());
-        if let Some(mut values) = self.preset.take() {
-            let r = self.preset_to_args(sig, &mut values);
-            values.clear();
-            self.preset_spare = values;
-            return Ok(Args(r?));
+        let sig = param_types_of(kw);
+        if self.preset_set {
+            return self.take_preset(sig);
         }
-        Ok(Args(self.fn_args(hw, sig)?))
+        let mut out = Args::default();
+        if !sig.is_empty() {
+            // `fn_args` into `out`.
+            self.expect(TK_PAR1)?;
+            self.args_into(hw, sig, &mut out.0)?;
+            self.expect(TK_PAR2)?;
+        }
+        Ok(out)
+    }
+
+    /// The preset parameters converted for `sig`; the preset is used up
+    /// (also on error) and its vector kept for the next one.
+    fn take_preset(&mut self, sig: &str) -> R<Args> {
+        self.preset_set = false;
+        let mut values = std::mem::take(&mut self.preset);
+        let mut out = Args::default();
+        let r = self.preset_into(sig, &mut values, &mut out.0);
+        values.clear();
+        self.preset = values;
+        r.map(|()| out)
     }
 
     /// Gives the parameters of the next `inst_args` / `func_args` call,
@@ -178,10 +221,9 @@ impl Interp {
     ///
     /// [`plain_args`]: crate::machine::plain_args
     pub fn preset_args(&mut self, args: &[Option<Value>]) {
-        let mut v = std::mem::take(&mut self.preset_spare);
-        v.clear();
-        v.extend_from_slice(args);
-        self.preset = Some(v);
+        self.preset.clear();
+        self.preset.extend_from_slice(args);
+        self.preset_set = true;
     }
 
     /// `args(sig)` on values already evaluated: the same conversions and
@@ -189,9 +231,8 @@ impl Interp {
     /// missing separator of the token path (Syntax error after the last
     /// value given); more values, the separator left unread, is reported
     /// once the signature's values are converted.
-    fn preset_to_args(&self, sig: &str, values: &mut [Option<Value>]) -> R<ArgVec> {
+    fn preset_into(&self, sig: &str, values: &mut [Option<Value>], out: &mut ArgVec) -> R<()> {
         let sig = sig.as_bytes();
-        let mut out = ArgVec::default();
         let mut i = 0;
         let mut k = 0;
         while i < sig.len() {
@@ -209,10 +250,19 @@ impl Interp {
         if k < values.len() {
             return err(errors::SYNTAX_ERROR);
         }
-        Ok(out)
+        Ok(())
     }
 
+    #[inline]
     pub fn convert_param(&self, ty: u8, v: Value) -> R<Value> {
+        // Usual case: already of the type (what the general case returns).
+        match (ty, &v) {
+            (b'0', Value::Int(_)) | (b'1', Value::Float(_)) | (b'2', Value::Str(_)) => Ok(v),
+            _ => self.convert_param_other(ty, v),
+        }
+    }
+
+    fn convert_param_other(&self, ty: u8, v: Value) -> R<Value> {
         Ok(match ty {
             b'0' => Value::Int(self.to_int(v)?),
             b'1' => Value::Float(self.to_float(v)?),
@@ -404,7 +454,9 @@ mod tests {
 
     impl Interp {
         fn preset_to_args_test(&self, sig: &str, values: &[Option<Value>]) -> R<ArgVec> {
-            self.preset_to_args(sig, &mut values.to_vec())
+            let mut out = ArgVec::default();
+            self.preset_into(sig, &mut values.to_vec(), &mut out)
+                .map(|()| out)
         }
     }
 
@@ -477,10 +529,10 @@ mod tests {
         };
         it.preset_args(&[s(), i(1)]);
         assert!(it.inst_args(&mut host, kw).is_err());
-        assert!(it.preset.is_none());
+        assert!(!it.preset_set);
         it.preset_args(&[i(3), None]);
         let a = it.inst_args(&mut host, kw).unwrap();
         assert_eq!((a.int(0), a.opt(1)), (3, None));
-        assert!(it.preset.is_none());
+        assert!(!it.preset_set);
     }
 }
