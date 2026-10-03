@@ -268,7 +268,7 @@ fn feed(m: &mut Machine, f: usize) {
         m.input(InputEvent::Char('x'));
         m.input(InputEvent::Char('y'));
     }
-    for (key, on, off) in [(raw::ESC, 2, 5), (raw::UP, 4, 9), (raw::LEFT, 6, 7)] {
+    for (key, on, off) in [(raw::ESC, 2, 5), (raw::UP, 4, 9), (raw::LEFT, 6, 7), (0x60, 1, 6), (0x63, 3, 4)] {
         if f % 10 == on {
             m.input(InputEvent::Key { scancode: key, pressed: true, ch: None });
         }
@@ -311,9 +311,9 @@ fn compare_with_input(src: &str, frames: usize) {
 fn polling_functions_match_the_interpreter() {
     let progs = [
         // Once per frame.
-        "Curs Off\nDo\nA$=Inkey$ : If A$<>\"\" Then Print A$;Scancode;Scanshift;\nPrint X Mouse;Y Mouse;Mouse Key;Joy(0);Joy(1);Jup(1);Fire(0);Key State(69);Key State(76);Timer\nWait Vbl\nLoop",
+        "Curs Off\nDo\nA$=Inkey$ : If A$<>\"\" Then Print A$;Scancode;Scanshift;\nPrint X Mouse;Y Mouse;Mouse Key;Joy(0);Joy(1);Jup(1);Fire(0);Key State(69);Key State(76);Key Shift;Timer\nWait Vbl\nLoop",
         // Tight polling loops (the budget ends the frame).
-        "Curs Off\nDo\nInc N : A$=Inkey$ : If A$<>\"\" Then Print N mod 97;A$;\nIf Mouse Key Then Inc M\nIf N mod 5000=0 Then Print M;Timer;Joy(1);Key State(76);\nLoop",
+        "Curs Off\nDo\nInc N : A$=Inkey$ : If A$<>\"\" Then Print N mod 97;A$;\nIf Mouse Key Then Inc M\nIf N mod 5000=0 Then Print M;Timer;Joy(1);Key State(76);Key Shift;\nLoop",
         "Curs Off\nDo : N=Scin(X Mouse,Y Mouse) : K=Mouse Key : Inc C : If C mod 3000=0 Then Print N;K;\nLoop",
         "Curs Off\nDo : A$=Inkey$ : J=Joy(1) : T=Timer : K=Key State(69) : Inc C : If A$<>\"\" or C mod 4000=0 Then Print A$;J;T;K;\nLoop",
         "Curs Off\nDo\nRepeat : Inc W : Until Mouse Key<>0 or W>20000\nPrint W;Mouse Key; : W=0\nWait Vbl\nLoop",
@@ -333,6 +333,7 @@ fn polling_functions_match_the_interpreter() {
         // Every handlers and interpreted instructions in between.
         "Curs Off\nEvery 3 Gosub E\nDo : T=Timer : K=Key State(69) : If T<Q Then Print T;Q;\nQ=T : Loop\nE: Timer=0 : Clear Key : Every On : Return",
         "Curs Off\nDo : A$=Inkey$ : If A$<>\"\" Then Print A$;\nX=X Mouse : Inc N : If N mod 3000=0 Then Put Key \"q\"\nLoop",
+        "Curs Off\nDo : If Key Shift=1 or Key Shift>2 Then Print Key Shift;\nInc N : If N mod 4000=0 Then Print Key Shift<>0;\nLoop",
     ];
     for p in progs {
         compare_with_input(p, 40);

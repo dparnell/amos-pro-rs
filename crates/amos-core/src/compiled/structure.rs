@@ -330,14 +330,27 @@ pub fn input_read_only(token: u16) -> bool {
     use crate::tokens::tk::*;
     matches!(
         token,
-        X_MOUSE | Y_MOUSE | MOUSE_KEY | TIMER | JOY | JUP | JDOWN | JLEFT | JRIGHT | FIRE | KEY_STATE | SCIN | SCIN_2
+        X_MOUSE
+            | Y_MOUSE
+            | MOUSE_KEY
+            | TIMER
+            | JOY
+            | JUP
+            | JDOWN
+            | JLEFT
+            | JRIGHT
+            | FIRE
+            | KEY_STATE
+            | KEY_SHIFT
+            | SCIN
+            | SCIN_2
     )
 }
 
 /// Functions of the machine whose value is always an integer.
 pub fn int_function(token: u16) -> bool {
     use crate::tokens::tk::*;
-    matches!(token, X_MOUSE | Y_MOUSE | MOUSE_KEY | TIMER | JOY | KEY_STATE | SCIN)
+    matches!(token, X_MOUSE | Y_MOUSE | MOUSE_KEY | TIMER | JOY | KEY_STATE | KEY_SHIFT | SCIN | CHOICE | CHOICE_2)
 }
 
 /// Bit of a plain call's mask where the number of signature slots starts

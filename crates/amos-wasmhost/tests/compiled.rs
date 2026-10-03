@@ -822,3 +822,22 @@ fn maths_functions() {
         same_budget(p, 3);
     }
 }
+
+/// Comparisons of numbers whose type is only known at run time: both
+/// integers compared by the module, otherwise by the runtime.
+#[test]
+fn dynamic_comparisons() {
+    let ops = ["=", "<>", "<", ">", "<=", ">="];
+    let vals =
+        ["Val(\"3\")", "Val(\"2.5\")", "Val(\"-7\")", "Val(\"3.0\")", "3", "2.5", "I", "F#", "Val(\"2147483647\")"];
+    let mut src = String::from("I=3 : F#=2.5\n");
+    for a in &vals {
+        for op in &ops {
+            src.push_str(&format!("Print {a}{op}{}; : Print {}{op}{a};\n", vals[0], vals[1]));
+        }
+    }
+    src.push_str("For K=-2 To 2 : If Val(Str$(K))>=0 and Val(Str$(K*2))<>2 Then Print K;\nNext\n");
+    src.push_str("Set Double Precision\n");
+    run(&src[..src.len() - "Set Double Precision\n".len()]);
+    run(&format!("Set Double Precision\n{}", &src[..src.len() - "Set Double Precision\n".len()]));
+}

@@ -252,6 +252,7 @@ enum InputKind {
     Word(u32),
     Joy,
     KeyState,
+    KeyShift,
     Inkey,
     /// `Scin(x,y)`: the last value of the runtime for the same x, y.
     Scin,
@@ -1688,6 +1689,48 @@ impl<'a> Gen<'a> {
         } else {
             Ty::Float
         };
+        if ct == Ty::Dyn && ty == Ty::Int && is_comparison(op) {
+            // Both integers at run time (the usual case: functions of the
+            // machine): compared here; otherwise by the runtime.
+            let (xa, ta, xb, tb) =
+                (self.tmp(ValType::F64), self.tmp(ValType::I32), self.tmp(ValType::F64), self.tmp(ValType::I32));
+            self.expr(a);
+            self.as_dyn(a.ty);
+            self.set(ta);
+            self.set(xa);
+            self.expr(b);
+            self.as_dyn(b.ty);
+            self.set(tb);
+            self.set(xb);
+            self.get(ta);
+            self.get(tb);
+            self.w(W::I32Or);
+            self.w(W::I32Eqz);
+            self.if_(BlockType::Result(ValType::I32));
+            self.get(xa);
+            self.w(W::I32TruncSatF64S);
+            self.get(xb);
+            self.w(W::I32TruncSatF64S);
+            self.cmp_i32(op);
+            self.bool_to_amos();
+            self.else_();
+            self.i32c(op as i32);
+            for t in [xa, ta, xb, tb] {
+                self.get(t);
+            }
+            self.call(Imp::DynOp);
+            self.err_check();
+            self.hdr(layout::TAG);
+            self.as_int(Ty::Dyn);
+            self.end();
+            for t in [xa, xb] {
+                self.release(t, ValType::F64);
+            }
+            for t in [ta, tb] {
+                self.release(t, ValType::I32);
+            }
+            return;
+        }
         if ct == Ty::Dyn {
             self.i32c(op as i32);
             self.expr(a);
@@ -2199,6 +2242,7 @@ impl<'a> Gen<'a> {
             Y_MOUSE if args.is_empty() => InputKind::Word(layout::IN_MOUSE_Y),
             MOUSE_KEY if args.is_empty() => InputKind::Word(layout::IN_MOUSE_KEY),
             TIMER if args.is_empty() => InputKind::Word(layout::IN_TIMER),
+            KEY_SHIFT if args.is_empty() => InputKind::KeyShift,
             JOY if int_arg => InputKind::Joy,
             KEY_STATE if int_arg => InputKind::KeyState,
             INKEY_S if args.is_empty() && ty == Ty::Str => InputKind::Inkey,
@@ -2259,11 +2303,16 @@ impl<'a> Gen<'a> {
                 self.w(W::I32Eq);
                 self.w(W::I32And);
             }
-            InputKind::Word(_) => {}
+            InputKind::Word(_) | InputKind::KeyShift => {}
         }
         self.if_(BlockType::Result(ValType::I32));
         match f.kind {
             InputKind::Word(w) => self.hdr(w),
+            // Byte 12 of the key matrix (`InputState::shifts`).
+            InputKind::KeyShift => {
+                self.get(L_BASE);
+                self.w(W::I32Load8U(MemArg { offset: layout::IN_KEYS as u64 + 12, align: 0, memory_index: 0 }));
+            }
             InputKind::Joy => {
                 self.get(L_BASE);
                 self.get(a);
