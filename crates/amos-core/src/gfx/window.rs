@@ -171,7 +171,7 @@ type GlyphStyle = (u8, u8, u8, u16, u8, u8);
 /// The 8 bits of a glyph row as a word whose byte k is $FF when bit 7-k
 /// is set (pixel k of the row), in memory order.
 #[inline]
-fn expand_bits(bits: u8) -> u64 {
+pub(crate) fn expand_bits(bits: u8) -> u64 {
     const TABLE: [u64; 256] = {
         let mut t = [0u64; 256];
         let mut b = 0;

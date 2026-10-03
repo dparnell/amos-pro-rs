@@ -230,6 +230,29 @@ pub fn draw(t: &mut Target, src: &Src, c: &Calc, plane_mask: u16) {
     if pm == 0 {
         return;
     }
+    // Columns of the drawn area showing the image (the others, and rows
+    // outside the image, have no source pixel and A = 0).
+    let (x0, x1) = (c.rx, c.rx + c.rw);
+    let (ix0, ix1) = (c.x.max(x0), (c.x + src.w as i32).min(x1).max(c.x.max(x0)));
+    let n = (ix1 - ix0) as usize;
+    let tw = t.width as usize;
+    if c.lf == LF_COOKIE && c.masked {
+        // Cookie cut (the usual case): D = A ? S : D, A = (S != 0): only
+        // the image's non-zero pixels change.
+        for py in c.ry..c.ry + c.rh {
+            let iy = py - c.y;
+            if iy < 0 || iy as u32 >= src.h || n == 0 {
+                continue;
+            }
+            let si = iy as usize * src.w as usize + (ix0 - c.x) as usize;
+            let di = py as usize * tw + ix0 as usize;
+            for (d, &s) in t.pixels[di..di + n].iter_mut().zip(&src.pixels[si..si + n]) {
+                let m = if s != 0 { pm } else { 0 };
+                *d = (*d & !m) | (s & m);
+            }
+        }
+        return;
+    }
     // The minterm applied to all planes at once: for each pixel, bit p of
     // the result is bit (A<<2 | S_p<<1 | D_p) of `lf`, A being the mask.
     let terms = |a: u8| -> [u8; 4] {
@@ -242,24 +265,27 @@ pub fn draw(t: &mut Target, src: &Src, c: &Calc, plane_mask: u16) {
         })
     };
     let (t0, t1) = (terms(0), terms(1));
+    let mix = |tm: &[u8; 4], s: u8, d: u8| {
+        (tm[3] & s & d) | (tm[2] & s & !d) | (tm[1] & !s & d) | (tm[0] & !s & !d)
+    };
+    // No source pixel: S = 0, A = 0.
+    let blank = |d: &mut u8| *d = (*d & !pm) | (mix(&t0, 0, *d) & pm);
     for py in c.ry..c.ry + c.rh {
         let iy = py - c.y;
-        let row_in = iy >= 0 && (iy as u32) < src.h;
-        let row = (py as u32 * t.width) as usize;
-        for px in c.rx..c.rx + c.rw {
-            let ix = px - c.x;
-            let inside = row_in && ix >= 0 && (ix as u32) < src.w;
-            let s = if inside {
-                src.pixels[(iy as u32 * src.w + ix as u32) as usize]
-            } else {
-                0
-            };
-            let a = inside && (!c.masked || s != 0);
-            let tm = if a { &t1 } else { &t0 };
-            let o = row + px as usize;
-            let d = t.pixels[o];
-            let res = (tm[3] & s & d) | (tm[2] & s & !d) | (tm[1] & !s & d) | (tm[0] & !s & !d);
-            t.pixels[o] = (d & !pm) | (res & pm);
+        let row = py as usize * tw;
+        let line = &mut t.pixels[row + x0 as usize..row + x1 as usize];
+        if iy < 0 || iy as u32 >= src.h || n == 0 {
+            line.iter_mut().for_each(blank);
+            continue;
+        }
+        let (left, rest) = line.split_at_mut((ix0 - x0) as usize);
+        let (mid, right) = rest.split_at_mut(n);
+        left.iter_mut().for_each(blank);
+        right.iter_mut().for_each(blank);
+        let si = iy as usize * src.w as usize + (ix0 - c.x) as usize;
+        for (d, &s) in mid.iter_mut().zip(&src.pixels[si..si + n]) {
+            let tm = if !c.masked || s != 0 { &t1 } else { &t0 };
+            *d = (*d & !pm) | (mix(tm, s, *d) & pm);
         }
     }
 }
@@ -277,19 +303,29 @@ pub fn save(t: &Target, slot: &mut SaveSlot) {
 /// Restores a background (`BobEff`), or fills it with colour `fill`.
 pub fn restore(t: &mut Target, slot: &SaveSlot, fill: Option<u8>) {
     let pm = slot.planes;
-    let mut i = 0;
-    for y in slot.ry..slot.ry + slot.rh {
-        let o = (y as u32 * t.width) as usize;
-        for x in slot.rx..slot.rx + slot.rw {
-            let d = &mut t.pixels[o + x as usize];
-            let v = match (fill, &slot.data) {
-                (Some(c), _) => c,
-                (None, Some(data)) => data[i],
-                (None, None) => *d,
-            };
-            *d = (*d & !pm) | (v & pm);
-            i += 1;
+    if slot.rw <= 0 || slot.rh <= 0 {
+        return;
+    }
+    let n = slot.rw as usize;
+    let rows =
+        (slot.ry..slot.ry + slot.rh).map(|y| (y as u32 * t.width) as usize + slot.rx as usize);
+    match (fill, &slot.data) {
+        (Some(c), _) => {
+            for o in rows {
+                for d in &mut t.pixels[o..o + n] {
+                    *d = (*d & !pm) | (c & pm);
+                }
+            }
         }
+        (None, Some(data)) => {
+            for (o, saved) in rows.zip(data.chunks(n)) {
+                for (d, &v) in t.pixels[o..o + n].iter_mut().zip(saved) {
+                    *d = (*d & !pm) | (v & pm);
+                }
+            }
+        }
+        // (Nothing to restore: the pixels are unchanged.)
+        (None, None) => {}
     }
 }
 
@@ -511,6 +547,204 @@ mod tests {
             hits += want as usize;
         }
         assert!(hits > 2000, "{hits}");
+    }
+
+    /// `draw` before the cookie cut fast path and the row segments, pixel
+    /// by pixel (reference).
+    fn draw_pixels_reference(t: &mut Target, src: &Src, c: &Calc, plane_mask: u16) {
+        let pm = (plane_mask as u32 & ((1u32 << c.nplanes) - 1)) as u8;
+        if pm == 0 {
+            return;
+        }
+        // The minterm applied to all planes at once: for each pixel, bit p of
+        // the result is bit (A<<2 | S_p<<1 | D_p) of `lf`, A being the mask.
+        let terms = |a: u8| -> [u8; 4] {
+            std::array::from_fn(|sd| {
+                if (c.lf >> ((a << 2) | sd as u8)) & 1 != 0 {
+                    0xFF
+                } else {
+                    0
+                }
+            })
+        };
+        let (t0, t1) = (terms(0), terms(1));
+        for py in c.ry..c.ry + c.rh {
+            let iy = py - c.y;
+            let row_in = iy >= 0 && (iy as u32) < src.h;
+            let row = (py as u32 * t.width) as usize;
+            for px in c.rx..c.rx + c.rw {
+                let ix = px - c.x;
+                let inside = row_in && ix >= 0 && (ix as u32) < src.w;
+                let s = if inside {
+                    src.pixels[(iy as u32 * src.w + ix as u32) as usize]
+                } else {
+                    0
+                };
+                let a = inside && (!c.masked || s != 0);
+                let tm = if a { &t1 } else { &t0 };
+                let o = row + px as usize;
+                let d = t.pixels[o];
+                let res = (tm[3] & s & d) | (tm[2] & s & !d) | (tm[1] & !s & d) | (tm[0] & !s & !d);
+                t.pixels[o] = (d & !pm) | (res & pm);
+            }
+        }
+    }
+
+    #[test]
+    fn draw_matches_the_pixel_loop() {
+        let mut seed = 21u32;
+        let mut rnd = |n: u32| {
+            seed = seed.wrapping_mul(1103515245).wrapping_add(12345);
+            (seed >> 8) % n
+        };
+        for _ in 0..3000 {
+            let (ww, h, planes) = (1 + rnd(3), 1 + rnd(24), 1 + rnd(5) as u8);
+            let w = ww * 16;
+            let bm: Vec<u8> = (0..w * h)
+                .map(|_| if rnd(3) == 0 { 0 } else { rnd(256) as u8 })
+                .collect();
+            let im = grab(&bm, w, 0, 0, w, h, planes);
+            let (tw, th) = (96u32, 64u32);
+            let (x, y) = (rnd(120) as i32 - 40, rnd(90) as i32 - 30);
+            let lim = Limits {
+                left: rnd(40) as i32,
+                top: rnd(30) as i32,
+                right: tw as i32 - rnd(40) as i32,
+                bottom: th as i32 - rnd(30) as i32,
+            };
+            let minterm = if rnd(2) == 0 {
+                0
+            } else {
+                0x8000 | rnd(256) as u16
+            };
+            let mask = if rnd(4) == 0 {
+                MaskState::None
+            } else {
+                MaskState::Made
+            };
+            let Some(c) = calc(
+                &im,
+                1,
+                0,
+                x,
+                y,
+                lim,
+                (tw, th, 1 + rnd(6) as u8),
+                minterm,
+                mask,
+            ) else {
+                continue;
+            };
+            let src = Src::new(&im, 0);
+            let px: Vec<u8> = (0..tw * th).map(|_| rnd(256) as u8).collect();
+            let (mut a, mut b) = (px.clone(), px);
+            let pmask = if rnd(3) == 0 { rnd(64) as u16 } else { 0xFFFF };
+            draw(
+                &mut Target {
+                    pixels: &mut a,
+                    width: tw,
+                    height: th,
+                    planes: 6,
+                },
+                &src,
+                &c,
+                pmask,
+            );
+            draw_pixels_reference(
+                &mut Target {
+                    pixels: &mut b,
+                    width: tw,
+                    height: th,
+                    planes: 6,
+                },
+                &src,
+                &c,
+                pmask,
+            );
+            assert!(a == b, "{c:?} {pmask:x}");
+        }
+    }
+
+    /// `restore` pixel by pixel (reference).
+    fn restore_reference(t: &mut Target, slot: &SaveSlot, fill: Option<u8>) {
+        let pm = slot.planes;
+        let mut i = 0;
+        for y in slot.ry..slot.ry + slot.rh {
+            let o = (y as u32 * t.width) as usize;
+            for x in slot.rx..slot.rx + slot.rw {
+                let d = &mut t.pixels[o + x as usize];
+                let v = match (fill, &slot.data) {
+                    (Some(c), _) => c,
+                    (None, Some(data)) => data[i],
+                    (None, None) => *d,
+                };
+                *d = (*d & !pm) | (v & pm);
+                i += 1;
+            }
+        }
+    }
+
+    #[test]
+    fn save_and_restore_match_the_pixel_loop() {
+        let mut seed = 33u32;
+        let mut rnd = |n: u32| {
+            seed = seed.wrapping_mul(1103515245).wrapping_add(12345);
+            (seed >> 8) % n
+        };
+        for _ in 0..3000 {
+            let (tw, th) = (64u32, 40u32);
+            let px: Vec<u8> = (0..tw * th).map(|_| rnd(256) as u8).collect();
+            let (rx, ry) = (rnd(64) as i32, rnd(40) as i32);
+            let (rw, rh) = (rnd(65 - rx as u32) as i32, rnd(41 - ry as u32) as i32);
+            let mut slot = SaveSlot {
+                valid: true,
+                rx,
+                ry,
+                rw,
+                rh,
+                planes: rnd(256) as u8,
+                data: None,
+            };
+            let other: Vec<u8> = (0..tw * th).map(|_| rnd(256) as u8).collect();
+            if rnd(3) != 0 {
+                save(
+                    &Target {
+                        pixels: &mut other.clone(),
+                        width: tw,
+                        height: th,
+                        planes: 8,
+                    },
+                    &mut slot,
+                );
+            }
+            let fill = if rnd(3) == 0 {
+                Some(rnd(256) as u8)
+            } else {
+                None
+            };
+            let (mut a, mut b) = (px.clone(), px);
+            restore(
+                &mut Target {
+                    pixels: &mut a,
+                    width: tw,
+                    height: th,
+                    planes: 8,
+                },
+                &slot,
+                fill,
+            );
+            restore_reference(
+                &mut Target {
+                    pixels: &mut b,
+                    width: tw,
+                    height: th,
+                    planes: 8,
+                },
+                &slot,
+                fill,
+            );
+            assert!(a == b);
+        }
     }
 
     /// The plane by plane minterm (reference for `draw`).

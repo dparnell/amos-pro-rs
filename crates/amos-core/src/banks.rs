@@ -69,12 +69,12 @@ impl Image {
             let mut out = vec![0u8; plane_bytes * 8];
             for p in 0..self.planes as usize {
                 let plane = &self.planar[p * plane_bytes..(p + 1) * plane_bytes];
+                // 8 pixels at a time: byte k of the word is pixel k.
+                let bit = u64::from_ne_bytes([1u8 << p; 8]);
                 for (o, &b) in out.as_chunks_mut::<8>().0.iter_mut().zip(plane) {
-                    if b == 0 {
-                        continue;
-                    }
-                    for (k, px) in o.iter_mut().enumerate() {
-                        *px |= ((b >> (7 - k)) & 1) << p;
+                    if b != 0 {
+                        let v = u64::from_ne_bytes(*o) | (crate::gfx::window::expand_bits(b) & bit);
+                        *o = v.to_ne_bytes();
                     }
                 }
             }
@@ -489,6 +489,34 @@ impl BankSet {
 
 #[cfg(test)]
 mod tests {
+    /// `to_chunky` is `pixel` for every pixel (random images, 1-8 planes).
+    #[test]
+    fn to_chunky_matches_pixel_random() {
+        let mut seed = 17u32;
+        let mut rnd = |n: u32| {
+            seed = seed.wrapping_mul(1103515245).wrapping_add(12345);
+            (seed >> 8) % n
+        };
+        for _ in 0..500 {
+            let (ww, h, planes) = (1 + rnd(4) as u16, 1 + rnd(20) as u16, 1 + rnd(8) as u16);
+            let len = ww as usize * 2 * h as usize * planes as usize;
+            let planar = (0..len).map(|_| rnd(256) as u8).collect();
+            let img = Image {
+                width_words: ww,
+                height: h,
+                planes,
+                hot_x: 0,
+                hot_y: 0,
+                planar,
+            };
+            let want: Vec<u8> = (0..h as u32)
+                .flat_map(|y| (0..img.width()).map(move |x| (x, y)))
+                .map(|(x, y)| img.pixel(x, y))
+                .collect();
+            assert_eq!(img.to_chunky(), want);
+        }
+    }
+
     #[test]
     fn to_chunky_matches_pixel() {
         // Pseudo random planar data, complete and truncated.
