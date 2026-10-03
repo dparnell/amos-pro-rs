@@ -705,7 +705,16 @@ impl GrState {
         if !wr.complement {
             // Writing the ink is idempotent: the points are drawn as they
             // come (the reference sorts them to draw each pixel once).
-            ellipse_points(cx, cy, rx, ry, |x, y| wr.put(c.buf, x, y, true, ink));
+            let (a, b) = (rx.abs(), ry.abs());
+            let inside = wr.inside(cx.saturating_sub(a), cy.saturating_sub(b))
+                && wr.inside(cx.saturating_add(a), cy.saturating_add(b));
+            if let (true, SpanFill::Set(v)) = (inside, wr.op(true, ink)) {
+                // No point is clipped (they stay in the bounding box).
+                let w = wr.w;
+                ellipse_points(cx, cy, rx, ry, |x, y| c.buf[(y * w + x) as usize] = v);
+            } else {
+                ellipse_points(cx, cy, rx, ry, |x, y| wr.put(c.buf, x, y, true, ink));
+            }
             return;
         }
         // COMPLEMENT: each pixel once. A bit per pixel of the part of the
