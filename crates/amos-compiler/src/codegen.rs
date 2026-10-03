@@ -80,6 +80,7 @@ imports! {
     FnN = "host" "fn_n" (i i i) -> f;
     FnS = "host" "fn_s" (i i i) -> i;
     PlainKeyword = "host" "plain_keyword" (i i i i) -> i;
+    PlainBatch = "host" "plain_batch" (i i i) -> i;
     PfnI = "host" "pfn_i" (i i i i) -> i;
     PfnF = "host" "pfn_f" (i i i i) -> f;
     PfnN = "host" "pfn_n" (i i i i) -> f;
@@ -231,6 +232,12 @@ struct Gen<'a> {
     next_for: std::collections::HashMap<usize, StaticFor>,
     /// The program has a `Degree` instruction.
     uses_degree: bool,
+    /// Runs of consecutive plain instructions (`keyword_batch`) by the
+    /// index of their first one: the parameters of each.
+    batches: std::collections::HashMap<usize, Vec<Vec<Expr>>>,
+    /// While evaluating the parameters of a batch: errors leave it (to
+    /// the instruction run alone) instead of being raised.
+    abandon: Option<Lbl>,
 }
 
 /// A For loop on a scalar variable and its `Next`, found in the program
@@ -265,6 +272,14 @@ struct InputFn {
     kind: InputKind,
     token: i32,
     mask: i32,
+}
+
+/// The parameters of a `Stmt::Keyword`.
+fn stmts_args(s: &Stmt) -> &[Expr] {
+    match s {
+        Stmt::Keyword(args) => args,
+        _ => &[],
+    }
 }
 
 /// An integer constant expression (as `as_int` converts it).
@@ -527,6 +542,11 @@ impl<'a> Gen<'a> {
     }
 
     fn raise(&mut self, code: u16) {
+        if let Some(l) = self.abandon {
+            // (The parameters of a batch: run the instructions one by one.)
+            self.br(l);
+            return;
+        }
         self.i32c(code as i32);
         self.set(L_EXCODE);
         self.br(Lbl::Raise);
@@ -2371,6 +2391,116 @@ impl<'a> Gen<'a> {
         self.release(b, ValType::I32);
     }
 
+    /// Runs of at least two consecutive plain instructions (`plain_call`)
+    /// whose parameters the module evaluates without calling the runtime
+    /// or changing anything (`pure_param`), in one scope, at most 8, not
+    /// after a `Trap`.
+    fn keyword_batches(&self, stmts: &[Stmt]) -> std::collections::HashMap<usize, Vec<Vec<Expr>>> {
+        let mut out = std::collections::HashMap::new();
+        let code = &self.prg.code;
+        let ok = |k: usize| match stmts.get(k) {
+            Some(Stmt::Keyword(args)) => {
+                let scope = self.instrs[k].scope;
+                self.plain_call(self.instrs[k].pos, false, args.len()).is_some()
+                    && args.iter().all(|a| self.pure_param(a, scope))
+            }
+            _ => false,
+        };
+        let mut k = 0;
+        while k < stmts.len() {
+            if !ok(k) || (k > 0 && structure::rd(code, self.instrs[k - 1].pos) == tk::TRAP) {
+                k += 1;
+                continue;
+            }
+            let mut end = k + 1;
+            let mut slots = stmts_args(&stmts[k]).len();
+            while end < stmts.len()
+                && end - k < 8
+                && ok(end)
+                && self.instrs[end].scope == self.instrs[k].scope
+                && slots + stmts_args(&stmts[end]).len() <= layout::BRIDGE_SLOTS as usize / 2
+            {
+                slots += stmts_args(&stmts[end]).len();
+                end += 1;
+            }
+            if end - k >= 2 {
+                // Also from each later one (entered by jumps).
+                for j in k..end - 1 {
+                    out.insert(j, (j..end).map(|i| stmts_args(&stmts[i]).to_vec()).collect());
+                }
+            }
+            k = end;
+        }
+        out
+    }
+
+    /// A parameter evaluated by the module without calling the runtime nor
+    /// changing anything: numbers, scalar variables, elements of arrays in
+    /// linear memory, operators on them (not `^`); errors (overflow,
+    /// division by zero, index) only, which `abandon` catches.
+    fn pure_param(&self, e: &Expr, scope: usize) -> bool {
+        if !matches!(e.ty, Ty::Int | Ty::Float) {
+            return false;
+        }
+        match &e.kind {
+            ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Var(_) => true,
+            ExprKind::Neg(a) | ExprKind::Not(a) => self.pure_param(a, scope),
+            ExprKind::Bin(op, a, b) => *op != tk::OP_POW && self.pure_param(a, scope) && self.pure_param(b, scope),
+            ExprKind::Elem(slot, idx) => {
+                self.resident_arrays.binary_search(&structure::var_key(scope, *slot)).is_err()
+                    && idx.iter().all(|i| self.pure_param(i, scope))
+            }
+            _ => false,
+        }
+    }
+
+    /// The plain instructions `k..k + batch.len()` in one call
+    /// (`host.plain_batch`) when the time budget lets them all start and
+    /// their parameters evaluate without error; otherwise (falls through)
+    /// instruction `k` alone. Same budget, error positions and statuses as
+    /// one by one (the runtime says how many started, in `TAG`).
+    fn keyword_batch(&mut self, k: usize, batch: &[Vec<Expr>]) -> Result<(), CompileError> {
+        let m = batch.len() as u32 - 1;
+        let next = self.point_of(self.instrs[k + batch.len() - 1].end)?;
+        let single = self.block();
+        self.get(L_BUDGET);
+        self.i32c(m as i32);
+        self.w(W::I32LtS);
+        self.br_if(single);
+        let saved = (self.abandon, self.bridge_top);
+        self.abandon = Some(single);
+        let base = self.bridge_top;
+        for args in batch {
+            let fused = self.fused_args(args);
+            let b = self.bridge_args(args, &fused);
+            debug_assert!(b >= 0);
+            self.bridge_top += args.len() as u32;
+        }
+        (self.abandon, self.bridge_top) = saved;
+        self.i32c(k as i32);
+        self.i32c(batch.len() as i32);
+        self.i32c(base as i32);
+        self.call(Imp::PlainBatch);
+        // The instructions started after the first: their budget, and the
+        // point of the last one (errors).
+        let t = self.tmp(ValType::I32);
+        self.hdr(layout::TAG);
+        self.set(t);
+        self.get(L_BUDGET);
+        self.get(t);
+        self.w(W::I32Sub);
+        self.set(L_BUDGET);
+        self.i32c(k as i32);
+        self.get(t);
+        self.w(W::I32Add);
+        self.set(L_EXCPOS);
+        self.release(t, ValType::I32);
+        self.status_check();
+        self.jump_point(next);
+        self.end();
+        Ok(())
+    }
+
     /// Pushes `PE_KIND` of the top pending entry (`PEND_COUNT` > 0).
     fn pending_top_kind(&mut self) {
         self.get(L_BASE);
@@ -3391,6 +3521,9 @@ impl<'a> Gen<'a> {
                 self.status_check();
             }
             Stmt::Keyword(args) => {
+                if let Some(batch) = self.batches.get(&k).cloned() {
+                    self.keyword_batch(k, &batch)?;
+                }
                 let plain = self.plain_call(pos as usize, false, args.len());
                 let fused = if plain.is_some() { self.fused_args(args) } else { Vec::new() };
                 let base = self.bridge_args(args, &fused);
@@ -3617,6 +3750,7 @@ impl<'a> Gen<'a> {
     fn functions(&mut self, stmts: &[Stmt]) -> Result<Vec<Function>, CompileError> {
         self.regions = self.loop_regions(stmts)?;
         self.next_for = self.static_fors(stmts)?;
+        self.batches = self.keyword_batches(stmts);
         let n = self.instrs.len() as u32;
         if n >= self.options.split_min {
             // A region is compiled in one function: the large ones would
@@ -4029,6 +4163,8 @@ pub fn module(
         options: *options,
         next_for: Default::default(),
         uses_degree: instrs.iter().any(|i| structure::rd(&prg.code, i.pos) == tk::DEGREE),
+        batches: Default::default(),
+        abandon: None,
     };
     let fns = g.functions(stmts)?;
     let mut code = CodeSection::new();

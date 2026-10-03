@@ -237,10 +237,14 @@ pub struct Runtime {
     /// What the control stack mirror was last made from (`mirror`): the
     /// words are only written again when it changes.
     mirror_key: Option<MirrorKey>,
+    /// `Interp::ctl_generation` when the mirror was last checked.
+    mirror_gen: Option<u64>,
     /// Parameters of a plain call (`plain_preset`), kept between calls.
     preset_buf: Vec<Option<Value>>,
     /// The two integer parameters of the last plain call (`Scin`).
     last_xy: Option<(i32, i32)>,
+    /// `batch_info` by point.
+    batch_infos: Vec<Option<(usize, u16, u32)>>,
     stopped: Option<StopInfo>,
     /// Procedure frames of returned calls, reused (no allocation per call:
     /// the boxes go back into `Ctl::Proc` as they are).
@@ -282,8 +286,10 @@ impl Runtime {
             sites: Vec::new(),
             margs: Vec::new(),
             mirror_key: None,
+            mirror_gen: None,
             preset_buf: Vec::new(),
             last_xy: None,
+            batch_infos: Vec::new(),
             stopped: None,
             frame_pool: Vec::new(),
             heap: arrays::Heap::new(heap, layout.size),
@@ -421,7 +427,9 @@ impl Runtime {
     /// operation that may have called or returned from procedures: new
     /// frames get their locals (parameters) from the interpreter, and the
     /// header words are refreshed.
-    fn sync(&mut self, it: &Interp, mem: &mut [u8]) {
+    fn sync(&mut self, it: &mut Interp, mem: &mut [u8]) {
+        #[cfg(debug_assertions)]
+        it.check_ctl_generation();
         input_stale(mem);
         let fs = &it.frame_stack;
         if self.frames.len() != fs.len() || self.frames.last() != fs.last() {
@@ -438,6 +446,12 @@ impl Runtime {
         st_i32(mem, layout::FIX_FLG, it.fix.fix_flg() as i32);
         st_i32(mem, layout::EXP_FLG, it.fix.exp_flg() as i32);
         st_i32(mem, layout::ERR_PROC, it.error_proc_depth.map_or(-1, |d| d as i32));
+        // (The mirror only depends on the control stack and the frames.)
+        let generation = it.ctl_generation();
+        if self.mirror_gen == Some(generation) {
+            return;
+        }
+        self.mirror_gen = Some(generation);
         let key = Self::mirror_key(it);
         if self.mirror_key != Some(key) {
             self.mirror(it, mem);
@@ -772,6 +786,7 @@ impl Runtime {
         // The module wrote the mirror of these entries: the cached key no
         // longer says what the mirror words hold.
         self.mirror_key = None;
+        self.mirror_gen = None;
         st_i32(mem, layout::PEND_COUNT, 0);
         st_i32(mem, layout::PEND_PROC, 0);
         st_i32(mem, layout::CTL_LEN, it.ctl.len() as i32);
@@ -1226,6 +1241,63 @@ impl Runtime {
         1
     }
 
+    /// Consecutive plain instructions `first..first + n` (points), run in one
+    /// call (`Gen::keyword_batch`): their parameters are in the bridge slots
+    /// from `base`, one slot per given parameter, in order. Each one is
+    /// `plain_keyword` at its own position. Returns its status: continue
+    /// after the last one, or what an error or a change of the control
+    /// stack gives (then the following ones are not run: a jump to the
+    /// next one when the stack changed). `TAG` receives the number of
+    /// instructions started after the first (their time budget).
+    pub fn plain_batch(&mut self, env: &mut dyn Env, mem: &mut [u8], first: i32, n: i32, base: i32) -> i32 {
+        let (it, hw) = env.parts();
+        let mut base = base;
+        for j in 0..n.max(0) {
+            let point = (first + j) as usize;
+            let Some((pos, token, mask)) = self.batch_info(point) else {
+                st_i32(mem, layout::TAG, j);
+                let r = Err(Exc::Message("Compiled program: bad keyword batch".into()));
+                return self.result(it, hw, mem, r, self.instrs.get(point).map_or(0, |i| i.pos));
+            };
+            st_i32(mem, layout::TAG, j);
+            it.inst_pos = pos;
+            let r = if mask >> PLAIN_SLOTS_SHIFT != 0 { self.plain_preset(it, hw, mem, mask, base) } else { Ok(()) };
+            base += (mask & ((1 << PLAIN_SLOTS_SHIFT) - 1)).count_ones() as i32;
+            let before = (it.ctl_generation(), it.param_e);
+            let r = r.and_then(|()| hw.instruction(it, Keyword { slot: 0, token }));
+            if r.is_err() {
+                return self.result(it, hw, mem, r.map(|_| ST_CONTINUE), pos);
+            }
+            if before != (it.ctl_generation(), it.param_e) {
+                // As `plain_keyword` (sync), then on at the next one.
+                self.sync(it, mem);
+                if j + 1 < n {
+                    return first + j + 1;
+                }
+                return ST_CONTINUE;
+            }
+        }
+        input_stale(mem);
+        ST_CONTINUE
+    }
+
+    /// Position, token and plain mask of the instruction at `point`, for
+    /// `plain_batch`.
+    fn batch_info(&mut self, point: usize) -> Option<(usize, u16, u32)> {
+        if let Some(Some(v)) = self.batch_infos.get(point) {
+            return Some(*v);
+        }
+        let pos = self.instrs.get(point)?.pos;
+        let i = self.site(pos, false)?;
+        let mask = self.sites[i].plain? as u32;
+        let token = self.sites[i].call.as_ref()?.kw.token;
+        if self.batch_infos.len() <= point {
+            self.batch_infos.resize(point + 1, None);
+        }
+        self.batch_infos[point] = Some((pos, token, mask));
+        Some((pos, token, mask))
+    }
+
     /// Instruction `token` (main library, `machine::plain_args`) at `pos`,
     /// called directly with its parameters (`plain_preset`).
     pub fn plain_keyword(
@@ -1245,9 +1317,9 @@ impl Runtime {
         // The handlers of the machine leave the state `sync` mirrors alone
         // except the control stack (On Menu) and Param (Comp Compile):
         // nothing else to mirror when those did not change.
-        let before = (it.ctl.len(), it.frame_stack.len(), it.param_e);
+        let before = (it.ctl_generation(), it.param_e);
         let r = r.and_then(|()| hw.instruction(it, Keyword { slot: 0, token: token as u16 }));
-        if r.is_ok() && before == (it.ctl.len(), it.frame_stack.len(), it.param_e) {
+        if r.is_ok() && before == (it.ctl_generation(), it.param_e) {
             input_stale(mem);
             return ST_CONTINUE;
         }
@@ -2104,7 +2176,7 @@ impl Runtime {
         frame.error_pos = it.error_pos;
         frame.scope = it.scope;
         it.push_ctl(Ctl::Proc(frame))?;
-        it.frame_stack.push(it.ctl.len() - 1);
+        it.push_frame_index(it.ctl.len() - 1);
         it.scope = index + 1;
         it.data = DataPtr { base: body, line: 0, item: 0 };
         it.on_error = OnError::None;
@@ -2148,7 +2220,7 @@ impl Runtime {
         if it.error_proc_depth == Some(it.frame_stack.len()) {
             it.error_proc_depth = None;
         }
-        it.frame_stack.pop();
+        it.pop_frame_index();
         it.data = f.data;
         it.on_error = f.on_error;
         it.error_on = f.error_on;

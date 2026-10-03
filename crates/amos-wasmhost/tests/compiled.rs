@@ -865,3 +865,28 @@ fn print_items() {
         same_budget(p, 2);
     }
 }
+
+/// Runs of plain instructions in one call (`Gen::keyword_batch`): the
+/// parameters' errors (division by zero, overflow, array index) at every
+/// place of a run, handled (Resume, Resume Next) or not, Every, jumps into
+/// the middle of a run, at every budget and split in functions.
+#[test]
+fn keyword_batches() {
+    let progs = [
+        "For I=-2 To 2 : Ink 1 : Ink 2,3 : Paper I+5 : Pen 4 : Next : Print I",
+        "Dim A(3)\nOn Error Goto H\nFor I=0 To 5 : Ink 1 : Ink A(I),2 : Paper 10/(I-2) : Pen I*1000000000 : Print I; : Next\nEnd\nH: Print \"e\";Errn;I; : Resume Next",
+        "On Error Goto H\nN=2\nFor I=1 To 3 : Ink 1 : Paper 6/N : Pen 3 : Print I;N; : Next\nEnd\nH: N=N+1 : Print \"r\"; : Resume",
+        "I=0\nDo : Ink I mod 7 : Paper 1 : Pen 2 : Inc I : If I=40 Then Goto OUT\nLoop\nOUT: Print I",
+        "Goto MID\nINK_: Ink 1 : MID: Paper 2 : Pen 3 : Print \"x\"; : If C<2 Then Inc C : Goto INK_\nPrint C",
+        "Every 1 Gosub E\nFor I=1 To 3000 : Ink 1 : Paper 2 : Pen 3 : Next : Every Off : Print I;C>0 : End\nE: Inc C : Every On : Return",
+        "Ink 1 : Paper 2/0",
+        "X=2147483647 : Ink 1 : Paper 2 : Pen X+1",
+    ];
+    for p in progs {
+        same(p);
+        let budgets: &[usize] = if p.contains("Every") { &[40, 97] } else { &[1, 2, 3, 4, 5, 7, 9] };
+        for &b in budgets {
+            same_budget(p, b);
+        }
+    }
+}

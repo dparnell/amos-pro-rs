@@ -360,3 +360,18 @@ fn memory_and_zone_functions_match_the_interpreter() {
         compare_with_input(p, 12);
     }
 }
+
+/// Runs of plain instructions in one call on full machines: errors of the
+/// handlers themselves (screen not opened, illegal values) inside a run,
+/// handled with Resume Next, and drawing runs.
+#[test]
+fn keyword_batches_match_the_interpreter() {
+    let progs = [
+        "Curs Off\nOn Error Goto H\nFor I=0 To 3 : Ink I : Screen I : Locate I,I : Print I; : Next\nEnd\nH: Print \"e\";Errn; : Resume Next",
+        "Curs Off\nDo : Ink 1 : Plot 1,1 : Draw 0,0 To 3,3 : Ink 2,3 : Locate 0,0 : Locate 1,2 : Inc N : If N mod 2000=0 Then Print N;\nLoop",
+        "Curs Off\nOn Error Goto H\nFor I=1 To 5 : Ink 1 : Locate 0,I*12 : Plot I,I : Print I; : Next\nEnd\nH: Print \"h\"; : Resume Next",
+    ];
+    for p in progs {
+        compare_with_input(p, 10);
+    }
+}

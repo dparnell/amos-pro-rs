@@ -18,6 +18,7 @@
     def!(l, "host" "plain_keyword" |rt, env, mem, p: i32, t: i32, k: i32, b: i32| -> i32 {
         rt.plain_keyword(env, mem, p, t, k, b)
     });
+    def!(l, "host" "plain_batch" |rt, env, mem, p: i32, n: i32, b: i32| -> i32 { rt.plain_batch(env, mem, p, n, b) });
     def!(l, "host" "pfn_i" |rt, env, mem, p: i32, t: i32, k: i32, b: i32| -> i32 { rt.pfn_i(env, mem, p, t, k, b) });
     def!(l, "host" "pfn_f" |rt, env, mem, p: i32, t: i32, k: i32, b: i32| -> f64 { rt.pfn_f(env, mem, p, t, k, b) });
     def!(l, "host" "pfn_n" |rt, env, mem, p: i32, t: i32, k: i32, b: i32| -> f64 { rt.pfn_n(env, mem, p, t, k, b) });
