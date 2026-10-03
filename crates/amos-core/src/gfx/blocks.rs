@@ -4,7 +4,6 @@
 //! original (blitter minterms, plane masks, byte aligned compressed blocks)
 //! are done on the bits of each pixel.
 
-
 /// Error numbers returned by the block routines (`EcWiErr` codes: 44 +
 /// screen library error).
 pub const BLOCK_NOT_DEFINED: u16 = 46;
@@ -202,7 +201,70 @@ pub fn put_block(
     minterm: Option<u8>,
 ) {
     let lim_g = (clip.0 & !15).max(0);
-    let lim_d = ((clip.2 + 15) & !15).min(bw);
+    // (32 bit arithmetic as the 68000's: a clip edge near i32::MAX wraps.)
+    let lim_d = (clip.2.wrapping_add(15) & !15).min(bw);
+    let lim_h = clip.1.max(0);
+    let lim_b = clip.3.min(bh);
+    let nplanes = b.planes.min(screen_planes);
+    let pmask = (((1u32 << nplanes) - 1) as u16 & plane_mask) as u8;
+    // Default minterm: D = A ? B : C ($CA); without mask A is all ones.
+    let m = minterm.unwrap_or(0xCA);
+    // `minterm8(m, a, b, c)` with A all zeros or all ones: the four
+    // B/C terms of each half of the minterm.
+    let terms = |a: bool| -> [u8; 4] {
+        std::array::from_fn(|bc| {
+            if m & (1 << ((a as usize) << 2 | bc)) != 0 {
+                0xFF
+            } else {
+                0
+            }
+        })
+    };
+    let (t0, t1) = (terms(false), terms(true));
+    // Columns of the block inside the clip limits (the same for every row).
+    let xa = (lim_g as i64 - x as i64).max(0);
+    let xb = (lim_d as i64 - x as i64).min(b.width as i64);
+    if xa >= xb {
+        return;
+    }
+    let (xa, xb) = (xa as i32, xb as i32);
+    for yy in 0..b.height {
+        let sy = y + yy;
+        if sy < lim_h || sy >= lim_b {
+            continue;
+        }
+        let row = (yy * b.width) as usize;
+        let o = (sy * bw + x + xa) as usize;
+        let n = (xb - xa) as usize;
+        let src = &b.data[row + xa as usize..][..n];
+        let dst = &mut buf[o..o + n];
+        for (k, (d, &bb)) in dst.iter_mut().zip(src).enumerate() {
+            let a = b.mask.as_ref().is_none_or(|mk| mk[row + xa as usize + k]);
+            let t = if a { &t1 } else { &t0 };
+            let c = *d;
+            let r = (t[3] & bb & c) | (t[2] & bb & !c) | (t[1] & !bb & c) | (t[0] & !bb & !c);
+            *d = (c & !pmask) | (r & pmask);
+        }
+    }
+}
+
+/// The pixel by pixel `put_block` (reference for the tests).
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+fn put_block_reference(
+    b: &Block,
+    buf: &mut [u8],
+    bw: i32,
+    bh: i32,
+    screen_planes: u8,
+    clip: (i32, i32, i32, i32),
+    x: i32,
+    y: i32,
+    plane_mask: u16,
+    minterm: Option<u8>,
+) {
+    let lim_g = (clip.0 & !15).max(0);
+    let lim_d = (clip.2.wrapping_add(15) & !15).min(bw);
     let lim_h = clip.1.max(0);
     let lim_b = clip.3.min(bh);
     let nplanes = b.planes.min(screen_planes);
@@ -566,6 +628,9 @@ pub fn zoom(
     planes: u8,
 ) {
     let pm = ((1u32 << planes.min(8)) - 1) as u8;
+    if zoom_rows(src, sw, dst, dw, sx1, sy1, dx, dy, tx, ty, pm) {
+        return;
+    }
     let mut sx = sx1;
     for (i, &ax) in tx.iter().enumerate() {
         sx += ax;
@@ -578,6 +643,65 @@ pub fn zoom(
             }
         }
     }
+}
+
+/// `zoom` a row at a time when every pixel read and written is inside the
+/// bitmaps and the destination columns stay inside a row (each destination
+/// pixel then written once, so the order does not matter). False when
+/// not applicable (nothing done).
+#[allow(clippy::too_many_arguments)]
+fn zoom_rows(
+    src: &[u8],
+    sw: i32,
+    dst: &mut [u8],
+    dw: i32,
+    sx1: i32,
+    sy1: i32,
+    dx: i32,
+    dy: i32,
+    tx: &[i32],
+    ty: &[i32],
+    pm: u8,
+) -> bool {
+    let (w, h) = (tx.len() as i64, ty.len() as i64);
+    if w == 0 || h == 0 || sw <= 0 || dw <= 0 || dx < 0 || dy < 0 || dx as i64 + w > dw as i64 {
+        return false;
+    }
+    if (dy as i64 + h) * dw as i64 > dst.len() as i64 {
+        return false;
+    }
+    // Source columns and rows (the running sums of the tables).
+    let mut cols = Vec::with_capacity(tx.len());
+    let mut sx = sx1 as i64;
+    for &a in tx {
+        sx += a as i64;
+        cols.push(sx);
+    }
+    let mut rows = Vec::with_capacity(ty.len());
+    let mut sy = sy1 as i64;
+    for &a in ty {
+        sy += a as i64;
+        rows.push(sy);
+    }
+    let (cmin, cmax) = (*cols.iter().min().unwrap(), *cols.iter().max().unwrap());
+    let (rmin, rmax) = (*rows.iter().min().unwrap(), *rows.iter().max().unwrap());
+    // (i32 arithmetic of the general case must not overflow either.)
+    let fits = |v: i64| v >= i32::MIN as i64 && v <= i32::MAX as i64;
+    if !fits(cmin) || !fits(cmax) || !fits(rmin * sw as i64) || !fits(rmax * sw as i64 + cmax) {
+        return false;
+    }
+    if rmin * sw as i64 + cmin < 0 || rmax * sw as i64 + cmax >= src.len() as i64 {
+        return false;
+    }
+    for (j, &r) in rows.iter().enumerate() {
+        let o = ((dy as i64 + j as i64) * dw as i64 + dx as i64) as usize;
+        let srow = r * sw as i64;
+        for (d, &c) in dst[o..o + cols.len()].iter_mut().zip(&cols) {
+            let s = src[(srow + c) as usize];
+            *d = (*d & !pm) | (s & pm);
+        }
+    }
+    true
 }
 
 /// One step of `Appear` (`InAppear4` `+Lib.s:10443`): copies `count`
@@ -617,6 +741,101 @@ pub fn appear_step(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn zoom_matches_the_general_loop() {
+        let mut seed = 9u32;
+        let mut rnd = |n: u32| {
+            seed = seed.wrapping_mul(1103515245).wrapping_add(12345);
+            (seed >> 8) % n.max(1)
+        };
+        for _ in 0..3000 {
+            let (sw, sh) = (1 + rnd(60) as i32, 1 + rnd(40) as i32);
+            let (dw, dh) = (1 + rnd(70) as i32, 1 + rnd(50) as i32);
+            let src: Vec<u8> = (0..sw * sh).map(|_| rnd(256) as u8).collect();
+            let dst0: Vec<u8> = (0..dw * dh).map(|_| rnd(256) as u8).collect();
+            let (a1, a2) = (rnd(sw as u32) as i32, rnd(sw as u32 + 1) as i32);
+            let (b1, b2) = (rnd(dw as u32 + 10) as i32 - 5, rnd(dw as u32 + 10) as i32);
+            let tx = zoom_table(a1.min(a2), a1.max(a2) + 1, b1.min(b2), b1.max(b2) + 1);
+            let (c1, c2) = (rnd(sh as u32) as i32, rnd(sh as u32 + 1) as i32);
+            let (d1, d2) = (rnd(dh as u32 + 10) as i32 - 5, rnd(dh as u32 + 10) as i32);
+            let ty = zoom_table(c1.min(c2), c1.max(c2) + 1, d1.min(d2), d1.max(d2) + 1);
+            let (sx1, sy1) = (
+                a1.min(a2) - 1 + rnd(3) as i32,
+                c1.min(c2) - 1 + rnd(3) as i32,
+            );
+            let (dx, dy) = (b1.min(b2), d1.min(d2));
+            let planes = 1 + rnd(8) as u8;
+            let mut a = dst0.clone();
+            zoom(&src, sw, &mut a, dw, sx1, sy1, dx, dy, &tx, &ty, planes);
+            // The general loop alone.
+            let mut b = dst0;
+            let pm = ((1u32 << planes.min(8)) - 1) as u8;
+            let mut sx = sx1;
+            for (i, &ax) in tx.iter().enumerate() {
+                sx += ax;
+                let mut sy = sy1;
+                for (j, &ay) in ty.iter().enumerate() {
+                    sy += ay;
+                    let s = src.get((sy * sw + sx) as usize).copied().unwrap_or(0);
+                    if let Some(d) = b.get_mut(((dy + j as i32) * dw + dx + i as i32) as usize) {
+                        *d = (*d & !pm) | (s & pm);
+                    }
+                }
+            }
+            assert!(a == b);
+        }
+    }
+
+    #[test]
+    fn put_block_matches_the_reference() {
+        let mut seed = 5u32;
+        let mut rnd = |n: u32| {
+            seed = seed.wrapping_mul(1103515245).wrapping_add(12345);
+            (seed >> 8) % n.max(1)
+        };
+        for _ in 0..3000 {
+            let (bw, bh) = (16 * (1 + rnd(6) as i32), 1 + rnd(60) as i32);
+            let (w, h) = (16 * (1 + rnd(4) as i32), 1 + rnd(30) as i32);
+            let planes = 1 + rnd(6) as u8;
+            let data: Vec<u8> = (0..w * h).map(|_| rnd(64) as u8).collect();
+            let mask = (rnd(2) == 0).then(|| data.iter().map(|&p| p != 0).collect());
+            let b = Block {
+                number: 1,
+                x: 0,
+                y: 0,
+                width: w,
+                height: h,
+                planes,
+                data,
+                mask,
+            };
+            let clip = if rnd(3) == 0 {
+                (0, 0, i32::MAX, i32::MAX)
+            } else {
+                let x0 = rnd(bw as u32 + 20) as i32 - 10;
+                let y0 = rnd(bh as u32 + 20) as i32 - 10;
+                (
+                    x0,
+                    y0,
+                    x0 + rnd(bw as u32) as i32,
+                    y0 + rnd(bh as u32) as i32,
+                )
+            };
+            let (x, y) = (
+                rnd(bw as u32 + 80) as i32 - 40,
+                rnd(bh as u32 + 60) as i32 - 30,
+            );
+            let sp = 1 + rnd(6) as u8;
+            let pm = if rnd(2) == 0 { 0xFFFF } else { rnd(64) as u16 };
+            let mt = (rnd(2) == 0).then(|| rnd(256) as u8);
+            let screen: Vec<u8> = (0..bw * bh).map(|_| rnd(64) as u8).collect();
+            let (mut a, mut c) = (screen.clone(), screen);
+            put_block(&b, &mut a, bw, bh, sp, clip, x, y, pm, mt);
+            put_block_reference(&b, &mut c, bw, bh, sp, clip, x, y, pm, mt);
+            assert!(a == c);
+        }
+    }
 
     #[test]
     fn cblock_roundtrip() {

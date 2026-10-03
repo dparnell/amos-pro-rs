@@ -392,18 +392,21 @@ impl Hardware {
                 if n == 0 || !(0..65536).contains(&n) {
                     return err(blocks::ILLEGAL_BLOCK_PARAMETERS);
                 }
-                let Some(b) = self.with_draw(|g| g.blocks.iter().find(|o| o.number == n).cloned())
-                else {
+                // (The block is borrowed from the draw globals while the
+                // screen, another field, is drawn into: no copy.)
+                let Some(b) = self.draw.blocks.iter().find(|o| o.number == n) else {
                     return err(blocks::BLOCK_NOT_DEFINED);
                 };
                 let x = opt16(a.opt(1)).unwrap_or(b.x);
                 let y = opt16(a.opt(2)).unwrap_or(b.y);
                 let planes = a.opt(3).map_or(0xFFFF, |p| p as u16);
                 let minterm = a.opt(4).map(|m| m as u8);
-                let s = self.draw_screen()?;
+                let Some(s) = self.screens.current_mut() else {
+                    return err(errors::SCREEN_NOT_OPENED);
+                };
                 let (w, h, sp) = (s.width as i32, s.height as i32, s.planes);
                 let clip = s.gr.clip;
-                blocks::put_block(&b, s.logic_mut(), w, h, sp, clip, x, y, planes, minterm);
+                blocks::put_block(b, s.logic_mut(), w, h, sp, clip, x, y, planes, minterm);
             }
             tk::DEL_BLOCK => {
                 it.inst_args(self, kw)?;
@@ -738,22 +741,51 @@ impl Hardware {
         }
         let tx = blocks::zoom_table(x1, x2, x3, x4);
         let ty = blocks::zoom_table(y1, y2, y3, y4);
-        let data = src.bitmaps[sb].clone();
-        let dst = self.screens.get_mut(dn).unwrap();
-        blocks::zoom(
-            &data,
-            sw,
-            dst.bitmap_mut(db),
-            dw,
-            x1,
-            y1,
-            x3,
-            y3,
-            &tx,
-            &ty,
-            sp.min(dp),
-        );
+        self.with_src_dst(sn, sb, dn, db, |data, dst| {
+            blocks::zoom(data, sw, dst, dw, x1, y1, x3, y3, &tx, &ty, sp.min(dp))
+        });
         Ok(())
+    }
+
+    /// Calls `f` with bitmap `sb` of screen `sn` and bitmap `db` of screen
+    /// `dn` (as `bitmap_mut`: index clamped, version bumped). The source is
+    /// borrowed when it is another bitmap, copied when it is the same one.
+    fn with_src_dst(
+        &mut self,
+        sn: usize,
+        sb: usize,
+        dn: usize,
+        db: usize,
+        f: impl FnOnce(&[u8], &mut [u8]),
+    ) {
+        let screens = &mut self.screens.screens;
+        if sn != dn {
+            let (src, dst) = if sn < dn {
+                let (l, r) = screens.split_at_mut(dn);
+                (&l[sn], &mut r[0])
+            } else {
+                let (l, r) = screens.split_at_mut(sn);
+                (&r[0], &mut l[dn])
+            };
+            let (src, dst) = (src.as_deref().unwrap(), dst.as_deref_mut().unwrap());
+            dst.version += 1;
+            let di = db.min(dst.bitmaps.len() - 1);
+            f(&src.bitmaps[sb], &mut dst.bitmaps[di]);
+            return;
+        }
+        let s = screens[sn].as_deref_mut().unwrap();
+        s.version += 1;
+        let di = db.min(s.bitmaps.len() - 1);
+        if sb == di {
+            let data = s.bitmaps[sb].clone();
+            f(&data, &mut s.bitmaps[di]);
+        } else if sb < di {
+            let (l, r) = s.bitmaps.split_at_mut(di);
+            f(&l[sb], &mut r[0]);
+        } else {
+            let (l, r) = s.bitmaps.split_at_mut(sb);
+            f(&r[0], &mut l[di]);
+        }
     }
 
     /// `Appear s1 To s2,pixel[,n]`: copies the pixels one at a time in a
@@ -786,20 +818,9 @@ impl Hardware {
         // About 300 cycles per pixel plus 40 per plane at 7.09 MHz.
         let budget = (141_000 / (300 + 40 * planes as u64)).max(1);
         let todo = remaining.min(budget);
-        let data = src.bitmaps[sb].clone();
-        let dst = self.screens.get_mut(dn).unwrap();
-        blocks::appear_step(
-            &data,
-            sw,
-            dst.bitmap_mut(db),
-            dw,
-            dh,
-            planes,
-            &mut pos,
-            step,
-            total,
-            todo,
-        );
+        self.with_src_dst(sn, sb, dn, db, |data, dst| {
+            blocks::appear_step(data, sw, dst, dw, dh, planes, &mut pos, step, total, todo)
+        });
         let left = remaining - todo;
         if left == 0 {
             it.clear_wait();
