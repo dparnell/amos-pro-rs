@@ -159,6 +159,19 @@ impl Heap {
         }
     }
 
+    /// The bytes of a block, read only.
+    pub fn bytes_ref<'m>(&self, mem: &'m [u8], base: u32, addr: u32, len: u32) -> &'m [u8] {
+        match self.kind {
+            HeapKind::Linear => &mem[(addr - base) as usize..(addr - base + len) as usize],
+            HeapKind::Owned => {
+                let _ = mem;
+                // SAFETY: as in `bytes`; the slice lives no longer than the
+                // borrow of the memory (one runtime call).
+                unsafe { std::slice::from_raw_parts(addr as usize as *const u8, len as usize) }
+            }
+        }
+    }
+
     /// The bytes of a block.
     pub fn bytes<'m>(&self, mem: &'m mut [u8], base: u32, addr: u32, len: u32) -> &'m mut [u8] {
         match self.kind {

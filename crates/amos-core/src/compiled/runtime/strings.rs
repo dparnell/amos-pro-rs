@@ -49,6 +49,17 @@ enum Root {
 }
 
 impl Runtime {
+    /// The bytes of the string at `a`, read only: they stay where they are
+    /// while the memory is borrowed (strings only move in `gc`, which runs
+    /// at test points and `enter`; the memory only grows between calls).
+    pub fn str_ref<'m>(&self, mem: &'m [u8], a: i32) -> &'m [u8] {
+        if a == 0 {
+            return &[];
+        }
+        let len = u32::from_le_bytes(self.heap.bytes_ref(mem, self.base, a as u32, 4)[..4].try_into().unwrap());
+        self.heap.bytes_ref(mem, self.base, a as u32 + 4, len)
+    }
+
     /// The bytes of the string at `a`.
     pub fn str_bytes<'m>(&self, mem: &'m mut [u8], a: i32) -> &'m [u8] {
         if a == 0 {

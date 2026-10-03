@@ -1354,13 +1354,22 @@ impl Runtime {
         base: i32,
     ) -> (R<()>, bool) {
         let mut vals = [0i32; PLAIN_SLOTS_SHIFT as usize];
+        let strings = direct::string_params(token);
         if direct::has_instruction(token)
-            && self.read_ints(mem, mask, base, &mut vals)
+            && self.read_ints(mem, mask, base, &mut vals, strings)
             && let Some((it, hw)) = env.hardware_parts()
         {
             it.inst_pos = pos;
             let before = (it.ctl_generation(), it.param_e);
-            let a = direct::Ints { vals: &vals[..(mask >> PLAIN_SLOTS_SHIFT) as usize], given: mask & SLOTS_GIVEN };
+            let slots = (mask >> PLAIN_SLOTS_SHIFT) as usize;
+            let mut buf: [&[u8]; PLAIN_SLOTS_SHIFT as usize];
+            let strs: &[&[u8]] = if strings == 0 {
+                &[]
+            } else {
+                buf = [&[]; PLAIN_SLOTS_SHIFT as usize];
+                self.read_strs(mem, mask, base, strings, &mut buf)
+            };
+            let a = direct::Ints { vals: &vals[..slots], strs, given: mask & SLOTS_GIVEN };
             let r = direct::instruction(hw, it, token, a);
             return (r, before != (it.ctl_generation(), it.param_e));
         }
@@ -1372,9 +1381,17 @@ impl Runtime {
         (r, before != (it.ctl_generation(), it.param_e))
     }
 
-    /// The parameters of a plain call when all the given ones are integers
-    /// (`base` >= 0), in `vals`.
-    fn read_ints(&self, mem: &[u8], mask: u32, base: i32, vals: &mut [i32; PLAIN_SLOTS_SHIFT as usize]) -> bool {
+    /// The parameters of a plain call when the given ones are integers,
+    /// except the `strings` ones (bit k: parameter k), which must be
+    /// strings (`base` >= 0): the integers in `vals`.
+    fn read_ints(
+        &self,
+        mem: &[u8],
+        mask: u32,
+        base: i32,
+        vals: &mut [i32; PLAIN_SLOTS_SHIFT as usize],
+        strings: u32,
+    ) -> bool {
         if base < 0 {
             return false;
         }
@@ -1385,6 +1402,8 @@ impl Runtime {
                 continue;
             }
             match ld_i32(mem, a) {
+                layout::BRIDGE_STR if strings & (1 << s) != 0 => {}
+                _ if strings & (1 << s) != 0 => return false,
                 layout::BRIDGE_INT => *v = ld_i32(mem, a + 8),
                 layout::BRIDGE_DYN_INT => *v = ld_f64(mem, a + 8) as i32,
                 _ => return false,
@@ -1392,6 +1411,32 @@ impl Runtime {
             a += layout::BRIDGE_SLOT;
         }
         true
+    }
+
+    /// The `strings` parameters (`read_ints`) as slices of the module's
+    /// memory, by parameter index in `out`: valid for the call they are
+    /// read for (strings only move in `gc`, at test points and `enter`; the
+    /// memory only grows between runtime calls).
+    fn read_strs<'m>(
+        &self,
+        mem: &'m [u8],
+        mask: u32,
+        base: i32,
+        strings: u32,
+        out: &'m mut [&'m [u8]; PLAIN_SLOTS_SHIFT as usize],
+    ) -> &'m [&'m [u8]] {
+        let (slots, given) = ((mask >> PLAIN_SLOTS_SHIFT) as usize, mask & SLOTS_GIVEN);
+        let mut a = self.layout.bridge + base as u32 * layout::BRIDGE_SLOT;
+        for (s, o) in out.iter_mut().enumerate().take(slots) {
+            if given & (1 << s) == 0 {
+                continue;
+            }
+            if strings & (1 << s) != 0 {
+                *o = self.str_ref(mem, ld_i32(mem, a + 8));
+            }
+            a += layout::BRIDGE_SLOT;
+        }
+        &out[..slots]
     }
 
     /// Value of the function `token` (main library, `machine::plain_args`)
@@ -1408,15 +1453,23 @@ impl Runtime {
     ) -> Option<Value> {
         let mask = mask as u32;
         let mut vals = [0i32; PLAIN_SLOTS_SHIFT as usize];
+        let strings = direct::string_params(token as u16);
         let r = if direct::has_function(token as u16)
-            && self.read_ints(mem, mask, base, &mut vals)
+            && self.read_ints(mem, mask, base, &mut vals, strings)
             && let Some((it, hw)) = env.hardware_parts()
         {
             it.inst_pos = pos as usize;
             let (slots, given) = ((mask >> PLAIN_SLOTS_SHIFT) as usize, mask & SLOTS_GIVEN);
             self.last_xy = None;
-            self.last_int = (slots == 1 && given == 1).then_some(vals[0]);
-            direct::function(hw, it, token as u16, direct::Ints { vals: &vals[..slots], given })
+            self.last_int = (slots == 1 && given == 1 && strings == 0).then_some(vals[0]);
+            let mut buf: [&[u8]; PLAIN_SLOTS_SHIFT as usize];
+            let strs: &[&[u8]] = if strings == 0 {
+                &[]
+            } else {
+                buf = [&[]; PLAIN_SLOTS_SHIFT as usize];
+                self.read_strs(mem, mask, base, strings, &mut buf)
+            };
+            direct::function(hw, it, token as u16, direct::Ints { vals: &vals[..slots], strs, given })
         } else {
             let (it, hw) = env.parts();
             it.inst_pos = pos as usize;

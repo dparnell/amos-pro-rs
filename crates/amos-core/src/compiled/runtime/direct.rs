@@ -8,15 +8,33 @@ use crate::interp::{Interp, R};
 use crate::machine::Hardware;
 use crate::tokens::tk::*;
 
-/// The integer parameters of a plain call: `given` has bit k set when
-/// parameter k is given.
+/// The parameters of a plain call: `given` has bit k set when parameter k
+/// is given; the integers in `vals`, and (keywords with `string_params`)
+/// the strings in `strs` (by parameter index), borrowed from the module's
+/// memory for the call only (`Runtime::str_ref`).
 #[derive(Clone, Copy)]
 pub(super) struct Ints<'a> {
     pub vals: &'a [i32],
+    pub strs: &'a [&'a [u8]],
     pub given: u32,
 }
 
+/// The parameters of `token` that are strings (bit k: parameter k), for
+/// the keywords `instruction` / `function` run whose typed function takes
+/// strings (`&[u8]`). Every other given parameter must be an integer.
+pub(super) fn string_params(token: u16) -> u32 {
+    // (None yet: Centre and Text once their typed functions exist.)
+    let _ = token;
+    0
+}
+
 impl Ints<'_> {
+    /// `Args::str(k)`: the empty string when omitted.
+    #[allow(dead_code)] // (the typed Centre / Text will use it)
+    fn str(&self, k: usize) -> &[u8] {
+        if self.given & (1 << k) == 0 { &[] } else { self.strs.get(k).copied().unwrap_or(&[]) }
+    }
+
     /// `Args::int(k)`: `ENT_NUL` when omitted.
     fn int(&self, k: usize) -> i32 {
         if self.given & (1 << k) != 0 { self.vals.get(k).copied().unwrap_or(ENT_NUL) } else { ENT_NUL }
