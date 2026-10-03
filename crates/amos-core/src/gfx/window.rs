@@ -363,30 +363,45 @@ impl Screen {
         }
         let (x, y) = self.cursor_xy();
         let (shape, col) = (self.win().shape, self.win().cur_col as u8);
-        let mut pixels = [0u8; 64];
+        let bitmap = self.text.target;
+        self.version += 1;
         if let (Some(_), Some(_)) = (self.span(x, y, 8), self.span(x, y + 7, 8)) {
             // The cell is inside the bitmap: same as `get` / `put` below.
+            // (The pixels are saved in place: no 64-byte copy of the save.)
             let v = col & self.colour_mask();
             let (t, w) = (self.target_index(), self.width as usize);
             let bm = &mut self.bitmaps[t];
+            let cs = self.text.cursor_save.insert(CursorSave {
+                bitmap,
+                x,
+                y,
+                pixels: [0; 64],
+            });
             let vv = u64::from_ne_bytes([v; 8]);
-            for r in 0..8 {
+            for (r, (save, &bits)) in cs
+                .pixels
+                .as_chunks_mut::<8>()
+                .0
+                .iter_mut()
+                .zip(&shape)
+                .enumerate()
+            {
                 let i = (y as usize + r) * w + x as usize;
                 let row: &mut [u8; 8] = (&mut bm[i..i + 8]).try_into().unwrap();
-                pixels[r * 8..r * 8 + 8].copy_from_slice(row);
-                let m = expand_bits(shape[r]);
+                *save = *row;
+                let m = expand_bits(bits);
                 *row = ((u64::from_ne_bytes(*row) & !m) | (vv & m)).to_ne_bytes();
             }
         } else {
+            let mut pixels = [0u8; 64];
             self.aff_cur_clipped(x, y, shape, col, &mut pixels);
+            self.text.cursor_save = Some(CursorSave {
+                bitmap,
+                x,
+                y,
+                pixels,
+            });
         }
-        self.version += 1;
-        self.text.cursor_save = Some(CursorSave {
-            bitmap: self.text.target,
-            x,
-            y,
-            pixels,
-        });
     }
 
     fn aff_cur_clipped(&mut self, x: i32, y: i32, shape: [u8; 8], col: u8, pixels: &mut [u8; 64]) {
@@ -405,26 +420,28 @@ impl Screen {
         if !self.has_window() || !self.win().cursor {
             return;
         }
-        let Some(cs) = self.text.cursor_save.take() else {
+        let Some(cs) = self.text.cursor_save.as_ref() else {
             return;
         };
-        let t = std::mem::replace(&mut self.text.target, cs.bitmap);
         if let (Some(_), Some(_)) = (self.span(cs.x, cs.y, 8), self.span(cs.x, cs.y + 7, 8)) {
-            // Inside the bitmap: same as the `put`s below.
-            let mask = self.colour_mask();
-            let (ti, w) = (self.target_index(), self.width as usize);
+            // Inside the bitmap: same as the `put`s below (in the bitmap
+            // of the save; the pixels are read in place).
+            let mm = u64::from_ne_bytes([self.colour_mask(); 8]);
+            let (ti, w) = (cs.bitmap.min(self.bitmaps.len() - 1), self.width as usize);
             let bm = &mut self.bitmaps[ti];
-            let mm = u64::from_ne_bytes([mask; 8]);
-            for r in 0..8 {
+            for (r, saved) in cs.pixels.as_chunks::<8>().0.iter().enumerate() {
                 let i = (cs.y as usize + r) * w + cs.x as usize;
-                let saved = u64::from_ne_bytes(cs.pixels[r * 8..r * 8 + 8].try_into().unwrap());
-                bm[i..i + 8].copy_from_slice(&(saved & mm).to_ne_bytes());
+                bm[i..i + 8].copy_from_slice(&(u64::from_ne_bytes(*saved) & mm).to_ne_bytes());
             }
-        } else {
-            for r in 0..8 {
-                for c in 0..8 {
-                    self.put(cs.x + c, cs.y + r, cs.pixels[(r * 8 + c) as usize], 0);
-                }
+            self.text.cursor_save = None;
+            self.version += 1;
+            return;
+        }
+        let cs = self.text.cursor_save.take().unwrap();
+        let t = std::mem::replace(&mut self.text.target, cs.bitmap);
+        for r in 0..8 {
+            for c in 0..8 {
+                self.put(cs.x + c, cs.y + r, cs.pixels[(r * 8 + c) as usize], 0);
             }
         }
         self.text.target = t;

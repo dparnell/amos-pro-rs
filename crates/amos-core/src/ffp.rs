@@ -1225,19 +1225,24 @@ pub fn format_int(v: i32) -> String {
 /// Appends `format_int(v)` to `buf` (no allocation).
 pub fn push_int(buf: &mut Vec<u8>, v: i32) {
     let mut digits = [0u8; 11];
+    buf.extend_from_slice(int_text(v, &mut digits));
+}
+
+/// `format_int(v)` written at the end of `buf` (no allocation).
+pub fn int_text(v: i32, buf: &mut [u8; 11]) -> &[u8] {
     let mut n = v.unsigned_abs();
-    let mut k = digits.len();
+    let mut k = buf.len();
     loop {
         k -= 1;
-        digits[k] = b'0' + (n % 10) as u8;
+        buf[k] = b'0' + (n % 10) as u8;
         n /= 10;
         if n == 0 {
             break;
         }
     }
     k -= 1;
-    digits[k] = if v < 0 { b'-' } else { b' ' };
-    buf.extend_from_slice(&digits[k..]);
+    buf[k] = if v < 0 { b'-' } else { b' ' };
+    &buf[k..]
 }
 
 // ---------------------------------------------------------------------------

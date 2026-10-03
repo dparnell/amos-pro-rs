@@ -40,9 +40,8 @@ impl Hardware {
 
     /// Sends a control string to the current window (`GoWn`).
     fn go_wn(&mut self, s: &[u8]) -> R<()> {
-        let s = s.to_vec();
         let scr = self.text_screen()?;
-        wi(scr.print_text(&s))
+        wi(scr.print_text(s))
     }
 
     pub(crate) fn text_instruction(&mut self, it: &mut Interp, kw: Keyword) -> R<bool> {

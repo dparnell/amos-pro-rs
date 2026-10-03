@@ -337,10 +337,8 @@ impl Interp {
                     if x.len() + y.len() >= STRING_MAX {
                         return err(errors::STRING_TOO_LONG);
                     }
-                    let mut v = Vec::with_capacity(x.len() + y.len());
-                    v.extend_from_slice(&x);
-                    v.extend_from_slice(&y);
-                    Ok(Value::Str(v.into()))
+                    // (Built in place: one allocation.)
+                    Ok(Value::Str(x.iter().chain(y.iter()).copied().collect()))
                 }
                 _ => unreachable!(),
             },
@@ -504,25 +502,30 @@ impl Interp {
             }
             STR_S => {
                 let mut a = self.fn_args(hw, "4")?;
-                let s = match a.take(0) {
-                    Value::Int(i) => crate::ffp::format_int(i),
-                    Value::Float(f) => self.format_float(f),
+                match a.take(0) {
+                    Value::Int(i) => Value::Str(astr(crate::ffp::int_text(i, &mut [0; 11]))),
+                    Value::Float(f) => Value::Str(astr(self.format_float(f).as_bytes())),
                     Value::Str(_) => return err(errors::TYPE_MISMATCH),
-                };
-                Value::Str(astr(s.as_bytes()))
+                }
             }
             UPPER_S | LOWER_S => {
                 let s = self.str_arg(hw)?;
-                let v: Vec<u8> = s
-                    .iter()
-                    .map(|&c| if t == UPPER_S { c.to_ascii_uppercase() } else { c.to_ascii_lowercase() })
-                    .collect();
-                Value::Str(v.into())
+                let upper = t == UPPER_S;
+                Value::Str(
+                    s.iter()
+                        .map(|&c| {
+                            if upper {
+                                c.to_ascii_uppercase()
+                            } else {
+                                c.to_ascii_lowercase()
+                            }
+                        })
+                        .collect(),
+                )
             }
             FLIP_S => {
                 let s = self.str_arg(hw)?;
-                let v: Vec<u8> = s.iter().rev().copied().collect();
-                Value::Str(v.into())
+                Value::Str(s.iter().rev().copied().collect())
             }
             SPACE_S => {
                 let n = self.int_arg(hw)?;

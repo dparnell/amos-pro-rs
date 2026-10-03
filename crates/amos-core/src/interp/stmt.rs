@@ -13,6 +13,17 @@ pub struct InputState {
     pub started: bool,
 }
 
+/// `cur` with up to `count` bytes from `start` replaced by the start of
+/// `e` (`Mid$(...)=`), built in place: one allocation.
+#[inline(never)]
+fn mid_replace(cur: &[u8], start: usize, count: usize, e: &[u8]) -> super::value::AStr {
+    if start >= cur.len() {
+        return astr(cur);
+    }
+    let n = count.min(cur.len() - start).min(e.len());
+    cur[..start].iter().chain(&e[..n]).chain(&cur[start + n..]).copied().collect()
+}
+
 impl Interp {
     /// Executes the instruction at pc.
     pub(super) fn exec_instruction(&mut self, hw: &mut dyn Host) -> R<()> {
@@ -391,12 +402,8 @@ impl Interp {
                 if n >= len { (0, len) } else { (len - n, n) }
             }
         };
-        let mut v = cur.to_vec();
-        if start < len {
-            let n = count.min(len - start).min(e.len());
-            v[start..start + n].copy_from_slice(&e[..n]);
-        }
-        self.write_loc(&loc, ty, Value::Str(v.into()))
+        let v = mid_replace(&cur, start, count, &e);
+        self.write_loc(&loc, ty, Value::Str(v))
     }
 
     /// `Input ["prompt";] a,b$...` and `Line Input`.
@@ -490,4 +497,32 @@ fn using_number(fmt: &[u8], x: f64) -> Vec<u8> {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    /// `mid_replace` against the copy-and-patch version it replaced.
+    #[test]
+    fn mid_replace_matches_copy_and_patch() {
+        let reference = |cur: &[u8], start: usize, count: usize, e: &[u8]| {
+            let mut v = cur.to_vec();
+            if start < cur.len() {
+                let n = count.min(cur.len() - start).min(e.len());
+                v[start..start + n].copy_from_slice(&e[..n]);
+            }
+            v
+        };
+        let cur = b"hello world";
+        for len in 0..=cur.len() {
+            for start in 0..len + 3 {
+                for count in [0, 1, 2, 5, 20, usize::MAX] {
+                    for e in [&b""[..], b"X", b"XYZ", b"0123456789abcdef"] {
+                        let got = super::mid_replace(&cur[..len], start, count, e);
+                        let want = reference(&cur[..len], start, count, e);
+                        assert_eq!(*got, *want, "{len} {start} {count}");
+                    }
+                }
+            }
+        }
+    }
 }
