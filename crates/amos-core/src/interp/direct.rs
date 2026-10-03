@@ -89,7 +89,7 @@ impl Interp {
         // The direct line runs at the main program level: loops, Gosubs
         // and procedure frames of the stopped program are forgotten.
         while self.pop_ctl().is_some() {}
-        self.frame_stack.clear();
+        self.clear_frame_stack();
         self.scope = 0;
         self.wait = None;
         self.on_error = OnError::None;

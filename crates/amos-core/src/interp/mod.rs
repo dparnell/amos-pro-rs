@@ -199,10 +199,21 @@ pub struct Interp {
     /// Start of the instruction being executed.
     pub inst_pos: usize,
     pub globals: Vec<Var>,
+    /// Control stack. Every change of its entries (other than procedure
+    /// variables) must go through `push_ctl` / `pop_ctl` or call
+    /// `bump_ctl_generation` (see `ctl_generation`).
     pub ctl: Vec<Ctl>,
     ctl_bytes: usize,
+    /// See `ctl_generation`.
+    ctl_gen: u64,
+    /// Debug builds: (shape, generation) of the control and frame stacks
+    /// last seen by `run` (`check_ctl_generation`).
+    #[cfg(debug_assertions)]
+    ctl_check: Option<(u64, u64)>,
     pub stack_limit: usize,
     /// Procedure frames: index into `ctl` of each active procedure frame.
+    /// Changed through `push_frame_index` / `pop_frame_index` /
+    /// `clear_frame_stack` (or followed by `bump_ctl_generation`).
     pub frame_stack: Vec<usize>,
     pub scope: usize,
     pub data: DataPtr,
@@ -290,6 +301,9 @@ impl Interp {
             ctl_bytes: 0,
             stack_limit: 52 * 42,
             frame_stack: Vec::new(),
+            ctl_gen: 0,
+            #[cfg(debug_assertions)]
+            ctl_check: None,
             scope: 0,
             data: DataPtr::default(),
             events: Events { break_on: true, ..Default::default() },
@@ -346,7 +360,7 @@ impl Interp {
         self.ctl.clear();
         self.ctl_bytes = 0;
         self.stack_limit = (compiled.stack_size + 1) * 42 - 64;
-        self.frame_stack.clear();
+        self.clear_frame_stack();
         self.scope = 0;
         self.data = DataPtr { base: 2, line: 0, item: 0 };
         self.events = Events { break_on: true, ..Default::default() };
@@ -427,13 +441,92 @@ impl Interp {
         }
         self.ctl_bytes += size;
         self.ctl.push(c);
+        self.ctl_gen += 1;
         Ok(())
     }
 
     pub fn pop_ctl(&mut self) -> Option<Ctl> {
         let c = self.ctl.pop()?;
         self.ctl_bytes -= c.size();
+        self.ctl_gen += 1;
         Some(c)
+    }
+
+    /// Generation of the control stack (`ctl`) and the procedure frame
+    /// stack (`frame_stack`): changes whenever an entry is pushed, popped
+    /// or replaced, so state computed from them (e.g. the innermost loop
+    /// or the procedure owning a For variable) is still valid while it is
+    /// the same. Procedure variables (`ProcFrame::locals`) are not part of
+    /// it: writing them does not change it. Debug builds check after every
+    /// instruction run by `run` that the stacks did not change without it.
+    pub fn ctl_generation(&self) -> u64 {
+        self.ctl_gen
+    }
+
+    /// Marks a change of `ctl` or `frame_stack` made directly on the fields
+    /// (other than procedure variables).
+    pub fn bump_ctl_generation(&mut self) {
+        self.ctl_gen += 1;
+    }
+
+    /// Pushes the `ctl` index of a new procedure frame on `frame_stack`.
+    pub fn push_frame_index(&mut self, idx: usize) {
+        self.frame_stack.push(idx);
+        self.ctl_gen += 1;
+    }
+
+    /// Pops the innermost procedure frame index.
+    pub fn pop_frame_index(&mut self) -> Option<usize> {
+        self.ctl_gen += 1;
+        self.frame_stack.pop()
+    }
+
+    /// Empties `frame_stack`.
+    pub fn clear_frame_stack(&mut self) {
+        self.frame_stack.clear();
+        self.ctl_gen += 1;
+    }
+
+    /// Hash of what `ctl_generation` covers: every entry of `ctl` (for
+    /// procedure frames, all but their variables) and `frame_stack`.
+    #[cfg(any(test, debug_assertions))]
+    pub fn ctl_shape(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        self.ctl.len().hash(&mut h);
+        for c in &self.ctl {
+            std::mem::discriminant(c).hash(&mut h);
+            match c {
+                Ctl::For {
+                    var,
+                    step,
+                    limit,
+                    body,
+                    exit,
+                } => (var.slot, var.index, var.frame, step, limit, body, exit).hash(&mut h),
+                Ctl::Repeat { body, exit } | Ctl::Do { body, exit } => (body, exit).hash(&mut h),
+                Ctl::While { start, body, exit } => (start, body, exit).hash(&mut h),
+                Ctl::Gosub { ret } => ret.hash(&mut h),
+                Ctl::Proc(f) => (f.proc_index, f.ret, f.scope, f.locals.len()).hash(&mut h),
+            }
+        }
+        self.frame_stack.hash(&mut h);
+        h.finish()
+    }
+
+    /// Debug builds: panics if the control or frame stack changed since the
+    /// last check without a new `ctl_generation`.
+    #[cfg(debug_assertions)]
+    pub fn check_ctl_generation(&mut self) {
+        let now = (self.ctl_shape(), self.ctl_gen);
+        if let Some((shape, generation)) = self.ctl_check {
+            assert!(
+                shape == now.0 || generation != now.1,
+                "control stack changed without a new ctl_generation (at {})",
+                self.inst_pos
+            );
+        }
+        self.ctl_check = Some(now);
     }
 
     /// Index in `ctl` of the innermost Gosub / Proc frame (loops above it
@@ -680,6 +773,8 @@ impl Interp {
         }
         let mut count = 0;
         loop {
+            #[cfg(debug_assertions)]
+            self.check_ctl_generation();
             if count >= max_instructions {
                 return RunState::Running;
             }
@@ -873,7 +968,7 @@ impl Interp {
         frame.error_pos = self.error_pos;
         frame.scope = self.scope;
         self.push_ctl(Ctl::Proc(frame))?;
-        self.frame_stack.push(self.ctl.len() - 1);
+        self.push_frame_index(self.ctl.len() - 1);
         self.scope = index + 1;
         self.data = DataPtr { base: body, line: 0, item: 0 };
         self.on_error = OnError::None;
@@ -894,7 +989,7 @@ impl Interp {
         if self.error_proc_depth == Some(self.frame_stack.len()) {
             self.error_proc_depth = None;
         }
-        self.frame_stack.pop();
+        self.pop_frame_index();
         self.data = f.data;
         self.on_error = f.on_error;
         self.error_on = f.error_on;

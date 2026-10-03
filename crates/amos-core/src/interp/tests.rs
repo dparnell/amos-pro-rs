@@ -219,3 +219,70 @@ Print $7FFFFFFF-1;%101+$10;U;-(-A)\n";
     assert_eq!(run_err("A=0 : B=5/A"), StopReasonOrError::Error(crate::errors::DIVISION_BY_ZERO));
     assert_eq!(run_err("A=0 : B=5/(A*1)+1"), StopReasonOrError::Error(crate::errors::DIVISION_BY_ZERO));
 }
+
+/// Host whose instructions change the innermost For loop in place (its
+/// limit), with or without `bump_ctl_generation`.
+struct LimitHost {
+    bump: bool,
+}
+
+impl Host for LimitHost {
+    fn instruction(&mut self, it: &mut Interp, kw: Keyword) -> R<()> {
+        let _ = it.inst_args(self, kw)?;
+        if let Some(Ctl::For { limit, .. }) = it.ctl.last_mut() {
+            *limit = 3;
+            if self.bump {
+                it.bump_ctl_generation();
+            }
+        }
+        Ok(())
+    }
+    fn function(&mut self, _it: &mut Interp, _kw: Keyword) -> R<Value> {
+        Ok(Value::Int(0))
+    }
+    fn reserved_assign(&mut self, _it: &mut Interp, _kw: Keyword) -> R<()> {
+        Ok(())
+    }
+    fn test_point(&mut self, _it: &mut Interp) -> R<()> {
+        Ok(())
+    }
+    fn take_break(&mut self) -> bool {
+        false
+    }
+    fn print(&mut self, _it: &mut Interp, _text: &[u8]) -> R<()> {
+        Ok(())
+    }
+    fn read_line(&mut self, _it: &mut Interp, _state: &mut InputState) -> R<Option<Vec<u8>>> {
+        Ok(Some(Vec::new()))
+    }
+}
+
+fn run_limit_host(bump: bool) -> u64 {
+    let prg = tokenise_program(b"For I=1 To 10\nBell\nNext I\n").unwrap();
+    let mut it = Interp::new();
+    it.load(&prg).unwrap();
+    let before = it.ctl_generation();
+    it.vbl();
+    let _ = it.run(&mut LimitHost { bump }, 1000);
+    it.ctl_generation() - before
+}
+
+/// Changes of the control stack made through the fields are caught in
+/// debug builds when they do not bump the generation.
+#[test]
+#[cfg(debug_assertions)]
+#[should_panic(expected = "control stack changed without a new ctl_generation")]
+fn ctl_change_without_generation_is_caught() {
+    run_limit_host(false);
+}
+
+#[test]
+fn ctl_generation_changes_with_the_stacks() {
+    assert!(run_limit_host(true) > 0);
+    // Procedure calls, Gosubs and loops of all kinds, with the debug check
+    // after every instruction.
+    let out = run("Gosub G : For I=1 To 2 : P[I] : Next I : End\n\
+G: Repeat : Inc K : Until K=2 : While K<4 : Inc K : Wend : Do : Exit : Loop : Return\n\
+Procedure P[N]\nFor J=1 To N : Print J; : Next J\nIf N=2 Then Pop Proc\nEnd Proc\n");
+    assert_eq!(out, " 1 1 2");
+}
