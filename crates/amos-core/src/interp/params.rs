@@ -174,11 +174,12 @@ impl Interp {
     /// or takes the ones given to [`Interp::preset_args`].
     pub fn inst_args(&mut self, hw: &mut dyn Host, kw: Keyword) -> R<Args> {
         let sig = param_types_of(kw);
-        if self.preset_set {
-            return self.take_preset(sig);
-        }
         let mut out = Args::default();
-        self.args_into(hw, sig, &mut out.0)?;
+        if self.preset_set {
+            self.take_preset_into(sig, &mut out.0)?;
+        } else {
+            self.args_into(hw, sig, &mut out.0)?;
+        }
         Ok(out)
     }
 
@@ -186,11 +187,10 @@ impl Interp {
     /// takes the ones given to [`Interp::preset_args`].
     pub fn func_args(&mut self, hw: &mut dyn Host, kw: Keyword) -> R<Args> {
         let sig = param_types_of(kw);
-        if self.preset_set {
-            return self.take_preset(sig);
-        }
         let mut out = Args::default();
-        if !sig.is_empty() {
+        if self.preset_set {
+            self.take_preset_into(sig, &mut out.0)?;
+        } else if !sig.is_empty() {
             // `fn_args` into `out`.
             self.expect(TK_PAR1)?;
             self.args_into(hw, sig, &mut out.0)?;
@@ -199,16 +199,16 @@ impl Interp {
         Ok(out)
     }
 
-    /// The preset parameters converted for `sig`; the preset is used up
-    /// (also on error) and its vector kept for the next one.
-    fn take_preset(&mut self, sig: &str) -> R<Args> {
+    /// The preset parameters converted for `sig` into `out` (as `args_into`
+    /// fills it); the preset is used up (also on error) and its vector kept
+    /// for the next one.
+    fn take_preset_into(&mut self, sig: &str, out: &mut ArgVec) -> R<()> {
         self.preset_set = false;
         let mut values = std::mem::take(&mut self.preset);
-        let mut out = Args::default();
-        let r = self.preset_into(sig, &mut values, &mut out.0);
+        let r = self.preset_into(sig, &mut values, out);
         values.clear();
         self.preset = values;
-        r.map(|()| out)
+        r
     }
 
     /// Gives the parameters of the next `inst_args` / `func_args` call,
