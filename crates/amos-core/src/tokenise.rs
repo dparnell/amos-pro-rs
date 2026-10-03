@@ -60,10 +60,13 @@ pub fn parse_number(s: &[u8], signed: bool) -> Option<(Number, usize)> {
     let at = |i: usize| s.get(i).copied().unwrap_or(0);
     let mut i = 0;
     let mut neg = false;
+    // Where `ValRout` starts the text of a float (`a2`): the sign.
+    let mut from = 0;
     if signed {
         while at(i) == b' ' {
             i += 1;
         }
+        from = i;
         match at(i) {
             b'-' => {
                 neg = true;
@@ -76,7 +79,6 @@ pub fn parse_number(s: &[u8], signed: bool) -> Option<(Number, usize)> {
     while at(i) == b' ' {
         i += 1;
     }
-    let start = i;
     match at(i) {
         b'$' => {
             i += 1;
@@ -175,14 +177,11 @@ pub fn parse_number(s: &[u8], signed: bool) -> Option<(Number, usize)> {
                 break;
             }
             if is_float {
-                let text: String =
-                    s[start..j].iter().filter(|&&c| c != b' ').map(|&c| lower(c) as char).collect();
-                let mut v = parse_float_text(&text);
-                let mut ffp = crate::ffp::ascii_to_ffp(text.as_bytes());
-                if neg {
-                    v = -v;
-                    ffp = crate::ffp::Ffp(ffp.0 | 0x80);
-                }
+                // `BuFloat`: from the sign, without spaces, at most 33
+                // characters, converted by `AscToDouble` / `AscToFloat`.
+                let text = crate::softdouble::bufloat(&s[from..j]);
+                let v = crate::softdouble::asc_to_f64(&text);
+                let ffp = crate::ffp::ascii_to_ffp(&text);
                 // Trailing spaces belong to the number for the original too.
                 Some((Number::Float(v, ffp), j))
             } else {

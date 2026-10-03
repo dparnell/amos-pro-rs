@@ -120,7 +120,7 @@ Mid$= ...) are compiled specially.
   (`--interpreted` skips it) and fall back to interpreting on failure.
 * Hosts: `amos-wasmhost` (wasmtime natively, `WebAssembly.instantiate` on
   the web) share the import list in `amos-wasmhost/src/imports.rs`
-  (interface version 8, `amos_core::compiled::ABI_VERSION`).
+  (interface version 9, `amos_core::compiled::ABI_VERSION`).
 * Gosub / Return and procedure calls / End Proc / Pop Proc run in the
   module: a call the stack surely has room for becomes a *pending* entry in
   memory (locals and parameters in the procedure's memory frame, Param /
@@ -129,6 +129,11 @@ Mid$= ...) are compiled specially.
   every import, so errors (13 at the same depth, 8), On Error / Every /
   menu procedures, Resume, Trap, Data pointers, local arrays, string roots
   and yields all see the exact interpreter stack.
+* Number <-> text conversions are done in the module, bit-exact with the
+  interpreter: single precision through ports of the FFP routines, double
+  precision `Val` through `amos_core::softdouble` (the original's
+  `AscToDouble` with the not correctly rounded double routines of its C
+  runtime, in i64 integer arithmetic; no host call since version 9).
 * Checks: differential tests (`cargo test -p amos-wasmhost`), the native
   frame-by-frame comparison of all examples (`cargo run -p amos-wasmhost
   --example compare`), and the same comparison in the real web runtime under

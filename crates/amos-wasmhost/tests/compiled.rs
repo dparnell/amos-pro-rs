@@ -609,3 +609,21 @@ fn native_procedures() {
         }
     }
 }
+
+#[test]
+fn double_precision_val_and_input() {
+    // `AscToDouble` (not correctly rounded): equal results only if the same
+    // bits; the differences show in comparisons and digits.
+    let progs = [
+        "Set Double Precision\nRead N\nFor I=1 To N : Read A$ : V#=Val(A$) : Print A$;\"|\";V#;V#=Val(A$+\" \");V#*1e15-Int(V#*1e15) : Next\nData 14,\"0.86\",\"0.1\",\"123.456\",\"-0\",\"-0.0\",\"1e308\",\"1e309\",\"-1e400\",\"1e-330\",\"9.4e-3\",\" - 12 . 5 e 2\",\"1.2345678901234567890123456789012345e10\",\"123456789012345678901234567890123456\",\"3.14159265358979\"",
+        "Set Double Precision\nA#=Val(\"0.1\")+Val(\"0.2\") : B#=Val(\"0.3\")\nPrint A#=B#;A#-B#;Val(\".86\")=0.86\nC#=0.86 : Print C#=Val(\"0.86\")",
+        "Set Double Precision\nF#=0\nFor I=1 To 300 : F#=F#+Val(Str$(I)+\".\"+Str$(I*7)) : Next\nPrint F#",
+        "R#=Val(\"1234567890123456789012345678901234567\") : Print R#;Val(\"-0\");Val(\"1.5e3\")",
+    ];
+    for p in progs {
+        same(p);
+        same_budget(p, 7);
+    }
+    // Input of doubles.
+    same_with("Set Double Precision\nInput A#,B#\nPrint A#*3;B#;A#=B#", &["0.86", "8.6e-1"]);
+}

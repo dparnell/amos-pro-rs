@@ -4,10 +4,9 @@
 //! Instruction by instruction ports of `amos_core::ffp` (`ascii_to_ffp`,
 //! `ffp2a`, `F2a`, `Clean`, `ExFix1`, `ExVir1`, `FloatToAsc`, `dtoa`,
 //! `format_double`), `tokenise::parse_number` (`ValRout`) and
-//! `interp::expr::format_radix`, so the results are bit-identical. The
-//! one exception: the decimal to double conversion of `Val` in double
-//! precision (`parse_float_text`, a correctly rounded conversion) is done
-//! by the runtime (`host.val_double`); everything around it is here.
+//! `interp::expr::format_radix`, and of `softdouble::asc_to_double` (the
+//! double precision `Val`, with the arithmetic of the original's C runtime
+//! in i64 integers), so the results are bit-identical.
 //!
 //! Intermediate texts use two scratch buffers of the memory header
 //! (`layout::SCR_A`, `SCR_B`); results are new strings (`strings.rs`).
@@ -45,6 +44,14 @@ pub enum N {
     Shape,
     SubInt,
     MulTen,
+    DTab,
+    DTerm,
+    DPack,
+    DMul,
+    DDiv,
+    DAdd,
+    DPow10,
+    DA2d,
 }
 
 const I: ValType = ValType::I32;
@@ -74,6 +81,14 @@ pub const HELPERS: &[(N, &str, &[ValType], &[ValType])] = &[
     (N::Shape, "shape", &[I, I], &[I]),
     (N::SubInt, "sub_int", &[I, I], &[I]),
     (N::MulTen, "mul_ten", &[I], &[I]),
+    (N::DTab, "d_tab", &[I], &[L]),
+    (N::DTerm, "d_term", &[I], &[L]),
+    (N::DPack, "d_pack", &[L, I, I], &[L]),
+    (N::DMul, "d_mul", &[L, L], &[L]),
+    (N::DDiv, "d_div", &[L, L], &[L]),
+    (N::DAdd, "d_add", &[L, L], &[L]),
+    (N::DPow10, "d_pow10", &[I], &[L]),
+    (N::DA2d, "d_a2d", &[I, I], &[L]),
 ];
 
 /// Function indices of the helper families and imports used here.
@@ -82,8 +97,6 @@ pub struct Idx {
     pub ffp: u32,
     pub str: u32,
     pub num: u32,
-    /// `host.val_double`.
-    pub val_double: u32,
 }
 
 impl Idx {
@@ -180,8 +193,14 @@ fn copy(s: &mut InstructionSink) {
 }
 
 /// The body of helper `n`.
-pub fn body(n: N, ix: &Idx, double_const: bool) -> Function {
-    let _ = double_const;
+pub fn body(n: N, ix: &Idx, double: bool) -> Function {
+    // The double precision Val helpers are only called by double precision
+    // programs (their tables are large).
+    if !double && matches!(n, N::DTab | N::DTerm | N::DPack | N::DMul | N::DDiv | N::DAdd | N::DPow10 | N::DA2d) {
+        let mut f = Function::new([]);
+        f.instructions().unreachable().end();
+        return f;
+    }
     let locals: Vec<(u32, ValType)> = match n {
         N::Ffp2a => vec![(12, I)],
         N::Clean => vec![(4, I)],
@@ -194,7 +213,7 @@ pub fn body(n: N, ix: &Idx, double_const: bool) -> Function {
         N::FmtDouble => vec![(6, I)],
         N::Renorm => vec![(3, I)],
         N::A2ffp => vec![(19, I)],
-        N::Val => vec![(16, I), (2, L), (1, F)],
+        N::Val => vec![(16, I), (2, L), (1, F), (1, I)],
         N::Radix => vec![(8, I)],
         N::Repeat => vec![(3, I)],
         N::StrF => vec![(2, I)],
@@ -205,6 +224,14 @@ pub fn body(n: N, ix: &Idx, double_const: bool) -> Function {
         N::Shape => vec![(5, I)],
         N::SubInt => vec![(4, I)],
         N::MulTen => vec![(3, I)],
+        N::DTab => vec![],
+        N::DTerm => vec![],
+        N::DPack => vec![(1, I), (2, L)],
+        N::DMul => vec![(2, I), (6, L)],
+        N::DDiv => vec![(3, I), (5, L)],
+        N::DAdd => vec![(5, I), (5, L)],
+        N::DPow10 => vec![(2, L)],
+        N::DA2d => vec![(12, I), (2, L)],
     };
     let mut f = Function::new(locals);
     let s = &mut f.instructions();
@@ -233,6 +260,14 @@ pub fn body(n: N, ix: &Idx, double_const: bool) -> Function {
         N::MulTen => {
             emit_mul_ten(s, ix, 0, 1, 2, 3);
         }
+        N::DTab => d_tab(s),
+        N::DTerm => d_term(s),
+        N::DPack => d_pack(s),
+        N::DMul => d_mul(s, ix),
+        N::DDiv => d_div(s, ix),
+        N::DAdd => d_add(s),
+        N::DPow10 => d_pow10(s, ix),
+        N::DA2d => d_a2d(s, ix),
     }
     s.end();
     f
@@ -1104,7 +1139,7 @@ fn a2ffp(s: &mut InstructionSink, ix: &Idx) {
 /// `Val` (`Interp::val` / `parse_number(s, true)`): the value as an f64
 /// payload, its type in `TAG` (0 integer, 1 float).
 /// a=0 double=1; len=2 i=3 neg=4 start=5 c=6 v=7 n=8 j=9 isf=10 dot=11 k=12
-/// ef=13 digits=14 tb=15 tl=16 d=17; v64=18 nv=19 (i64); r=20 (f64)
+/// ef=13 digits=14 tb=15 tl=16 d=17; v64=18 nv=19 (i64); r=20 (f64); from=21
 fn val(s: &mut InstructionSink, ix: &Idx) {
     // Text: a + 4, length.
     s.local_get(0).call(ix.s(S::Len)).local_set(2);
@@ -1125,6 +1160,8 @@ fn val(s: &mut InstructionSink, ix: &Idx) {
         s.i32_const(48).i32_sub().i32_const(10).i32_lt_u();
     };
     skip_spaces(s, 3);
+    // Where the text of a float starts (`a2`, at the sign).
+    s.local_get(3).local_set(21);
     at(s, 0, 2, 3);
     s.local_tee(6).i32_const(b'-' as i32).i32_eq().if_(e());
     s.i32_const(1).local_set(4);
@@ -1247,27 +1284,19 @@ fn val(s: &mut InstructionSink, ix: &Idx) {
     s.end().end();
     s.local_get(10).if_(e());
     {
-        // The text without spaces, in lower case.
+        // `BuFloat` in SCR_A: from the sign, without spaces, at most 33
+        // characters; then `AscToDouble` / `AscToFloat`.
+        hdr_addr(s, layout::SCR_A);
+        s.local_set(15);
         s.i32_const(0).local_set(16);
-        s.local_get(5).local_set(12);
-        s.block(e()).loop_(e());
-        s.local_get(12).local_get(9).i32_ge_u().br_if(1);
-        at(s, 0, 2, 12);
-        s.i32_const(b' ' as i32).i32_ne().if_(e()).local_get(16).i32_const(1).i32_add().local_set(16).end();
-        s.local_get(12).i32_const(1).i32_add().local_set(12);
-        s.br(0).end().end();
-        s.local_get(16).call(ix.s(S::Alloc)).local_set(15);
-        s.i32_const(0).local_set(17);
-        s.local_get(5).local_set(12);
+        s.local_get(21).local_set(12);
         s.block(e()).loop_(e());
         {
             s.local_get(12).local_get(9).i32_ge_u().br_if(1);
             at(s, 0, 2, 12);
-            s.local_tee(6).i32_const(b' ' as i32).i32_ne().if_(e());
-            s.local_get(15).local_get(17).i32_add();
-            s.local_get(6).i32_const(b'E' as i32).i32_eq().if_(ri()).i32_const(b'e' as i32).else_().local_get(6).end();
-            s.i32_store8(MemArg { offset: 4, align: 0, memory_index: 0 });
-            s.local_get(17).i32_const(1).i32_add().local_set(17);
+            s.local_tee(6).i32_const(b' ' as i32).i32_ne().local_get(16).i32_const(33).i32_lt_u().i32_and().if_(e());
+            s.local_get(15).local_get(16).i32_add().local_get(6).i32_store8(b8());
+            s.local_get(16).i32_const(1).i32_add().local_set(16);
             s.end();
             s.local_get(12).i32_const(1).i32_add().local_set(12);
             s.br(0);
@@ -1275,11 +1304,9 @@ fn val(s: &mut InstructionSink, ix: &Idx) {
         s.end().end();
         s.global_get(0).i32_const(1).i32_store(MemArg { offset: layout::TAG as u64, align: 2, memory_index: 0 });
         s.local_get(1).if_(e());
-        s.local_get(15).call(ix.val_double).local_set(20);
-        s.local_get(20).f64_neg().local_get(20).local_get(4).select().return_();
+        s.local_get(15).local_get(16).call(ix.n(N::DA2d)).f64_reinterpret_i64().return_();
         s.end();
-        s.local_get(15).i32_const(4).i32_add().local_get(16).call(ix.n(N::A2ffp));
-        s.local_get(4).i32_const(7).i32_shl().i32_or().call(ix.h(H::B2f)).return_();
+        s.local_get(15).local_get(16).call(ix.n(N::A2ffp)).call(ix.h(H::B2f)).return_();
     }
     s.end();
     // Integer (overflow: Val is 0).
@@ -1668,9 +1695,476 @@ fn sub_int(s: &mut InstructionSink, ix: &Idx) {
     emit_mul_ten(s, ix, 0, 3, 2, 5);
 }
 
+// ---------------------------------------------------------------------------
+// Double precision AscToDouble (`amos_core::softdouble`): the routines of
+// the C runtime of `+Lib.s` in closed form, with i64 integers.
+// ---------------------------------------------------------------------------
+
+const DSIGN: i64 = i64::MIN;
+const DFRAC: i64 = 0x000F_FFFF_FFFF_FFFF;
+const DONE: i64 = 0x3FF0_0000_0000_0000;
+const DTEN: i64 = 0x4024_0000_0000_0000;
+/// Places of `d_term`.
+const PLACES: i32 = amos_core::softdouble::DIGIT_PLACES as i32;
+/// Entries of `d_tab` (10^n, n < `DTLEN`).
+const DTLEN: u32 = 64;
+
+/// Pushes the exponent field of the i64 in local `v` (i32).
+fn d_ef(s: &mut InstructionSink, v: u32) {
+    s.local_get(v).i64_const(52).i64_shr_u().i32_wrap_i64().i32_const(0x7FF).i32_and();
+}
+
+/// Pushes the mantissa of local `v` with its hidden bit, at the top.
+fn d_m64(s: &mut InstructionSink, v: u32) {
+    s.local_get(v).i64_const(DFRAC).i64_and().i64_const(1 << 52).i64_or().i64_const(11).i64_shl();
+}
+
+/// `d_tab(n)`: `softdouble::pow10(n)` for n < `DTLEN` (constants).
+fn d_tab(s: &mut InstructionSink) {
+    let t = amos_core::softdouble::pow10_values();
+    for _ in 0..=DTLEN {
+        s.block(e());
+    }
+    s.local_get(0).br_table(0..DTLEN, DTLEN);
+    for v in &t[..DTLEN as usize] {
+        s.end();
+        s.i64_const(*v as i64).return_();
+    }
+    s.end();
+    s.i64_const(0);
+}
+
+/// `d_term(i)`: `softdouble::digit_terms` of the fraction digits (`i = k *
+/// 9 + d - 1`). (Integer digits are summed as an integer up to 15 digits,
+/// with `d_mul` beyond.)
+fn d_term(s: &mut InstructionSink) {
+    let t: Vec<u64> = amos_core::softdouble::digit_terms()[1].iter().flatten().copied().collect();
+    let n = t.len() as u32;
+    for _ in 0..=n {
+        s.block(e());
+    }
+    s.local_get(0).br_table(0..n, n);
+    for v in t {
+        s.end();
+        s.i64_const(v as i64).return_();
+    }
+    s.end();
+    s.i64_const(0);
+}
+
+/// Pushes `softdouble::pack(m, e, s)` of the locals `m` (i64), `ex` (i32: a
+/// 16 bit word) and `sg` (i32, non zero: negative); `z` (i32), `r` and
+/// `sign` (i64) are scratch locals. `m` and `ex` are changed.
+fn emit_pack(s: &mut InstructionSink, m: u32, ex: u32, sg: u32, z: u32, r: u32, sign: u32) {
+    s.block(BlockType::Result(L));
+    s.i64_const(0).local_get(m).i64_eqz().br_if(0).drop();
+    s.local_get(m).i64_clz().i32_wrap_i64().local_set(z);
+    s.local_get(m).local_get(z).i64_extend_i32_u().i64_shl().local_set(m);
+    s.local_get(ex).local_get(z).i32_sub().local_set(ex);
+    // Round: above half, or half and odd.
+    s.local_get(m).i64_const(0x7FF).i64_and().i64_const(0x400).i64_gt_u();
+    s.local_get(m).i64_const(0xFFF).i64_and().i64_const(0xC00).i64_eq();
+    s.i32_or().if_(e());
+    {
+        s.local_get(m).i64_const(0x800).i64_add().local_tee(r).local_get(m).i64_lt_u().if_(e());
+        s.local_get(r).i64_const(1).i64_shr_u().i64_const(DSIGN).i64_or().local_set(m);
+        s.local_get(ex).i32_const(1).i32_add().local_set(ex);
+        s.else_();
+        s.local_get(r).local_set(m);
+        s.end();
+    }
+    s.end();
+    s.local_get(ex).i32_const(0x3FF).i32_add().i32_extend16_s().local_set(ex);
+    s.i64_const(DSIGN).i64_const(0).local_get(sg).select().local_set(sign);
+    s.local_get(sign).i64_const(0x0010_0000_0000_0000).i64_or();
+    s.local_get(ex).i32_const(0).i32_lt_s().br_if(0).drop();
+    s.local_get(sign).i64_const(i64::MAX).i64_or();
+    s.local_get(ex).i32_const(0x7FF).i32_gt_s().br_if(0).drop();
+    s.local_get(sign).local_get(ex).i64_extend_i32_u().i64_const(52).i64_shl().i64_or();
+    s.local_get(m).i64_const(11).i64_shr_u().i64_const(DFRAC).i64_and().i64_or();
+    s.end();
+}
+
+/// `d_pack(m, e, s)`: `softdouble::pack`. m=0 e=1 s=2; z=3 r=4 sign=5
+fn d_pack(s: &mut InstructionSink) {
+    emit_pack(s, 0, 1, 2, 3, 4, 5);
+}
+
+/// `d_mul(a, b)`: `softdouble::mul`. a=0 b=1; e=2 sb=3; x=4 y=5 lo=6 mid=7
+/// hi=8 slo=9
+fn d_mul(s: &mut InstructionSink, ix: &Idx) {
+    d_ef(s, 0);
+    s.i32_eqz();
+    d_ef(s, 1);
+    s.i32_eqz().i32_or().if_(e()).i64_const(0).return_().end();
+    d_ef(s, 0);
+    d_ef(s, 1);
+    s.i32_add().i32_const(0x7FD).i32_sub().local_set(2);
+    s.local_get(0).local_get(1).i64_xor().i64_const(0).i64_lt_s().i32_const(0xFF).i32_mul().local_set(3);
+    d_m64(s, 0);
+    s.local_set(4);
+    d_m64(s, 1);
+    s.local_set(5);
+    let w = |s: &mut InstructionSink, v: u32, i: u32| {
+        s.local_get(v);
+        if i > 0 {
+            s.i64_const(16 * i as i64).i64_shr_u();
+        }
+        if i < 3 {
+            s.i64_const(0xFFFF).i64_and();
+        }
+    };
+    let p = |s: &mut InstructionSink, i: u32, j: u32| {
+        w(s, 4, i);
+        w(s, 5, j);
+        s.i64_mul();
+    };
+    // lo = t3 + t2 + (t4 << 16)
+    p(s, 3, 0);
+    p(s, 2, 1);
+    s.i64_add();
+    p(s, 1, 2);
+    s.i64_add();
+    p(s, 0, 3);
+    s.i64_add();
+    for (i, j) in [(2, 0), (1, 1), (0, 2)] {
+        p(s, i, j);
+        s.i64_const(16).i64_shr_u().i64_add();
+    }
+    p(s, 3, 1);
+    p(s, 2, 2);
+    s.i64_add();
+    p(s, 1, 3);
+    s.i64_add().i64_const(16).i64_shl().i64_add().local_set(6);
+    // mid = (lo >> 32) + t5 + (t6 << 16)
+    s.local_get(6).i64_const(32).i64_shr_u();
+    p(s, 3, 2);
+    s.i64_add();
+    p(s, 2, 3);
+    s.i64_add();
+    p(s, 3, 3);
+    s.i64_const(16).i64_shl().i64_add().local_set(7);
+    s.local_get(7).i64_const(32).i64_shr_u().local_set(8);
+    s.local_get(7).i64_const(32).i64_shl().local_get(6).i64_const(0xFFFF_FFFF).i64_and().i64_or().local_set(9);
+    let shr1 = |s: &mut InstructionSink| {
+        s.local_get(9).i64_const(1).i64_shr_u().local_get(8).i64_const(63).i64_shl().i64_or().local_set(9);
+        s.local_get(8).i64_const(1).i64_shr_u().local_set(8);
+    };
+    s.local_get(8).i64_const(0xFFFF).i64_gt_u().if_(e());
+    s.local_get(3).i32_const(1).i32_add().i32_const(0xFF).i32_and().local_set(3);
+    shr1(s);
+    s.end();
+    s.local_get(9).i64_const(0xFFFF).i64_and().local_tee(6).i64_const(0x8000).i64_eq().if_(e());
+    s.local_get(9).i64_const(0x1_0000).i64_or().local_set(9);
+    s.else_();
+    s.local_get(6).i64_const(0x8000).i64_gt_u().if_(e());
+    {
+        s.local_get(9).i64_const(0x1_0000).i64_add().local_tee(6).local_get(9).i64_lt_u().if_(e());
+        s.local_get(8).i64_const(1).i64_add().local_set(8);
+        s.end();
+        s.local_get(6).local_set(9);
+        s.local_get(8).i64_const(0xFFFF).i64_gt_u().if_(e());
+        s.local_get(2).i32_const(1).i32_add().local_set(2);
+        shr1(s);
+        s.end();
+    }
+    s.end();
+    s.end();
+    s.local_get(8).i64_const(48).i64_shl().local_get(9).i64_const(16).i64_shr_u().i64_or();
+    s.local_get(2).local_get(3).call(ix.n(N::DPack));
+}
+
+/// `d_div(a, b)`: `softdouble::div`. a=0 b=1; e=2 k=3 sg=4; n=5 dv=6 q=7
+/// r=8 w=9
+fn d_div(s: &mut InstructionSink, ix: &Idx) {
+    d_ef(s, 0);
+    s.i32_eqz().if_(e()).i64_const(0).return_().end();
+    d_ef(s, 1);
+    s.i32_eqz().if_(e());
+    s.local_get(0).i64_const(DSIGN).i64_and().i64_const(i64::MAX).i64_or().return_();
+    s.end();
+    d_ef(s, 0);
+    s.i32_const(4).i32_shl();
+    d_ef(s, 1);
+    s.i32_const(4).i32_shl().i32_sub().i32_extend16_s().i32_const(4).i32_shr_s().i32_const(1).i32_sub().local_set(2);
+    s.local_get(0).local_get(1).i64_xor().i64_const(0).i64_lt_s().local_set(4);
+    d_m64(s, 0);
+    s.local_set(5);
+    d_m64(s, 1);
+    s.local_set(6);
+    s.local_get(5).local_get(6).i64_ge_u().if_(e());
+    s.local_get(5).i64_const(1).i64_shr_u().local_set(5);
+    s.local_get(2).i32_const(1).i32_add().local_set(2);
+    s.end();
+    s.local_get(6).i64_const(0xFFFF_FFFF_FFFF).i64_and().i64_eqz().if_(e());
+    {
+        // A 16 bit divisor: floor(n * 2^16 / w) in two divisions.
+        s.local_get(6).i64_const(48).i64_shr_u().local_set(9);
+        s.local_get(5).local_get(9).i64_div_u().i64_const(16).i64_shl();
+        s.local_get(5).local_get(9).i64_rem_u().i64_const(16).i64_shl().local_get(9).i64_div_u();
+        s.i64_or().local_set(7);
+    }
+    s.else_();
+    {
+        // floor(n * 2^64 / dv), one bit at a time (n < dv).
+        s.local_get(5).local_set(8);
+        s.i32_const(64).local_set(3);
+        s.block(e()).loop_(e());
+        s.local_get(3).i32_eqz().br_if(1);
+        s.local_get(8).i64_const(0).i64_lt_s();
+        s.local_get(8).i64_const(1).i64_shl().local_tee(8).local_get(6).i64_ge_u().i32_or();
+        s.local_get(7).i64_const(1).i64_shl().local_set(7);
+        s.if_(e());
+        s.local_get(8).local_get(6).i64_sub().local_set(8);
+        s.local_get(7).i64_const(1).i64_or().local_set(7);
+        s.end();
+        s.local_get(3).i32_const(1).i32_sub().local_set(3);
+        s.br(0).end().end();
+    }
+    s.end();
+    s.local_get(7).local_get(2).local_get(4).call(ix.n(N::DPack));
+}
+
+/// `d_add(a, b)`: `softdouble::add`. a=0 b=1; e4=2 e5=3 s4=4 s5=5 n=6;
+/// m4=7 m5=8 r=9
+fn d_add(s: &mut InstructionSink) {
+    d_ef(s, 0);
+    s.i32_eqz().if_(e());
+    d_ef(s, 1);
+    s.i32_eqz().if_(ri()).i64_const(0).return_().else_().local_get(1).return_().end();
+    s.drop();
+    s.end();
+    d_ef(s, 1);
+    s.i32_eqz().if_(e()).local_get(0).return_().end();
+    d_m64(s, 0);
+    s.local_set(7);
+    d_m64(s, 1);
+    s.local_set(8);
+    d_ef(s, 0);
+    s.i32_const(0x3FF).i32_sub().local_set(2);
+    d_ef(s, 1);
+    s.i32_const(0x3FF).i32_sub().local_set(3);
+    s.local_get(0).i64_const(0).i64_lt_s().local_set(4);
+    s.local_get(1).i64_const(0).i64_lt_s().local_set(5);
+    s.local_get(2).local_get(3).i32_ne().if_(e());
+    {
+        s.local_get(2).local_get(3).i32_lt_s().if_(e());
+        for (a, b, t) in [(7u32, 8u32, L), (2, 3, I), (4, 5, I)] {
+            let _ = t;
+            // swap a, b through the stack
+            s.local_get(a).local_get(b).local_set(a).local_set(b);
+        }
+        s.end();
+        s.local_get(2).local_get(3).i32_sub().local_set(6);
+        s.local_get(6).i32_const(0x37).i32_ge_u().if_(e());
+        s.i64_const(0).local_set(8);
+        s.else_();
+        // (m5 >> n) | sticky (bits out, from 5 places)
+        s.local_get(8).local_get(6).i64_extend_i32_u().i64_shr_u();
+        s.local_get(8).i64_const(1).local_get(6).i64_extend_i32_u().i64_shl().i64_const(1).i64_sub().i64_and();
+        s.i64_const(0).i64_ne().local_get(6).i32_const(5).i32_ge_u().i32_and().i64_extend_i32_u().i64_or();
+        s.local_set(8);
+        s.end();
+    }
+    s.end();
+    s.local_get(4).local_get(5).i32_eq().if_(e());
+    {
+        s.local_get(7).local_get(8).i64_add().local_tee(9).local_get(7).i64_lt_u().if_(e());
+        s.local_get(9).i64_const(1).i64_shr_u().i64_const(DSIGN).i64_or().local_set(9);
+        s.local_get(2).i32_const(1).i32_add().local_set(2);
+        s.end();
+    }
+    s.else_();
+    {
+        // Different signs: the positive one minus the other.
+        s.local_get(4).if_(e());
+        s.local_get(7).local_get(8).local_set(7).local_set(8);
+        s.end();
+        s.local_get(7).local_get(8).i64_sub().local_set(9);
+        s.local_get(7).local_get(8).i64_lt_u().local_tee(4).if_(e());
+        s.i64_const(0).local_get(9).i64_sub().local_set(9);
+        s.end();
+    }
+    s.end();
+    emit_pack(s, 9, 2, 4, 6, 10, 11);
+}
+
+/// `d_pow10(n)`: `softdouble::pow10`. n=0; v=1 nx=2
+fn d_pow10(s: &mut InstructionSink, ix: &Idx) {
+    s.local_get(0).i32_const(0).i32_le_s().if_(e()).i64_const(DONE).return_().end();
+    s.local_get(0).i32_const(DTLEN as i32).i32_lt_s().if_(e()).local_get(0).call(ix.n(N::DTab)).return_().end();
+    s.i32_const(DTLEN as i32 - 1).call(ix.n(N::DTab)).local_set(1);
+    s.local_get(0).i32_const(DTLEN as i32 - 1).i32_sub().local_set(0);
+    s.block(e()).loop_(e());
+    s.local_get(0).i32_eqz().br_if(1);
+    s.local_get(1).i64_const(DTEN).call(ix.n(N::DMul)).local_tee(2).local_get(1).i64_eq().br_if(1);
+    s.local_get(2).local_set(1);
+    s.local_get(0).i32_const(1).i32_sub().local_set(0);
+    s.br(0).end().end();
+    s.local_get(1);
+}
+
+/// `d_a2d(text, len)`: `softdouble::asc_to_double`. t=0 len=1; i=2 neg=3
+/// start=4 end=5 p=6 q=7 ex=8 eneg=9 d=10 n=11 old=12 c=13; v=14 ov=15
+fn d_a2d(s: &mut InstructionSink, ix: &Idx) {
+    let digit = |s: &mut InstructionSink, idx: u32| {
+        at(s, 0, 1, idx);
+        s.i32_const(48).i32_sub().i32_const(10).i32_lt_u();
+    };
+    // Digit value at `idx` as a double (exact).
+    let dval = |s: &mut InstructionSink, idx: u32| {
+        at(s, 0, 1, idx);
+        s.i32_const(48).i32_sub().f64_convert_i32_u().i64_reinterpret_f64();
+    };
+    let overflow = |s: &mut InstructionSink| {
+        s.i64_const(amos_core::softdouble::OVERFLOW as i64).i64_const(DSIGN).i64_const(0).local_get(3).select();
+        s.i64_or().return_();
+    };
+    // Spaces (9..13, 32), then a sign, a digit or '.'.
+    s.block(e()).loop_(e());
+    at(s, 0, 1, 2);
+    s.local_tee(13).i32_const(32).i32_eq().local_get(13).i32_const(9).i32_sub().i32_const(5).i32_lt_u().i32_or();
+    s.i32_eqz().br_if(1);
+    s.local_get(2).i32_const(1).i32_add().local_set(2);
+    s.br(0).end().end();
+    at(s, 0, 1, 2);
+    s.local_tee(13).i32_const(b'+' as i32).i32_eq().if_(e());
+    s.local_get(2).i32_const(1).i32_add().local_set(2);
+    s.else_();
+    s.local_get(13).i32_const(b'-' as i32).i32_eq().if_(e());
+    s.i32_const(1).local_set(3);
+    s.local_get(2).i32_const(1).i32_add().local_set(2);
+    s.else_();
+    s.local_get(13).i32_const(48).i32_sub().i32_const(10).i32_lt_u().local_get(13).i32_const(b'.' as i32).i32_eq();
+    s.i32_or().i32_eqz().if_(e()).i64_const(0).return_().end();
+    s.end();
+    s.end();
+    s.local_get(2).local_tee(4).local_set(5);
+    s.block(e()).loop_(e());
+    digit(s, 5);
+    s.i32_eqz().br_if(1);
+    s.local_get(5).i32_const(1).i32_add().local_set(5);
+    s.br(0).end().end();
+    // Integer digits from the last: v += digit * 10^k (up to 15 digits:
+    // exactly the integer, `softdouble::EXACT_DIGITS`).
+    s.local_get(5).local_set(6);
+    s.local_get(5).local_get(4).i32_sub().i32_const(amos_core::softdouble::EXACT_DIGITS as i32).i32_le_u().if_(e());
+    {
+        s.local_get(4).local_set(6);
+        s.block(e()).loop_(e());
+        s.local_get(6).local_get(5).i32_ge_u().br_if(1);
+        s.local_get(15).i64_const(10).i64_mul();
+        at(s, 0, 1, 6);
+        s.i32_const(48).i32_sub().i64_extend_i32_u().i64_add().local_set(15);
+        s.local_get(6).i32_const(1).i32_add().local_set(6);
+        s.br(0).end().end();
+        s.local_get(15).f64_convert_i64_u().i64_reinterpret_f64().local_set(14);
+        s.local_get(4).local_set(6);
+    }
+    s.end();
+    s.block(e()).loop_(e());
+    {
+        s.local_get(6).local_get(4).i32_le_s().br_if(1);
+        s.local_get(6).i32_const(1).i32_sub().local_set(6);
+        // (A 0 digit adds 0.) k=12 d=13
+        at(s, 0, 1, 6);
+        s.i32_const(48).i32_sub().local_tee(13).i32_eqz().br_if(0);
+        s.local_get(5).local_get(6).i32_sub().i32_const(1).i32_sub().call(ix.n(N::DPow10));
+        dval(s, 6);
+        s.call(ix.n(N::DMul));
+        s.local_get(14).local_set(15);
+        s.local_get(14).call(ix.n(N::DAdd)).local_tee(14);
+        s.local_get(15).i64_lt_s().if_(e());
+        overflow(s);
+        s.end();
+        s.br(0);
+    }
+    s.end().end();
+    // Fraction digits: v += digit / 10^k.
+    s.local_get(5).local_set(7);
+    at(s, 0, 1, 7);
+    s.i32_const(b'.' as i32).i32_eq().if_(e());
+    {
+        s.local_get(7).i32_const(1).i32_add().local_set(7);
+        s.block(e()).loop_(e());
+        digit(s, 7);
+        s.i32_eqz().br_if(1);
+        at(s, 0, 1, 7);
+        s.i32_const(48).i32_sub().local_tee(13).if_(e());
+        {
+            s.local_get(7).local_get(5).i32_sub().local_tee(12).i32_const(PLACES).i32_le_u().if_(BlockType::Result(L));
+            s.local_get(12).i32_const(1).i32_sub().i32_const(9).i32_mul();
+            s.local_get(13).i32_add().i32_const(1).i32_sub().call(ix.n(N::DTerm));
+            s.else_();
+            dval(s, 7);
+            s.local_get(12).call(ix.n(N::DPow10)).call(ix.n(N::DDiv));
+            s.end();
+            s.local_get(14).call(ix.n(N::DAdd)).local_set(14);
+        }
+        s.end();
+        s.local_get(7).i32_const(1).i32_add().local_set(7);
+        s.br(0).end().end();
+    }
+    s.end();
+    // Exponent.
+    at(s, 0, 1, 7);
+    s.i32_const(32).i32_or().i32_const(b'e' as i32).i32_eq().if_(e());
+    {
+        s.local_get(7).local_set(8);
+        s.local_get(7).i32_const(1).i32_add().local_set(10);
+        at(s, 0, 1, 10);
+        s.local_tee(13).i32_const(b'-' as i32).i32_eq().local_get(13).i32_const(b'+' as i32).i32_eq().i32_or();
+        s.if_(e()).local_get(10).local_set(8).end();
+        at(s, 0, 1, 8);
+        s.i32_const(b'-' as i32).i32_eq().local_set(9);
+        s.local_get(8).i32_const(1).i32_add().local_set(10);
+        digit(s, 10);
+        s.if_(e());
+        {
+            s.block(e()).loop_(e());
+            {
+                digit(s, 10);
+                s.i32_eqz().br_if(1);
+                s.local_get(11).local_set(12);
+                s.local_get(11).i32_const(10).i32_mul();
+                at(s, 0, 1, 10);
+                s.i32_add().i32_const(48).i32_sub().local_tee(11).local_get(12).i32_lt_s().if_(e());
+                {
+                    s.local_get(9).i32_eqz().if_(e());
+                    overflow(s);
+                    s.end();
+                    s.i64_const(0).local_set(14);
+                    s.i32_const(0).local_set(11);
+                    s.br(2);
+                }
+                s.end();
+                s.local_get(10).i32_const(1).i32_add().local_set(10);
+                s.br(0);
+            }
+            s.end().end();
+            s.local_get(9).if_(e());
+            s.local_get(14).local_get(11).call(ix.n(N::DPow10)).call(ix.n(N::DDiv)).local_set(14);
+            s.else_();
+            s.local_get(14).local_set(15);
+            s.local_get(11).call(ix.n(N::DPow10)).local_get(14).call(ix.n(N::DMul)).local_tee(14);
+            s.local_get(15).i64_lt_s().if_(e());
+            overflow(s);
+            s.end();
+            s.end();
+        }
+        s.end();
+    }
+    s.end();
+    // Negation (zero exponent field: +0).
+    s.local_get(3).if_(e());
+    d_ef(s, 14);
+    s.i32_eqz().if_(BlockType::Result(L)).i64_const(0).else_().local_get(14).i64_const(DSIGN).i64_xor().end().return_();
+    s.end();
+    s.local_get(14);
+}
+
 /// A module exporting the helpers (and `a2ffp` etc.) for tests: imports
-/// `env.memory`, `env.base`, `host.str_chunk` (i)->i and `host.val_double`
-/// (i)->f.
+/// `env.memory`, `env.base` and `host.str_chunk` (i)->i.
 pub fn test_module() -> Vec<u8> {
     use wasm_encoder::{
         CodeSection, EntityType, ExportKind, ExportSection, FunctionSection, GlobalType, ImportSection, MemoryType,
@@ -1695,12 +2189,10 @@ pub fn test_module() -> Vec<u8> {
     imports.import("env", "base", GlobalType { val_type: I, mutable: false, shared: false });
     let t = ty(&mut types, &[I], &[I]);
     imports.import("host", "str_chunk", EntityType::Function(t));
-    let t = ty(&mut types, &[I], &[F]);
-    imports.import("host", "val_double", EntityType::Function(t));
-    let ffp = 2;
+    let ffp = 1;
     let str = ffp + crate::ffp::HELPERS.len() as u32;
     let num = str + crate::strings::HELPERS.len() as u32;
-    let ix = Idx { ffp, str, num, val_double: 1 };
+    let ix = Idx { ffp, str, num };
     let mut funcs = FunctionSection::new();
     let mut code = CodeSection::new();
     let mut exports = ExportSection::new();
@@ -1715,7 +2207,7 @@ pub fn test_module() -> Vec<u8> {
     }
     for (n, name, p, r) in HELPERS {
         funcs.function(ty(&mut types, p, r));
-        code.function(&body(*n, &ix, false));
+        code.function(&body(*n, &ix, true));
         exports.export(name, ExportKind::Func, num + *n as u32);
     }
     let mut m = Module::new();

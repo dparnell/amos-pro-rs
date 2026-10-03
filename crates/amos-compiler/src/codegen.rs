@@ -126,7 +126,6 @@ imports! {
     SortArray = "rt" "sort_array" (i);
     MatchArray = "rt" "match_array" (i) -> i;
     NextDone = "host" "next_done" (i) -> i;
-    ValDouble = "host" "val_double" (i) -> f;
     ParamS = "host" "param_s" () -> i;
     IntF = "rt" "int_f" (f) -> f;
     Pow = "rt" "pow" (f f) -> f;
@@ -2847,7 +2846,6 @@ pub fn module(
         ffp: n_imports + 3,
         str: first_str,
         num: first_str + string_helpers::HELPERS.len() as u32,
-        val_double: Imp::ValDouble as u32,
     };
     for (h, ..) in num_helpers::HELPERS {
         if g.uses_num {

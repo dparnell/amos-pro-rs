@@ -19,6 +19,7 @@ pub mod machine;
 pub mod menus;
 pub mod number;
 pub mod program;
+pub mod softdouble;
 pub mod tokenise;
 pub mod tokens;
 

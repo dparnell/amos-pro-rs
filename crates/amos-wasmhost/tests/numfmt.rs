@@ -7,7 +7,7 @@
 
 use amos_core::compiled::layout;
 use amos_core::ffp::{Ffp, Fix};
-use amos_core::tokenise::{Number, parse_float_text, parse_number};
+use amos_core::tokenise::{Number, parse_number};
 use wasmtime::*;
 
 struct Rng(u64);
@@ -61,14 +61,7 @@ impl H {
         let mem = Memory::new(&mut store, MemoryType::new(64, None)).unwrap();
         let base = Global::new(&mut store, GlobalType::new(ValType::I32, Mutability::Const), Val::I32(0)).unwrap();
         let chunk = Func::wrap(&mut store, |_: i32| -> i32 { panic!("the test heap is large enough") });
-        let mem2 = mem;
-        let vd = Func::wrap(&mut store, move |c: Caller<'_, ()>, a: i32| -> f64 {
-            let d = mem2.data(&c);
-            let a = a as usize;
-            let n = u32::from_le_bytes(d[a..a + 4].try_into().unwrap()) as usize;
-            parse_float_text(&String::from_utf8_lossy(&d[a + 4..a + 4 + n]))
-        });
-        let inst = Instance::new(&mut store, &module, &[mem.into(), base.into(), chunk.into(), vd.into()]).unwrap();
+        let inst = Instance::new(&mut store, &module, &[mem.into(), base.into(), chunk.into()]).unwrap();
         H { store, mem, inst }
     }
 
@@ -368,6 +361,122 @@ fn integer_arithmetic_of_the_helpers() {
             let d = h.mem.data(&h.store);
             let rd = |o: u32| i32::from_le_bytes(d[o as usize..][..4].try_into().unwrap());
             assert_eq!((rd(layout::NORM_XN) as u32, rd(layout::NORM_E)), (v.0, e), "norm {x:08x}");
+        }
+    }
+}
+
+/// Double precision `Val` (`softdouble`): the module's integer arithmetic
+/// (`d_add`, `d_mul`, `d_div`, `d_pow10`) and `AscToDouble` (`d_a2d`)
+/// against `amos_core::softdouble`.
+#[test]
+fn double_precision_val() {
+    use amos_core::softdouble as sd;
+    let mut h = H::new();
+    let add = h.inst.get_typed_func::<(i64, i64), i64>(&mut h.store, "d_add").unwrap();
+    let mul = h.inst.get_typed_func::<(i64, i64), i64>(&mut h.store, "d_mul").unwrap();
+    let div = h.inst.get_typed_func::<(i64, i64), i64>(&mut h.store, "d_div").unwrap();
+    let pow = h.inst.get_typed_func::<i32, i64>(&mut h.store, "d_pow10").unwrap();
+    let a2d = h.inst.get_typed_func::<(i32, i32), i64>(&mut h.store, "d_a2d").unwrap();
+    let val = h.inst.get_typed_func::<(i32, i32), f64>(&mut h.store, "val").unwrap();
+    let mut r = Rng(0xA5A5_5A5A_0F0F_F0F0);
+    let operand = |r: &mut Rng| -> u64 {
+        let v = r.next();
+        match r.below(7) {
+            0 => v,
+            1 => (v & 0x800F_FFFF_FFFF_FFFF) | ((r.below(4) + (0x7FC * r.below(2))) << 52),
+            2 => [0, 1 << 63, sd::ONE, sd::TEN, sd::OVERFLOW, sd::overflow_value(0), 0x0010_0000_0000_0000]
+                [r.below(7) as usize],
+            3 => sd::pow10(r.below(330) as i32),
+            4 => (v & 0x800F_0000_0000_0000) | ((r.below(0x7FE) + 1) << 52),
+            _ => (v & 0x800F_FFFF_FFFF_FFFF) | ((0x3FF - 70 + r.below(140)) << 52),
+        }
+    };
+    for _ in 0..count(1_000_000) {
+        let (a, b) = (operand(&mut r), operand(&mut r));
+        let call =
+            |f: &TypedFunc<(i64, i64), i64>, h: &mut H| f.call(&mut h.store, (a as i64, b as i64)).unwrap() as u64;
+        assert_eq!(call(&add, &mut h), sd::add(a, b), "add {a:016X} {b:016X}");
+        assert_eq!(call(&mul, &mut h), sd::mul(a, b), "mul {a:016X} {b:016X}");
+        assert_eq!(call(&div, &mut h), sd::div(a, b), "div {a:016X} {b:016X}");
+        // Close exponents (the alignment of the addition).
+        let c = (r.next() & 0x800F_FFFF_FFFF_FFFF) | (((a >> 52) & 0x7FF).saturating_sub(r.below(70)) << 52);
+        assert_eq!(
+            add.call(&mut h.store, (a as i64, c as i64)).unwrap() as u64,
+            sd::add(a, c),
+            "add {a:016X} {c:016X}"
+        );
+    }
+    for n in -5..3000 {
+        assert_eq!(pow.call(&mut h.store, n).unwrap() as u64, sd::pow10(n), "10^{n}");
+    }
+    let mut texts: Vec<Vec<u8>> = [
+        "",
+        "-",
+        "+",
+        ".",
+        "e5",
+        "1e",
+        "1e+",
+        "1.e5",
+        ".5e-3",
+        "0",
+        "-0",
+        "-0.0",
+        "1e308",
+        "1e309",
+        "-1e309",
+        "1e-330",
+        "1e400",
+        "1e99999999999",
+        "1e-99999999999",
+        "1e2147483647",
+        "1e2147483648",
+        "1e-2147483648",
+        "0.86",
+        "9007199254740993",
+        "00000000000000000000000000000001",
+        " \t 12",
+        "1x5",
+        "--1",
+    ]
+    .iter()
+    .map(|t| t.as_bytes().to_vec())
+    .collect();
+    for _ in 0..count(300_000) {
+        texts.push(random_text(&mut r));
+    }
+    for t in &texts {
+        h.reset();
+        let p = h.put(t);
+        let got = a2d.call(&mut h.store, (p + 4, t.len() as i32)).unwrap() as u64;
+        assert_eq!(got, sd::asc_to_double(t), "d_a2d {:?}", String::from_utf8_lossy(t));
+    }
+    // Val, through BuFloat (sign, no spaces, at most 33 characters).
+    let long = [
+        "1234567890123456789012345678901234567890",
+        "-  123456789012345678901234567890.123456",
+        "0.000000000000000000000000000000000000001",
+        "12345678901234567890123456789012.5",
+        "1.2345678901234567890123456789012345e10",
+    ];
+    for t in long.iter().map(|t| t.as_bytes()).chain(texts.iter().map(|t| &t[..])) {
+        for double in [false, true] {
+            h.reset();
+            let p = h.put(t);
+            let v = val.call(&mut h.store, (p, double as i32)).unwrap();
+            let want = match parse_number(t, true) {
+                Some((Number::Int(i), _)) => i as f64,
+                Some((Number::Hex(x) | Number::Bin(x), _)) => x as i32 as f64,
+                Some((Number::Float(f, bits), _)) => {
+                    if double {
+                        f
+                    } else {
+                        bits.to_f64()
+                    }
+                }
+                None => 0.0,
+            };
+            assert_eq!(v.to_bits(), want.to_bits(), "Val {:?} double={double}", String::from_utf8_lossy(t));
         }
     }
 }

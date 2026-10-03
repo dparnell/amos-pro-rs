@@ -1679,13 +1679,6 @@ impl Runtime {
         self.alloc(mem, astr(s.as_bytes()))
     }
 
-    /// Double precision value of the float text at `a` (the conversion of
-    /// `tokenise::parse_number`, used by `Val`).
-    pub fn val_double(&self, mem: &mut [u8], a: i32) -> f64 {
-        let t = self.str_bytes(mem, a);
-        crate::tokenise::parse_float_text(&String::from_utf8_lossy(t))
-    }
-
     pub fn param_s(&mut self, env: &mut dyn Env, mem: &mut [u8]) -> i32 {
         let s = env.parts().0.param_s.clone();
         self.alloc(mem, s)

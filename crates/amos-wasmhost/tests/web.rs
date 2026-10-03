@@ -119,6 +119,7 @@ const PROGRAMS: &[&str] = &[
     "For I=1 To 2000 : P[I] : A$=A$+Left$(Param$,2) : Next : Print Len(A$);Right$(A$,8)\nProcedure P[N]\nEnd Proc[Str$(N)+Space$(50)]",
     "On Error Proc H\nA=1/0\nPrint \"x\";Param\nProcedure H\nQ[2] : Print Param;\nResume Next\nEnd Proc\nProcedure Q[N]\nIf N>0 Then Q[N-1]\nEnd Proc[N*3+Param]",
     "P[3]\nProcedure P[N]\nPrint V7;V19$;\nV0=N+0 : V1=N+1 : V2=N+2 : V3=N+3 : V4=N+4\nV5=N+5 : V6=N+6 : V7=N+7 : V8=N+8 : V9=N+9\nV10=N+10 : V11=N+11 : V12=N+12 : V13=N+13 : V14=N+14\nV15=N+15 : V16=N+16 : V17=N+17 : V18=N+18 : V19=N+19 : V19$=Str$(N)\nIf N>0 Then P[N-1]\nPrint V7;V19;V19$;\nEnd Proc",
+    "Set Double Precision\nF#=0\nFor I=1 To 200 : F#=F#+Val(Str$(I)+\".\"+Str$(I*7)+\"e-\"+Str$(I mod 9)) : Next\nPrint F#;Val(\"0.86\")=0.86;Val(\"-1e400\")",
     "C=0\nEvery 1 Proc E\nFIB[16] : Print Param\nEvery Off\nPrint C>0\nProcedure FIB[N]\nIf N<2 Then Pop Proc[N]\nFIB[N-1] : A=Param\nFIB[N-2]\nEnd Proc[A+Param]\nProcedure E\nShared C\nInc C\nEvery On\nEnd Proc",
 ];
 
