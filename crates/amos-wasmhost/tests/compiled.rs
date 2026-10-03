@@ -627,3 +627,26 @@ fn double_precision_val_and_input() {
     // Input of doubles.
     same_with("Set Double Precision\nInput A#,B#\nPrint A#*3;B#;A#=B#", &["0.86", "8.6e-1"]);
 }
+
+#[test]
+fn string_space_repeat_boundaries() {
+    for n in ["0", "1", "255", "65535", "65536", "65537", "70000", "131072"] {
+        run(&format!(
+            "A$=String$(\"xy\",{n}) : B$=Space$({n}) : C$=String$(\"\",{n})\nPrint Len(A$);Len(B$);Len(C$);Left$(A$,3);\"|\";Right$(B$,2);\"|\""
+        ));
+    }
+    for n in ["0", "1", "9", "206"] {
+        run(&format!(
+            "A$=Repeat$(\"ab\",{n}) : B$=Repeat$(\"\",{n}) : C$=Repeat$(Space$(100),{n})\nPrint Len(A$);Len(B$);Len(C$);Asc(Right$(A$,1))"
+        ));
+    }
+    for p in [
+        "A$=Space$(-1)",
+        "A$=String$(\"a\",-5)",
+        "A$=Repeat$(\"a\",207)",
+        "A$=Repeat$(\"a\",-1)",
+        "A$=String$(\"\",-1)",
+    ] {
+        assert_eq!(run_err(p), StopReasonOrError::Error(errors::ILLEGAL_FUNCTION_CALL), "{p}");
+    }
+}

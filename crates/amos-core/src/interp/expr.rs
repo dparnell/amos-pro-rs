@@ -437,7 +437,7 @@ impl Interp {
                 if n < 0 {
                     return err(errors::ILLEGAL_FUNCTION_CALL);
                 }
-                Value::Str(vec![b' '; (n as u32 & 0xFFFF) as usize].into())
+                Value::Str(filled(b' ', n))
             }
             STRING_S => {
                 let a = self.fn_args(hw, "2,0")?;
@@ -447,7 +447,7 @@ impl Interp {
                     return err(errors::ILLEGAL_FUNCTION_CALL);
                 }
                 match s.first() {
-                    Some(&c) => Value::Str(vec![c; (n as u32 & 0xFFFF) as usize].into()),
+                    Some(&c) => Value::Str(filled(c, n)),
                     None => Value::Str(empty_str()),
                 }
             }
@@ -458,10 +458,7 @@ impl Interp {
                 if !(0..207).contains(&n) {
                     return err(errors::ILLEGAL_FUNCTION_CALL);
                 }
-                let mut v = vec![27, b'R', b'0'];
-                v.extend_from_slice(&s);
-                v.extend_from_slice(&[27, b'R', 48 + n as u8]);
-                Value::Str(v.into())
+                Value::Str(repeat_code(&s, n))
             }
             LEFT_S | RIGHT_S => {
                 let a = self.fn_args(hw, "2,0")?;
@@ -733,6 +730,26 @@ pub fn instr(h: &[u8], n: &[u8], start: usize) -> i32 {
     h[start - 1..].windows(n.len()).position(|w| w == n).map_or(0, |i| (i + start) as i32)
 }
 
+/// `Space$(n)` / `String$(a$, n)` (n >= 0): `c` repeated, the count
+/// truncated to 16 bits; one allocation of the exact size.
+pub fn filled(c: u8, n: i32) -> AStr {
+    std::iter::repeat_n(c, (n as u32 & 0xFFFF) as usize).collect()
+}
+
+/// `Repeat$(a$, n)` (0 <= n < 207): the Print control code `ESC R0`, the
+/// text, `ESC R` and `'0' + n`, built at the exact size.
+pub fn repeat_code(s: &[u8], n: i32) -> AStr {
+    if s.len() <= 64 {
+        // (Short: built in place.)
+        return [27, b'R', b'0'].into_iter().chain(s.iter().copied()).chain([27, b'R', 48 + n as u8]).collect();
+    }
+    let mut v = Vec::with_capacity(s.len() + 6);
+    v.extend_from_slice(&[27, b'R', b'0']);
+    v.extend_from_slice(s);
+    v.extend_from_slice(&[27, b'R', 48 + n as u8]);
+    v.into()
+}
+
 /// `Hex$` / `Bin$` with optional digit count.
 pub fn format_radix(n: u32, hex: bool, digits: i32) -> String {
     let (b, len) = radix_text(n, hex, digits);
@@ -846,6 +863,35 @@ mod radix_tests {
                     let (b, len) = radix_text(n, hex, digits);
                     assert_eq!(&b[..len], reference(n, hex, digits).as_bytes());
                 }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod fill_tests {
+    use super::*;
+
+    #[test]
+    fn filled_and_repeat_match_the_reference() {
+        // The earlier code, as the reference.
+        let fill_ref = |c: u8, n: i32| -> AStr { vec![c; (n as u32 & 0xFFFF) as usize].into() };
+        let repeat_ref = |s: &[u8], n: i32| -> AStr {
+            let mut v = vec![27, b'R', b'0'];
+            v.extend_from_slice(s);
+            v.extend_from_slice(&[27, b'R', 48 + n as u8]);
+            v.into()
+        };
+        let counts = (0..300).chain([1000, 4095, 4096, 65534, 65535, 65536, 65537, 65800, 131071, 131072, i32::MAX - 1, i32::MAX]);
+        for n in counts {
+            for c in [b' ', b'x', 0, 255] {
+                assert_eq!(filled(c, n), fill_ref(c, n), "{c} {n}");
+            }
+        }
+        let text: Vec<u8> = (0..3000u32).map(|i| (i * 7 % 256) as u8).collect();
+        for len in (0..80).chain([255, 256, 1000, 3000]) {
+            for n in 0..207 {
+                assert_eq!(repeat_code(&text[..len], n), repeat_ref(&text[..len], n), "{len} {n}");
             }
         }
     }

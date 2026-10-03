@@ -138,6 +138,14 @@ const PROGRAMS: &[(&str, &str)] = &[
         "hex$/bin$ building",
         "For I=1 To 300000 : N=N+Len(Hex$(I,4)+Bin$(I and 255,8)) : S$=S$+Hex$(I) : If Len(S$)>200 Then S$=\"\"\nNext : Print N;S$",
     ),
+    ("string$/space$ short", "For I=1 To 300000 : A$=String$(\"x\",8) : B$=Space$(5) : Next : Print A$;B$"),
+    ("string$/space$ long", "For I=1 To 30000 : A$=String$(\"ab\",2000) : B$=Space$(1000) : Next : Print Len(A$+B$)"),
+    ("repeat$", "For I=1 To 300000 : A$=Repeat$(\"abc\",5) : Next : Print Len(A$)"),
+    ("repeat$ long", "B$=String$(\"x\",500)\nFor I=1 To 30000 : A$=Repeat$(B$,9) : Next : Print Len(A$)"),
+    (
+        "string$/space$ building",
+        "For I=1 To 300000 : S$=S$+String$(\"-\",I mod 10)+Space$(2) : If Len(S$)>200 Then S$=\"\"\nNext : Print Len(S$)",
+    ),
     ("gosub", "For I=1 To 300000 : Gosub L : Next : Print A : End\nL: A=A+1 : Return"),
 ];
 
