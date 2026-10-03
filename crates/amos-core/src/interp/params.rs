@@ -36,7 +36,8 @@ impl ArgVec {
     #[inline(always)]
     pub fn push(&mut self, v: Value) {
         if self.spill.is_empty() && self.len < INLINE_ARGS {
-            self.inline[self.len] = v;
+            // (The slot holds `Value::Int(0)`: nothing to drop.)
+            std::mem::forget(std::mem::replace(&mut self.inline[self.len], v));
             self.len += 1;
             return;
         }
@@ -210,15 +211,69 @@ impl Interp {
     fn take_preset_into(&mut self, sig: &str, out: &mut ArgVec) -> R<()> {
         let kind = std::mem::replace(&mut self.preset_set, PRESET_NONE);
         if kind == PRESET_INTS {
-            let (vals, mask) = (&self.preset_int_vals, self.preset_int_mask);
-            let get = |k: usize| (k < 32 && mask & (1 << k) != 0).then(|| Value::Int(vals[k]));
-            return self.preset_from(sig, vals.len(), get, out);
+            return self.preset_ints_into(sig, out);
         }
         let mut values = std::mem::take(&mut self.preset);
         let r = self.preset_into(sig, &mut values, out);
         values.clear();
         self.preset = values;
         r
+    }
+
+    /// `preset_from` for the integers of `preset_ints`: an integer
+    /// parameter (signature type `0`) takes the value as it is (what
+    /// `convert_param` returns for it), the others are converted.
+    #[inline]
+    fn preset_ints_into(&self, sig: &str, out: &mut ArgVec) -> R<()> {
+        let sig = sig.as_bytes();
+        let (vals, mask) = (&self.preset_int_vals[..], self.preset_int_mask);
+        let n = vals.len();
+        if out.len == 0 && n <= INLINE_ARGS && sig.len() + 1 == 2 * n && out.spill.is_empty() {
+            // Usual case (one value per parameter of a well formed
+            // signature, few parameters): the slots are filled in place, in
+            // order (the same conversions and errors as below; there are no
+            // separator errors).
+            for (k, (slot, &x)) in out.inline.iter_mut().zip(vals).enumerate() {
+                let ty = sig[2 * k];
+                let v = if k < 32 && mask & (1 << k) != 0 {
+                    if ty == b'0' {
+                        Value::Int(x)
+                    } else {
+                        self.convert_param(ty, Value::Int(x))?
+                    }
+                } else {
+                    Value::Int(ENT_NUL)
+                };
+                // (The slot holds `Value::Int(0)`: nothing to drop.)
+                std::mem::forget(std::mem::replace(slot, v));
+                out.len = k + 1;
+            }
+            return Ok(());
+        }
+        let mut i = 0;
+        let mut k = 0;
+        while i < sig.len() {
+            let v = match vals.get(k) {
+                Some(&x) if k < 32 && mask & (1 << k) != 0 => {
+                    if sig[i] == b'0' {
+                        Value::Int(x)
+                    } else {
+                        self.convert_param(sig[i], Value::Int(x))?
+                    }
+                }
+                _ => Value::Int(ENT_NUL),
+            };
+            out.push(v);
+            k += 1;
+            if i + 1 < sig.len() && k >= n {
+                return err(errors::SYNTAX_ERROR);
+            }
+            i += 2;
+        }
+        if k < n {
+            return err(errors::SYNTAX_ERROR);
+        }
+        Ok(())
     }
 
     /// The preset vector, emptied, for the caller to fill in place: the
@@ -527,7 +582,7 @@ mod tests {
             if d.param_types().is_empty() {
                 continue;
             }
-            for _ in 0..4 {
+            for _ in 0..16 {
                 let n = rnd(d.param_types().len().div_ceil(2) as u32 + 2) as usize;
                 let vals: Vec<i32> = (0..n).map(|_| rnd(200) as i32 - 100).collect();
                 let given = rnd(1 << n.min(16)) | if rnd(2) == 0 { u32::MAX << n } else { 0 };
@@ -541,12 +596,12 @@ mod tests {
                 let b = show(it.inst_args(&mut host, kw));
                 it.preset_buf().extend(opts.iter().cloned());
                 let c = show(it.func_args(&mut host, kw));
-                assert_eq!(a, b, "{}", d.name);
+                assert_eq!(a, b, "{} {vals:?} {given:x}", d.name);
                 assert_eq!(a, c, "{}", d.name);
                 checked += 1;
             }
         }
-        assert!(checked > 1000);
+        assert!(checked > 4000);
     }
 
     #[test]
