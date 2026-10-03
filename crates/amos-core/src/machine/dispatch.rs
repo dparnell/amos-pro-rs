@@ -518,3 +518,90 @@ Reserve Zone 3\nDegree\nGet Bob 1,0,0 To 16,16\nWind Open 1,0,0,20,10\n";
         assert!(checked > 700, "{checked}");
     }
 }
+
+#[cfg(test)]
+mod omitted_parameters {
+    use super::*;
+    use crate::Machine;
+
+    /// Every keyword with one parameter omitted (EntNul) at a time, as an
+    /// instruction and as a function: no arithmetic overflow (debug builds
+    /// panic where release builds wrap) or other panic.
+    #[test]
+    fn no_panic_with_omitted_parameters() {
+        let dir = std::env::temp_dir().join(format!("amos-omit-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let mut bad = Vec::new();
+        for (slot, table) in crate::tokens::EXTENSIONS.iter().enumerate() {
+            for d in table.iter() {
+                let kw = Keyword {
+                    slot: slot as u8,
+                    token: d.token,
+                };
+                let sig = d.param_types().as_bytes();
+                let n = sig.len().div_ceil(2);
+                // Memory range keywords: an omitted end address (EntNul)
+                // means a 2 GB range, as on the Amiga (slow, not wrong).
+                if n == 0 || matches!(d.name, "ssave" | "bsave" | "fill" | "copy" | "hunt") {
+                    continue;
+                }
+                for omit in 0..n {
+                    for func in [false, true] {
+                        let prg =
+                            crate::tokenise::tokenise_program(b"Screen Open 1,320,200,16,Lowres\n")
+                                .unwrap();
+                        let mut m = Machine::new();
+                        m.hw.files.set_native_root(&dir);
+                        m.run_program(&prg).unwrap();
+                        m.vbl();
+                        let values: Vec<Option<Value>> = (0..n)
+                            .map(|k| {
+                                (k != omit).then(|| match sig[2 * k] {
+                                    b'2' => Value::str(b"a"),
+                                    b'1' | b'5' => Value::Float(1.0),
+                                    _ => Value::Int(1),
+                                })
+                            })
+                            .collect();
+                        m.interp.preset_args(&values);
+                        let (hw, it) = (&mut m.hw, &mut m.interp);
+                        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            if func {
+                                let _ = Host::function(hw, it, kw);
+                            } else {
+                                let _ = Host::instruction(hw, it, kw);
+                            }
+                        }));
+                        if let Err(e) = r {
+                            let msg = e
+                                .downcast_ref::<String>()
+                                .cloned()
+                                .or(e.downcast_ref::<&str>().map(|s| s.to_string()))
+                                .unwrap_or_default();
+                            bad.push(format!(
+                                "{} (param {omit} omitted, function {func}): {msg}",
+                                d.name
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(bad.is_empty(), "{bad:#?}");
+    }
+
+    /// `Scin(,y)`: the omitted X is EntNul, whose low word (0) is the X
+    /// coordinate (`GetSIn` works on words): no screen there.
+    #[test]
+    fn scin_and_hzone_with_an_omitted_coordinate() {
+        let src = "Reserve Zone 2 : Set Zone 1,0,0 To 100,100\nV=Scin(,60) : W=Scin(130,) : Z=Hzone(,60) : S=Scin(130,60)\n\
+Print V;W;Z;S\n";
+        let prg = crate::tokenise::tokenise_program(src.as_bytes()).unwrap();
+        let mut m = Machine::new();
+        m.run_program(&prg).unwrap();
+        m.vbl();
+        let out: String = m.hw.log.concat();
+        assert_eq!(out, "-2147483648-2147483648 0 0\r\nEnd");
+    }
+}

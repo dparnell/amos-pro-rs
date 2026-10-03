@@ -281,7 +281,14 @@ pub fn make_cblock(
     let tline = bw / 8;
     let xb = ((x as u16) >> 3) as i32;
     let tx = ((w as u16) >> 3) as i32;
-    if xb + tx > tline || (y + h) * tline > tline * bh || h <= 0 || tx <= 0 || y < 0 {
+    // (32 bit arithmetic wrapping like the 68000's: omitted parameters are
+    // EntNul.)
+    if xb + tx > tline
+        || y.wrapping_add(h).wrapping_mul(tline) > tline.wrapping_mul(bh)
+        || h <= 0
+        || tx <= 0
+        || y < 0
+    {
         return None;
     }
     let mut out = Vec::new();

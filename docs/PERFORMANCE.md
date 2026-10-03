@@ -171,6 +171,17 @@ interpreted instructions, load independent):
     states (to check that acceptance depends on the keyword only) and checks
     that the dispatcher uses that handler.
 
+14. **preset_args without allocation**: the preset vector is kept in
+    `Interp` and reused; its values are moved out instead of cloned.
+15. **Omitted coordinates** (`Scin(,y)`, `Hzone`, `Scroll`, `Get Cblock`,
+    `Sprite Base` / `Icon Base`): word / 32 bit arithmetic wraps as on the
+    68000 (EntNul's low word is 0 in `GetSIn` / `ZoEc`) instead of
+    overflowing (debug builds panicked; release results are unchanged). A
+    test calls every keyword with each parameter omitted in turn, as an
+    instruction and as a function, and checks nothing panics (memory range
+    keywords Copy / Fill / Hunt / Bsave / Ssave are skipped: an omitted end
+    address is a 2 GB range).
+
 ## API notes for the compiler side
 
 * `Interp::function_value(hw, kw)` (interp/expr.rs): value of the function

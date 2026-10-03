@@ -354,8 +354,9 @@ impl Screen {
 
     /// Zone under the hardware coordinates (`ZoEc`, +W.s:11083).
     pub fn zone_at_hard(&self, hx: i32, hy: i32) -> i32 {
-        let dx = (hx - self.display_x) as u16;
-        let dy = (hy - self.display_y) as u16;
+        // Word arithmetic (an omitted coordinate is EntNul, low word 0).
+        let dx = hx.wrapping_sub(self.display_x) as u16;
+        let dy = hy.wrapping_sub(self.display_y) as u16;
         if dx as u32 >= self.display_w || dy as u32 >= self.display_h {
             return 0;
         }
@@ -686,8 +687,10 @@ impl Screens {
             if n >= max || s.hidden {
                 continue;
             }
-            let dx = (hx - s.display_x) as u16;
-            let dy = (hy - s.display_y) as u16;
+            // Word arithmetic as in `GetSIn` (+W.s): an omitted coordinate
+            // (EntNul) is word 0.
+            let dx = hx.wrapping_sub(s.display_x) as u16;
+            let dy = hy.wrapping_sub(s.display_y) as u16;
             if (dx as u32) < s.display_w && (dy as u32) < s.display_h {
                 return Some(n);
             }

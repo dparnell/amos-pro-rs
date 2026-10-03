@@ -146,8 +146,11 @@ impl Interp {
     /// or takes the ones given to [`Interp::preset_args`].
     pub fn inst_args(&mut self, hw: &mut dyn Host, kw: Keyword) -> R<Args> {
         let sig = kw.def().map_or("", |d| d.param_types());
-        if let Some(values) = self.preset.take() {
-            return Ok(Args(self.preset_to_args(sig, &values)?));
+        if let Some(mut values) = self.preset.take() {
+            let r = self.preset_to_args(sig, &mut values);
+            values.clear();
+            self.preset_spare = values;
+            return Ok(Args(r?));
         }
         Ok(Args(self.args(hw, sig)?))
     }
@@ -156,8 +159,11 @@ impl Interp {
     /// takes the ones given to [`Interp::preset_args`].
     pub fn func_args(&mut self, hw: &mut dyn Host, kw: Keyword) -> R<Args> {
         let sig = kw.def().map_or("", |d| d.param_types());
-        if let Some(values) = self.preset.take() {
-            return Ok(Args(self.preset_to_args(sig, &values)?));
+        if let Some(mut values) = self.preset.take() {
+            let r = self.preset_to_args(sig, &mut values);
+            values.clear();
+            self.preset_spare = values;
+            return Ok(Args(r?));
         }
         Ok(Args(self.fn_args(hw, sig)?))
     }
@@ -172,7 +178,10 @@ impl Interp {
     ///
     /// [`plain_args`]: crate::machine::plain_args
     pub fn preset_args(&mut self, args: &[Option<Value>]) {
-        self.preset = Some(args.to_vec());
+        let mut v = std::mem::take(&mut self.preset_spare);
+        v.clear();
+        v.extend_from_slice(args);
+        self.preset = Some(v);
     }
 
     /// `args(sig)` on values already evaluated: the same conversions and
@@ -180,13 +189,13 @@ impl Interp {
     /// missing separator of the token path (Syntax error after the last
     /// value given); more values, the separator left unread, is reported
     /// once the signature's values are converted.
-    fn preset_to_args(&self, sig: &str, values: &[Option<Value>]) -> R<ArgVec> {
+    fn preset_to_args(&self, sig: &str, values: &mut [Option<Value>]) -> R<ArgVec> {
         let sig = sig.as_bytes();
         let mut out = ArgVec::default();
         let mut i = 0;
         let mut k = 0;
         while i < sig.len() {
-            let v = match values.get(k).cloned().flatten() {
+            let v = match values.get_mut(k).and_then(Option::take) {
                 None => Value::Int(ENT_NUL),
                 Some(v) => self.convert_param(sig[i], v)?,
             };
@@ -393,6 +402,12 @@ mod tests {
         assert!(checked > 100, "{checked}");
     }
 
+    impl Interp {
+        fn preset_to_args_test(&self, sig: &str, values: &[Option<Value>]) -> R<ArgVec> {
+            self.preset_to_args(sig, &mut values.to_vec())
+        }
+    }
+
     #[test]
     fn preset_conversions_and_errors() {
         let mut it = Interp::new();
@@ -402,7 +417,7 @@ mod tests {
         let show = |r: R<ArgVec>| format!("{:?}", r.map(|a| a.to_vec()));
         // Conversions as `convert_param`, omitted values as ENT_NUL.
         assert_eq!(
-            show(it.preset_to_args("0,1,5,2,3", &[f(2.7), i(3), i(90), s(), None])),
+            show(it.preset_to_args_test("0,1,5,2,3", &[f(2.7), i(3), i(90), s(), None])),
             format!(
                 "{:?}",
                 Ok::<_, Exc>(vec![
@@ -415,7 +430,7 @@ mod tests {
             )
         );
         it.degrees = true;
-        let r = it.preset_to_args("5", &[i(90)]).unwrap();
+        let r = it.preset_to_args_test("5", &[i(90)]).unwrap();
         assert_eq!(
             format!("{:?}", r[0]),
             format!("{:?}", it.convert_param(b'5', Value::Int(90)).unwrap())
@@ -423,32 +438,35 @@ mod tests {
         // Wrong types: the first one met is the error.
         let e = |n: u16| format!("{:?}", Err::<Vec<Value>, _>(Exc::Error(n)));
         assert_eq!(
-            show(it.preset_to_args("0,2", &[s(), i(1)])),
+            show(it.preset_to_args_test("0,2", &[s(), i(1)])),
             e(errors::TYPE_MISMATCH)
         );
         assert_eq!(
-            show(it.preset_to_args("0,2", &[i(1), i(1)])),
+            show(it.preset_to_args_test("0,2", &[i(1), i(1)])),
             e(errors::TYPE_MISMATCH)
         );
         // Fewer values: the missing separator (after converting the last
         // value: a type error comes first).
         assert_eq!(
-            show(it.preset_to_args("0,0", &[i(1)])),
+            show(it.preset_to_args_test("0,0", &[i(1)])),
             e(errors::SYNTAX_ERROR)
         );
         assert_eq!(
-            show(it.preset_to_args("0,0", &[s()])),
+            show(it.preset_to_args_test("0,0", &[s()])),
             e(errors::TYPE_MISMATCH)
         );
-        assert_eq!(show(it.preset_to_args("0,0", &[])), e(errors::SYNTAX_ERROR));
-        assert!(it.preset_to_args("0", &[]).is_ok());
+        assert_eq!(
+            show(it.preset_to_args_test("0,0", &[])),
+            e(errors::SYNTAX_ERROR)
+        );
+        assert!(it.preset_to_args_test("0", &[]).is_ok());
         // More values than the signature.
         assert_eq!(
-            show(it.preset_to_args("0", &[i(1), i(2)])),
+            show(it.preset_to_args_test("0", &[i(1), i(2)])),
             e(errors::SYNTAX_ERROR)
         );
         assert_eq!(
-            show(it.preset_to_args("", &[i(1)])),
+            show(it.preset_to_args_test("", &[i(1)])),
             e(errors::SYNTAX_ERROR)
         );
         // The preset is used once, also when it fails.

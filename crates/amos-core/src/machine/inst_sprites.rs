@@ -1819,7 +1819,7 @@ impl Hardware {
                 // a non zero value when the image exists.
                 let n = it.func_args(self, kw)?.int(0);
                 let icons = kw.token == ICON_BASE;
-                let i = self.ad_image(icons, n.abs())?;
+                let i = self.ad_image(icons, n.wrapping_abs())?;
                 let has = !self.image_bank(icons).unwrap()[i as usize - 1].is_empty();
                 if !has {
                     0

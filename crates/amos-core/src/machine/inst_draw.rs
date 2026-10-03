@@ -531,7 +531,7 @@ impl Hardware {
             }
             tk::SCROLL => {
                 let a = it.inst_args(self, kw)?;
-                let n = a.int(0) - 1;
+                let n = a.int(0).wrapping_sub(1);
                 if !(0..10).contains(&n) {
                     return err(errors::ILLEGAL_FUNCTION_CALL);
                 }

@@ -244,6 +244,9 @@ pub struct Interp {
     /// Parameters of the next `inst_args` / `func_args` call, already
     /// evaluated by compiled code (`preset_args`).
     preset: Option<Vec<Option<Value>>>,
+    /// The vector of the last preset, kept for the next one (no allocation
+    /// per call).
+    preset_spare: Vec<Option<Value>>,
 }
 
 impl Default for Interp {
@@ -291,6 +294,7 @@ impl Interp {
             not_core: Vec::new(),
             host_inst: Vec::new(),
             preset: None,
+            preset_spare: Vec::new(),
         }
     }
 
