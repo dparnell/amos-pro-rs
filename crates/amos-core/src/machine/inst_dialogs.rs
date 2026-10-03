@@ -47,7 +47,9 @@ impl Hardware {
 
     /// Resets the dialogs when a new program runs (fallback for when
     /// `reset` does not call [`Hardware::dialogs_reset`]).
-    fn dialogs_check_program(&mut self, it: &Interp) {
+    /// Resets the dialogs when another program runs (`Dialog(n)` checks
+    /// this before reading its parameter; `dialog_fn` checks it too).
+    pub(crate) fn dialogs_check_program(&mut self, it: &Interp) {
         let id = it.prg.as_ref().map_or(0, |p| Rc::as_ptr(p) as usize);
         if id != self.dialogs.program {
             self.dialogs_reset();

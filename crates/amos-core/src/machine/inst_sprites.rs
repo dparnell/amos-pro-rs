@@ -1094,6 +1094,57 @@ impl Hardware {
         }
     }
 
+    // Collision functions as typed functions (the token path and compiled
+    // code call these with the parameters read). `range` is the `,start To
+    // end` of the second forms; `None` is the whole range of the first
+    // forms.
+
+    /// `Bob Col(n)` / `Bob Col(n,start To end)`: bobs colliding bob `n`.
+    pub(crate) fn bob_col_fn(&mut self, n: i32, range: Option<(i32, i32)>) -> R<i32> {
+        let (start, end) = self.col_range(n, range, 10000, false)?;
+        Ok(self.bob_col(n, start, end, false))
+    }
+
+    /// `Bobsprite Col(n)` / `Bobsprite Col(n,start To end)`: sprites
+    /// colliding bob `n`.
+    pub(crate) fn bobsprite_col_fn(&mut self, n: i32, range: Option<(i32, i32)>) -> R<i32> {
+        let (start, end) = self.col_range(n, range, 63, true)?;
+        Ok(self.bob_col(n, start, end, true))
+    }
+
+    /// `Sprite Col(n)` / `Sprite Col(n,start To end)`: sprites colliding
+    /// sprite `n`.
+    pub(crate) fn sprite_col_fn(&mut self, n: i32, range: Option<(i32, i32)>) -> R<i32> {
+        let (start, end) = self.col_range(n, range, 63, true)?;
+        Ok(self.spr_col(n, start, end, false))
+    }
+
+    /// `Spritebob Col(n)` / `Spritebob Col(n,start To end)`: bobs
+    /// colliding sprite `n`.
+    pub(crate) fn spritebob_col_fn(&mut self, n: i32, range: Option<(i32, i32)>) -> R<i32> {
+        let (start, end) = self.col_range(n, range, 10000, false)?;
+        Ok(self.spr_col(n, start, end, true))
+    }
+
+    /// Checked range of a collision function: `range`, or 0 To `last`;
+    /// `sprites`: the given end may not pass 63.
+    fn col_range(
+        &self,
+        n: i32,
+        range: Option<(i32, i32)>,
+        last: i32,
+        sprites: bool,
+    ) -> R<(i32, i32)> {
+        let (start, end) = range.unwrap_or((0, last));
+        if n < 0 || start < 0 || end < 0 {
+            return err(E_FONCALL);
+        }
+        if range.is_some() && sprites && end > 63 {
+            return err(E_FONCALL);
+        }
+        Ok((start, end))
+    }
+
     /// `BbColl`: bob `n` against bobs (same screen) or sprites (`to_sprites`)
     /// numbered `start..=end`.
     fn bob_col(&mut self, n: i32, start: i32, end: i32, to_sprites: bool) -> i32 {
@@ -1837,29 +1888,17 @@ impl Hardware {
             | SPRITEBOB_COL | SPRITEBOB_COL_2 => {
                 let a = it.func_args(self, kw)?;
                 let n = a.int(0);
-                let two = matches!(
-                    kw.token,
-                    BOB_COL_2 | BOBSPRITE_COL_2 | SPRITE_COL_2 | SPRITEBOB_COL_2
-                );
-                let (start, end) = if two {
-                    (a.int(1), a.int(2))
-                } else {
-                    match kw.token {
-                        BOB_COL | SPRITEBOB_COL => (0, 10000),
-                        _ => (0, 63),
+                let range = match kw.token {
+                    BOB_COL_2 | BOBSPRITE_COL_2 | SPRITE_COL_2 | SPRITEBOB_COL_2 => {
+                        Some((a.int(1), a.int(2)))
                     }
+                    _ => None,
                 };
-                if n < 0 || start < 0 || end < 0 {
-                    return err(E_FONCALL);
-                }
-                if two && matches!(kw.token, BOBSPRITE_COL_2 | SPRITE_COL_2) && end > 63 {
-                    return err(E_FONCALL);
-                }
                 match kw.token {
-                    BOB_COL | BOB_COL_2 => self.bob_col(n, start, end, false),
-                    BOBSPRITE_COL | BOBSPRITE_COL_2 => self.bob_col(n, start, end, true),
-                    SPRITE_COL | SPRITE_COL_2 => self.spr_col(n, start, end, false),
-                    _ => self.spr_col(n, start, end, true),
+                    BOB_COL | BOB_COL_2 => self.bob_col_fn(n, range)?,
+                    BOBSPRITE_COL | BOBSPRITE_COL_2 => self.bobsprite_col_fn(n, range)?,
+                    SPRITE_COL | SPRITE_COL_2 => self.sprite_col_fn(n, range)?,
+                    _ => self.spritebob_col_fn(n, range)?,
                 }
             }
             COL => {

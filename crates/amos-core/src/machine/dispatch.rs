@@ -1062,6 +1062,94 @@ Reserve Zone 5 : Set Zone 1,0,0 To 100,100 : Set Zone 2,40,40 To 60,60\n";
     }
 
     #[test]
+    fn collision_functions() {
+        let objs = "Ink 3 : Bar 0,0 To 15,15 : Get Sprite 1,0,0 To 16,16\n\
+Sprite 1,200,100,1 : Sprite 2,205,105,1 : Sprite 3,300,200,1\n\
+Bob 1,50,50,1 : Bob 2,55,55,1 : Bob 3,150,150,1\n\
+Sprite 4,X Hard(152),Y Hard(152),1 : Wait Vbl";
+        check(
+            objs,
+            "Print Sprite Col(1)",
+            func(|hw, _| hw.sprite_col_fn(1, None)),
+        );
+        check(
+            objs,
+            "Print Sprite Col(1,2 To 3)",
+            func(|hw, _| hw.sprite_col_fn(1, Some((2, 3)))),
+        );
+        check(
+            objs,
+            "Print Sprite Col(1,0 To 64)",
+            func(|hw, _| hw.sprite_col_fn(1, Some((0, 64)))),
+        );
+        check(
+            objs,
+            "Print Sprite Col(-1)",
+            func(|hw, _| hw.sprite_col_fn(-1, None)),
+        );
+        check(
+            objs,
+            "Print Bob Col(1)",
+            func(|hw, _| hw.bob_col_fn(1, None)),
+        );
+        check(
+            objs,
+            "Print Bob Col(1,0 To 500)",
+            func(|hw, _| hw.bob_col_fn(1, Some((0, 500)))),
+        );
+        check(
+            objs,
+            "Print Bob Col(2,3 To 1)",
+            func(|hw, _| hw.bob_col_fn(2, Some((3, 1)))),
+        );
+        check(
+            objs,
+            "Print Bob Col(1,-1 To 5)",
+            func(|hw, _| hw.bob_col_fn(1, Some((-1, 5)))),
+        );
+        check(
+            objs,
+            "Print Bobsprite Col(1)",
+            func(|hw, _| hw.bobsprite_col_fn(1, None)),
+        );
+        check(
+            objs,
+            "Print Bobsprite Col(1,0 To 70)",
+            func(|hw, _| hw.bobsprite_col_fn(1, Some((0, 70)))),
+        );
+        check(
+            objs,
+            "Print Spritebob Col(1)",
+            func(|hw, _| hw.spritebob_col_fn(1, None)),
+        );
+        check(
+            objs,
+            "Print Spritebob Col(4)",
+            func(|hw, _| hw.spritebob_col_fn(4, None)),
+        );
+        check(
+            objs,
+            "Print Bobsprite Col(3)",
+            func(|hw, _| hw.bobsprite_col_fn(3, None)),
+        );
+        check(
+            objs,
+            "Print Bobsprite Col(3,4 To 4)",
+            func(|hw, _| hw.bobsprite_col_fn(3, Some((4, 4)))),
+        );
+        check(
+            objs,
+            "Print Spritebob Col(1,0 To 100)",
+            func(|hw, _| hw.spritebob_col_fn(1, Some((0, 100)))),
+        );
+        check(
+            "",
+            "Print Sprite Col(1)",
+            func(|hw, _| hw.sprite_col_fn(1, None)),
+        );
+    }
+
+    #[test]
     fn menu_dialog_and_memory_keywords() {
         check("", "Print Choice", func(|hw, _| hw.choice_fn(None)));
         check("", "Print Choice(1)", func(|hw, _| hw.choice_fn(Some(1))));
