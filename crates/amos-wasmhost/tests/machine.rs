@@ -339,3 +339,24 @@ fn polling_functions_match_the_interpreter() {
         compare_with_input(p, 40);
     }
 }
+
+/// Peek / Poke & co called directly (`plain_args`) on memory mapped to
+/// variables by Varptr (the interpreter's variables: Varptr keeps them in
+/// the interpreter, `structure::resident_vars`) and on banks; Zone, Hzone,
+/// Mouse Zone, Scancode, Screen as functions.
+#[test]
+fn memory_and_zone_functions_match_the_interpreter() {
+    let progs = [
+        "Curs Off\nA=5 : P=Varptr(A) : Print Leek(P) : Loke P,1234 : Print A\nDoke P+2,7 : Print A;Deek(P);Peek(P+3) : Poke P+3,9 : Print A;Leek(P)",
+        "Curs Off\nB#=1.5 : P=Varptr(B#) : Print Leek(P) : Loke P,Leek(P)+256 : Print B#",
+        "Curs Off\nDim T(3) : T(1)=77 : P=Varptr(T(0)) : Print Leek(P+4) : Loke P+8,99 : Print T(2);T(1)",
+        "Curs Off\nS$=\"hello\" : P=Varptr(S$) : Print Peek(P);Peek(P+4) : Poke P,72 : Print S$",
+        "Curs Off\nA=0 : P=Varptr(A) : For I=1 To 300 : Loke P,Leek(P)+I : Next : Print A\nFor I=1 To 300 : A=A-1 : Q=Leek(P) : Next : Print A;Q",
+        "Curs Off\nTEST[3]\nProcedure TEST[N]\nL=N*10 : P=Varptr(L) : Loke P,Leek(P)*2 : Print L\nEnd Proc",
+        "Curs Off\nReserve As Work 10,256 : S=Start(10)\nFor I=0 To 255 : Poke S+I,I : Next\nT=0 : For I=0 To 255 : T=T+Peek(S+I) : Next : Print T\nDoke S,$1234 : Loke S+4,-2 : Print Deek(S);Leek(S+4);Peek(S+1)",
+        "Curs Off\nReserve Zone 3 : Set Zone 1,0,0 To 50,50 : Set Zone 2,60,0 To 120,40\nDo : Z=Zone(X Screen(X Mouse),Y Screen(Y Mouse)) : H=Hzone(X Mouse,Y Mouse) : M=Mouse Zone : S=Scancode : C=Screen\nInc N : If N mod 3000=0 Then Print Z;H;M;S;C;Zone(0,10,10);Zone(65,5);Hzone(0,200,100)\nLoop",
+    ];
+    for p in progs {
+        compare_with_input(p, 12);
+    }
+}
