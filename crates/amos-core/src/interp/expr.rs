@@ -18,7 +18,76 @@ use crate::tokens::{tk, *};
 impl Interp {
     /// Evaluates an expression at pc.
     pub fn eval(&mut self, hw: &mut dyn Host) -> R<Value> {
+        // Integer expressions (constants, integer variables, integer
+        // operators) are evaluated without values first; anything else, or
+        // an error, and the expression is evaluated again the general way
+        // (the attempt has no side effects).
+        let mut p = self.pc;
+        if let Some(v) = self.int_prec(&mut p, 0x7FFF) {
+            self.pc = p;
+            return Ok(Value::Int(v));
+        }
         self.eval_prec(hw, 0x7FFF)
+    }
+
+    /// `eval_prec` for an integer only expression at `*p` (moved past it),
+    /// `None` when the expression is not one (or fails).
+    fn int_prec(&self, p: &mut usize, min: u16) -> Option<i32> {
+        let mut lhs = self.int_operand(p)?;
+        loop {
+            let op = self.rd(*p);
+            if op & 0x8000 == 0 || op <= min {
+                return Some(lhs);
+            }
+            *p += 2;
+            let rhs = self.int_prec(p, op)?;
+            lhs = int_binop(op, lhs, rhs)?;
+        }
+    }
+
+    /// `operand` for an integer: constant, integer scalar variable,
+    /// parenthesised integer expression or Not, with unary minus.
+    fn int_operand(&self, p: &mut usize) -> Option<i32> {
+        let mut negate = false;
+        while self.rd(*p) & 0x8000 != 0 {
+            *p += 2;
+            negate = true;
+        }
+        let q = *p;
+        let v = match self.rd(q) {
+            TK_ENT | TK_HEX | TK_BIN => {
+                *p = q + 6;
+                read_u32(&self.code, q + 2) as i32
+            }
+            TK_VAR => {
+                let flags = self.code[q + 5];
+                if flags & (crate::program::var_flags::ARRAY | 3) != 0 {
+                    return None;
+                }
+                let v = match self.var_slot_ref(self.rd(q + 2)) {
+                    Var::Scalar(Value::Int(i)) => *i,
+                    Var::Unset => 0,
+                    _ => return None,
+                };
+                *p = q + 6 + self.code[q + 4] as usize;
+                v
+            }
+            TK_PAR1 => {
+                *p = q + 2;
+                let v = self.int_prec(p, 0x7FFF)?;
+                if self.rd(*p) != TK_PAR2 {
+                    return None;
+                }
+                *p += 2;
+                v
+            }
+            TK_NOT => {
+                *p = q + 2;
+                !self.int_prec(p, 0x7FFF)?
+            }
+            _ => return None,
+        };
+        Some(if negate { v.wrapping_neg() } else { v })
     }
 
     pub fn eval_int(&mut self, hw: &mut dyn Host) -> R<i32> {
@@ -698,6 +767,29 @@ impl Interp {
                 return r as i32;
             }
         }
+    }
+}
+
+/// `binop` on two integers when its result is an integer (`None` for
+/// other operators and on errors).
+#[inline]
+fn int_binop(op: u16, x: i32, y: i32) -> Option<i32> {
+    use tk::*;
+    let v = match op {
+        OP_AND => Value::Int(x & y),
+        OP_OR => Value::Int(x | y),
+        OP_XOR => Value::Int(x ^ y),
+        OP_MOD => int_mod(x, y),
+        OP_EQ | OP_NE | OP_NE2 | OP_LT | OP_GT | OP_LE | OP_LE2 | OP_GE | OP_GE2 => compare_result(op, x.cmp(&y)),
+        OP_PLUS => int_add(x, y).ok()?,
+        OP_MINUS => int_sub(x, y).ok()?,
+        OP_MUL => int_mul(x, y).ok()?,
+        OP_DIV => int_div(x, y).ok()?,
+        _ => return None,
+    };
+    match v {
+        Value::Int(i) => Some(i),
+        _ => None,
     }
 }
 

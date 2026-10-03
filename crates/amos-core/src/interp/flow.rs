@@ -69,43 +69,17 @@ impl Interp {
     }
 
     /// Executes a control flow instruction. Returns false if `t` is not one.
+    /// The instructions of loops and tests are here; the others in
+    /// `exec_flow_other` (kept out of line: a small function for the
+    /// instructions executed most).
     pub fn exec_flow(&mut self, hw: &mut dyn Host, t: u16) -> R<bool> {
         let p = self.pc; // position of the token
         match t {
-            TK_FOR => {
-                let field = p + 2;
-                self.pc = p + 4;
-                let (var, ty) = self.var_ref(hw)?;
-                self.expect(tk::OP_EQ)?;
-                let start = self.eval(hw)?;
-                self.write_loc(&var, ty, start)?;
-                self.expect(TK_TO)?;
-                let limit = self.eval_int(hw)?;
-                let step = if self.peek() == tk::STEP {
-                    self.pc += 2;
-                    self.eval_int(hw)?
-                } else {
-                    1
-                };
-                let body = self.statement_start(self.pc);
-                let exit = self.field_target(field);
-                self.push_ctl(Ctl::For { var, step, limit, body, exit })?;
-            }
             TK_REPEAT | TK_DO => {
                 let exit = self.field_target(p + 2);
                 let body = self.statement_start(p + 4);
                 self.pc = p + 4;
                 self.push_ctl(if t == TK_DO { Ctl::Do { body, exit } } else { Ctl::Repeat { body, exit } })?;
-            }
-            TK_WHILE => {
-                let exit = self.field_target(p + 2);
-                self.pc = p + 4;
-                if self.eval_cond(hw)? {
-                    let body = self.statement_start(self.pc);
-                    self.push_ctl(Ctl::While { start: p, body, exit })?;
-                } else {
-                    self.pc = exit;
-                }
             }
             tk::NEXT => {
                 self.test_point(hw)?;
@@ -183,6 +157,44 @@ impl Interp {
                 self.pc = target;
             }
             tk::END_IF => self.pc = p + 2,
+            _ => return self.exec_flow_other(hw, t),
+        }
+        Ok(true)
+    }
+
+    #[inline(never)]
+    fn exec_flow_other(&mut self, hw: &mut dyn Host, t: u16) -> R<bool> {
+        let p = self.pc; // position of the token
+        match t {
+            TK_FOR => {
+                let field = p + 2;
+                self.pc = p + 4;
+                let (var, ty) = self.var_ref(hw)?;
+                self.expect(tk::OP_EQ)?;
+                let start = self.eval(hw)?;
+                self.write_loc(&var, ty, start)?;
+                self.expect(TK_TO)?;
+                let limit = self.eval_int(hw)?;
+                let step = if self.peek() == tk::STEP {
+                    self.pc += 2;
+                    self.eval_int(hw)?
+                } else {
+                    1
+                };
+                let body = self.statement_start(self.pc);
+                let exit = self.field_target(field);
+                self.push_ctl(Ctl::For { var, step, limit, body, exit })?;
+            }
+            TK_WHILE => {
+                let exit = self.field_target(p + 2);
+                self.pc = p + 4;
+                if self.eval_cond(hw)? {
+                    let body = self.statement_start(self.pc);
+                    self.push_ctl(Ctl::While { start: p, body, exit })?;
+                } else {
+                    self.pc = exit;
+                }
+            }
             tk::THEN => return err(errors::SYNTAX_ERROR),
             tk::GOTO => {
                 self.test_point(hw)?;

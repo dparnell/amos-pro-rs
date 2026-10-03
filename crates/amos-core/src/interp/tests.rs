@@ -203,3 +203,19 @@ fn shared_string_constants_are_never_changed() {
     let src = "For I=1 To 3\nA$=\"abc\" : Mid$(A$,1,1)=\"X\" : Left$(A$,1)=\"Y\" : Right$(A$,1)=\"Z\"\nPrint A$;\"abc\"\nNext I";
     assert_eq!(run(src), "YbZabc\nYbZabc\nYbZabc\n");
 }
+
+#[test]
+fn integer_expressions_fast_and_general_agree() {
+    // Integer only expressions take the fast evaluator; the same values
+    // through a float variable take the general one.
+    let src = "A=7 : B=-3 : C#=1.0\n\
+Print A+B*2-(A/2) mod 3;A*B/2;Not A=7;-A+-B;(A and 3) or (B xor 5);A>B;A<=B;10*3/4\n\
+Print A+B*2-(A/2) mod 3+C#-1.0\n\
+Print $7FFFFFFF-1;%101+$10;U;-(-A)\n";
+    // (Expected output from the evaluator before the fast path.)
+    assert_eq!(run(src), " 1-7 0-4-5-1 0 0\n 1\n 2147483646 21 0 7\n");
+    // Errors: the same as the general evaluator.
+    assert_eq!(run_err("A=$7FFFFFFF : B=A+1"), StopReasonOrError::Error(crate::errors::OVERFLOW));
+    assert_eq!(run_err("A=0 : B=5/A"), StopReasonOrError::Error(crate::errors::DIVISION_BY_ZERO));
+    assert_eq!(run_err("A=0 : B=5/(A*1)+1"), StopReasonOrError::Error(crate::errors::DIVISION_BY_ZERO));
+}

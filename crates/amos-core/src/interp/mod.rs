@@ -462,6 +462,21 @@ impl Interp {
     // Variables
     // ------------------------------------------------------------------
 
+    /// `var_slot` for reading.
+    #[inline]
+    pub fn var_slot_ref(&self, slot: u16) -> &Var {
+        if slot & GLOBAL != 0 {
+            return &self.globals[(slot & !GLOBAL) as usize];
+        }
+        match self.frame_stack.last() {
+            None => &self.globals[slot as usize],
+            Some(&idx) => match &self.ctl[idx] {
+                Ctl::Proc(f) => &f.locals[slot as usize],
+                _ => unreachable!("procedure frame expected"),
+            },
+        }
+    }
+
     /// Variables of the current procedure (or globals in the main program).
     #[inline]
     fn frame_vars(&mut self, frame: usize) -> &mut Vec<Var> {
