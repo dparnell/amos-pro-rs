@@ -113,27 +113,135 @@ pub fn plain_args(kw: Keyword) -> bool {
         )
 }
 
+type InstructionHandler = fn(&mut Hardware, &mut Interp, Keyword) -> R<bool>;
+type FunctionHandler = fn(&mut Hardware, &mut Interp, Keyword) -> R<Option<Value>>;
+
+/// The instruction handlers from `FIRST_DIRECT` on, in chain order. (Only
+/// these: taking the address of the first ones would stop them from being
+/// inlined into the chain, which then gets slower.)
+const LATE_INSTRUCTION_HANDLERS: [InstructionHandler; 6] = [
+    Hardware::banks_instruction,
+    Hardware::files_instruction,
+    Hardware::menus_instruction,
+    Hardware::dialogs_instruction,
+    Hardware::copper_instruction,
+    Hardware::system_instruction,
+];
+
+/// The function handlers from `FIRST_DIRECT` on, in chain order.
+const LATE_FUNCTION_HANDLERS: [FunctionHandler; 6] = [
+    Hardware::banks_function,
+    Hardware::files_function,
+    Hardware::dialogs_function,
+    Hardware::copper_function,
+    Hardware::menus_function,
+    Hardware::system_function,
+];
+
+/// Number of subsystem handlers (instructions and functions).
+#[cfg(test)]
+const HANDLERS: u8 = 12;
+
+/// Handlers from this one on (1-based, chain order) are remembered per
+/// keyword and called directly; the ones before are tried in turn.
+const FIRST_DIRECT: u8 = 7;
+
+/// Keyword -> number (1-based, 0 = not met yet) of the subsystem handler
+/// that accepted it, for instructions and functions: learnt from the chain
+/// the first time a keyword is met.
+#[derive(Default)]
+pub struct DispatchCache {
+    inst: [Vec<u8>; crate::tokens::EXTENSION_SLOTS],
+    func: [Vec<u8>; crate::tokens::EXTENSION_SLOTS],
+}
+
+impl DispatchCache {
+    #[inline]
+    fn get(&self, kw: Keyword, func: bool) -> u8 {
+        let t = if func { &self.func } else { &self.inst };
+        t.get(kw.slot as usize)
+            .and_then(|v| v.get(kw.token as usize))
+            .copied()
+            .unwrap_or(0)
+    }
+
+    fn set(&mut self, kw: Keyword, func: bool, h: u8) {
+        let t = if func { &mut self.func } else { &mut self.inst };
+        if let Some(v) = t.get_mut(kw.slot as usize) {
+            let i = kw.token as usize;
+            if v.len() <= i {
+                v.resize(i + 1, 0);
+            }
+            v[i] = h;
+        }
+    }
+}
+
+#[cfg(test)]
+impl Hardware {
+    /// Instruction handler number `h` (1-based), in the order of the chain.
+    fn instruction_by(&mut self, h: u8, it: &mut Interp, kw: Keyword) -> R<bool> {
+        match h {
+            1 => self.screen_instruction(it, kw),
+            2 => self.text_instruction(it, kw),
+            3 => self.draw_instruction(it, kw),
+            4 => self.sprites_instruction(it, kw),
+            5 => self.sound_instruction(it, kw),
+            6 => self.input_instruction(it, kw),
+            7..=HANDLERS => LATE_INSTRUCTION_HANDLERS[(h - FIRST_DIRECT) as usize](self, it, kw),
+            _ => Ok(false),
+        }
+    }
+
+    /// Function handler number `h` (1-based), in the order of the chain.
+    fn function_by(&mut self, h: u8, it: &mut Interp, kw: Keyword) -> R<Option<Value>> {
+        match h {
+            1 => self.screen_function(it, kw),
+            2 => self.text_function(it, kw),
+            3 => self.draw_function(it, kw),
+            4 => self.sprites_function(it, kw),
+            5 => self.sound_function(it, kw),
+            6 => self.input_function(it, kw),
+            7..=HANDLERS => LATE_FUNCTION_HANDLERS[(h - FIRST_DIRECT) as usize](self, it, kw),
+            _ => Ok(None),
+        }
+    }
+}
+
 impl Host for Hardware {
     fn instruction(&mut self, it: &mut Interp, kw: Keyword) -> R<()> {
+        // The subsystems in priority order. The first ones are inlined here
+        // (the compiler merges their keyword tests). The later ones are big
+        // functions called one after the other: the one that accepted a
+        // keyword is remembered and called directly the next time. Each
+        // handler accepts or refuses a keyword by its value alone (tested
+        // below), so the ones before it would refuse it again.
         if self.screen_instruction(it, kw)?
             || self.text_instruction(it, kw)?
             || self.draw_instruction(it, kw)?
             || self.sprites_instruction(it, kw)?
             || self.sound_instruction(it, kw)?
             || self.input_instruction(it, kw)?
-            || self.banks_instruction(it, kw)?
-            || self.files_instruction(it, kw)?
-            || self.menus_instruction(it, kw)?
-            || self.dialogs_instruction(it, kw)?
-            || self.copper_instruction(it, kw)?
-            || self.system_instruction(it, kw)?
         {
             return Ok(());
+        }
+        let known = self.dispatch.get(kw, false);
+        if known >= FIRST_DIRECT
+            && LATE_INSTRUCTION_HANDLERS[(known - FIRST_DIRECT) as usize](self, it, kw)?
+        {
+            return Ok(());
+        }
+        for (h, f) in (FIRST_DIRECT..).zip(LATE_INSTRUCTION_HANDLERS) {
+            if f(self, it, kw)? {
+                self.dispatch.set(kw, false, h);
+                return Ok(());
+            }
         }
         not_implemented(kw)
     }
 
     fn function(&mut self, it: &mut Interp, kw: Keyword) -> R<Value> {
+        // As `instruction`.
         if let Some(v) = self.screen_function(it, kw)? {
             return Ok(v);
         }
@@ -152,23 +260,17 @@ impl Host for Hardware {
         if let Some(v) = self.input_function(it, kw)? {
             return Ok(v);
         }
-        if let Some(v) = self.banks_function(it, kw)? {
+        let known = self.dispatch.get(kw, true);
+        if known >= FIRST_DIRECT
+            && let Some(v) = LATE_FUNCTION_HANDLERS[(known - FIRST_DIRECT) as usize](self, it, kw)?
+        {
             return Ok(v);
         }
-        if let Some(v) = self.files_function(it, kw)? {
-            return Ok(v);
-        }
-        if let Some(v) = self.dialogs_function(it, kw)? {
-            return Ok(v);
-        }
-        if let Some(v) = self.copper_function(it, kw)? {
-            return Ok(v);
-        }
-        if let Some(v) = self.menus_function(it, kw)? {
-            return Ok(v);
-        }
-        if let Some(v) = self.system_function(it, kw)? {
-            return Ok(v);
+        for (h, f) in (FIRST_DIRECT..).zip(LATE_FUNCTION_HANDLERS) {
+            if let Some(v) = f(self, it, kw)? {
+                self.dispatch.set(kw, true, h);
+                return Ok(v);
+            }
         }
         not_implemented(kw)
     }
@@ -320,5 +422,99 @@ Ink 5 : Circle 8,8,6 : Get Bob 2,0,0 To 16,16\nReserve Zone 5 : Set Zone 1,0,0 T
             }
         }
         assert!(checked > 100, "{checked}");
+    }
+
+    /// Number of the first subsystem of the chain that accepts `kw` (does
+    /// not refuse it: accepting includes failing or panicking on the probe
+    /// parameters), on a fresh machine prepared by `setup`.
+    fn probe(kw: Keyword, func: bool, setup: &str, dir: &std::path::Path) -> Option<u8> {
+        let prg = crate::tokenise::tokenise_program(setup.as_bytes()).unwrap();
+        let mut m = Machine::new();
+        m.hw.files.set_native_root(dir);
+        m.run_program(&prg).unwrap();
+        m.vbl();
+        let sig = kw.def().map_or("", |d| d.param_types()).as_bytes();
+        let values: Vec<Option<Value>> = sig
+            .iter()
+            .step_by(2)
+            .map(|t| match t {
+                b'2' => Some(Value::str(b"")),
+                b'1' | b'5' => Some(Value::Float(1.0)),
+                _ => Some(Value::Int(1)),
+            })
+            .collect();
+        for h in 1..=HANDLERS {
+            if !values.is_empty() {
+                m.interp.preset_args(&values);
+            }
+            let (hw, it) = (&mut m.hw, &mut m.interp);
+            let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                if func {
+                    matches!(hw.function_by(h, it, kw), Ok(None))
+                } else {
+                    matches!(hw.instruction_by(h, it, kw), Ok(false))
+                }
+            }))
+            .unwrap_or(false);
+            if !refused {
+                return Some(h);
+            }
+        }
+        None
+    }
+
+    /// The dispatch cache relies on every subsystem accepting or refusing a
+    /// keyword by its value alone: for every keyword of every extension, as
+    /// an instruction and as a function, the chain picks the same subsystem
+    /// in two very different machine states, and the dispatcher (cache
+    /// learnt through `Host::instruction` / `Host::function`) uses it.
+    #[test]
+    fn dispatch_picks_the_handler_of_the_chain_for_every_keyword() {
+        let dir = std::env::temp_dir().join(format!("amos-dispatch-test-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let other = "Screen Open 2,640,200,4,Hires\nScreen Close 0\nDouble Buffer\nReserve As Work 10,64\n\
+Reserve Zone 3\nDegree\nGet Bob 1,0,0 To 16,16\nWind Open 1,0,0,20,10\n";
+        let prev_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let mut checked = 0;
+        for (slot, table) in crate::tokens::EXTENSIONS.iter().enumerate() {
+            for d in table.iter() {
+                let kw = Keyword {
+                    slot: slot as u8,
+                    token: d.token,
+                };
+                for func in [false, true] {
+                    let a = probe(kw, func, "", &dir);
+                    let b = probe(kw, func, other, &dir);
+                    assert_eq!(a, b, "{} {:?} (function: {func})", d.name, kw);
+                    let Some(h) = a else { continue };
+                    // The dispatcher on a machine where the keyword is new
+                    // learns this handler when the call succeeds.
+                    let prg = crate::tokenise::tokenise_program(b"").unwrap();
+                    let mut m = Machine::new();
+                    m.hw.files.set_native_root(&dir);
+                    m.run_program(&prg).unwrap();
+                    let (hw, it) = (&mut m.hw, &mut m.interp);
+                    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        if func {
+                            let _ = Host::function(hw, it, kw);
+                        } else {
+                            let _ = Host::instruction(hw, it, kw);
+                        }
+                    }));
+                    let learnt = m.hw.dispatch.get(kw, func);
+                    assert!(
+                        learnt == 0 || learnt == h,
+                        "{} {:?}: {learnt} vs {h}",
+                        d.name,
+                        kw
+                    );
+                    checked += 1;
+                }
+            }
+        }
+        std::panic::set_hook(prev_hook);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(checked > 700, "{checked}");
     }
 }

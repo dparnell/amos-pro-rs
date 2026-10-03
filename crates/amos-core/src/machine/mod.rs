@@ -108,6 +108,8 @@ pub struct Hardware {
     pub copper: crate::gfx::copper::Copper,
     /// Interface dialogs, resource bank, file selector.
     pub dialogs: crate::interface::DialogState,
+    /// Which subsystem handles each keyword (learnt as keywords are met).
+    pub dispatch: dispatch::DispatchCache,
 }
 
 impl Hardware {
@@ -143,6 +145,7 @@ impl Hardware {
             menu_session: None,
             copper: Default::default(),
             dialogs: Default::default(),
+            dispatch: Default::default(),
         };
         hw.reset();
         hw

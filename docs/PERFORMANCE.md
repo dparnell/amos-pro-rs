@@ -154,6 +154,23 @@ interpreted instructions, load independent):
     took 30 ms per VBL made the app run up to 12 VBLs per redraw: a few
     frames per second.)
 
+13. **Keyword dispatch** (`machine/dispatch.rs`): measured first. The six
+    first subsystems of the chain (screen, text, draw, sprites, sound,
+    input) are inlined into `Host::instruction` / `Host::function` and the
+    compiler already merges their keyword tests into one switch, so they
+    cost nothing to skip. A table of all twelve handlers made it slower:
+    once their address is taken they stop being inlined (Scin / X Mouse /
+    Mouse Key loop +3% instructions, +10% cycles). The kept version leaves
+    that part as it was and only remembers, per keyword, which of the six
+    later subsystems (banks, files, menus, dialogs, copper, system: big
+    functions called out of line) accepted it, calling it directly next
+    time. `X=Choice` loop: 78.2 -> 61.4 M instructions per frame; the
+    keywords of the first six subsystems are unchanged (same code).
+    A test probes every keyword of every extension, as an instruction and
+    as a function, through the chain on two machines in very different
+    states (to check that acceptance depends on the keyword only) and checks
+    that the dispatcher uses that handler.
+
 ## API notes for the compiler side
 
 * `Interp::function_value(hw, kw)` (interp/expr.rs): value of the function
