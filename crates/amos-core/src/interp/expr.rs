@@ -175,7 +175,20 @@ impl Interp {
                 return Ok(lhs);
             }
             self.pc += 2;
-            let rhs = self.eval_prec(hw, op)?;
+            // After an integer (e.g. a function value: `Mouse Key and
+            // M>0`), the right operand is tried as an integer only
+            // expression first, as `eval` does.
+            let mut p = self.pc;
+            let rhs = match lhs {
+                Value::Int(_) => match self.int_prec(&mut p, op) {
+                    Some(v) => {
+                        self.pc = p;
+                        Value::Int(v)
+                    }
+                    None => self.eval_prec(hw, op)?,
+                },
+                _ => self.eval_prec(hw, op)?,
+            };
             lhs = self.binop(op, lhs, rhs)?;
         }
     }

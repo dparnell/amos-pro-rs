@@ -438,3 +438,38 @@ Print T(I)=2;T(1) And 3;F#(2)+T(1);S$(1)+\"y\";(T(5)+T(6))*-1;Not T(0)\n";
     ];
     assert_eq!(errs, expected);
 }
+
+/// Right operands after an integer value are tried as integer only
+/// expressions: the same values and errors as the general path (expected
+/// values from the interpreter before the change).
+#[test]
+fn integer_right_operands_after_a_function() {
+    let src = "A$=\"abc\" : B=4 : C=-7 : D#=2.5 : Dim T(5) : T(2)=9\n\
+Print Len(A$)*2+3*4;Len(A$)-1-1;Len(A$)-B*C;Len(A$)=3 and B<5 or C>2;Len(A$)+T(2)*T(2)\n\
+Print Len(A$)+1.5;Len(A$)+D#;Len(A$)*B/2;Len(A$) mod 2+B;Asc(\"A\")-B^2;Len(A$)<>B xor C\n\
+Print Len(A$)+(B+C)*2;Len(A$)>B=0;-Len(A$)-B;Len(A$)+Not B;Abs(C)+B*(B-1)/2\n";
+    let out = run(src);
+    let cases = [
+        "A=Len(\"ab\")+$7FFFFFFF*2",
+        "B=0 : A=Len(\"ab\")+5/B",
+        "A=Len(\"ab\")+5 mod 0",
+        "A=Len(\"ab\")+\"x\"",
+        "A=Abs(-3)+$7FFFFFFF",
+        "B=$7FFFFFFF : A=Len(\"ab\")-B-B",
+    ];
+    let errs: Vec<String> = cases
+        .iter()
+        .map(|c| format!("{:?}", run_with(c, &[])))
+        .collect();
+    assert_eq!(out, " 18 1 31-1 84\n 4.5 5.5 6 5 49 6\n-3-1-7-2 11\n");
+    let overflow = "Err(Error(29))";
+    let expected = [
+        overflow,
+        "Err(Error(20))",
+        "Ok(\"\")",
+        "Err(Test(40))",
+        overflow,
+        overflow,
+    ];
+    assert_eq!(errs, expected);
+}
