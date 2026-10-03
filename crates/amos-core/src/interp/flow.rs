@@ -1,6 +1,8 @@
 //! Control flow instructions (`+ILib.s`): loops, tests, jumps, procedures,
 //! Data/Read, error handling and events.
 
+use std::rc::Rc;
+
 use super::value::Value;
 use super::verify::token_size;
 use super::{Ctl, EveryTarget, Exc, Host, Interp, OnError, R, StopReason, err};
@@ -66,6 +68,30 @@ impl Interp {
             }
             _ => err(errors::SYNTAX_ERROR),
         }
+    }
+
+    /// Where an Else / Else If at `p` jumps (`else_exit`, remembered per
+    /// position for the current program: the map lookup hashes).
+    fn else_target(&mut self, p: usize) -> usize {
+        let prg = self.prg.as_ref().expect("no program");
+        if !self.else_cache_prg.as_ref().is_some_and(|c| Rc::ptr_eq(c, prg)) {
+            self.else_cache_prg = Some(prg.clone());
+            self.else_cache.clear();
+        }
+        let k = p / 2;
+        if let Some(&t) = self.else_cache.get(k)
+            && t != 0
+        {
+            return t as usize;
+        }
+        let target = self.compiled().else_exit.get(&p).copied().unwrap_or(p + 4);
+        if u32::try_from(target).is_ok_and(|t| t != 0) {
+            if self.else_cache.len() <= k {
+                self.else_cache.resize(k + 1, 0);
+            }
+            self.else_cache[k] = target as u32;
+        }
+        target
     }
 
     /// Executes a control flow instruction. Returns false if `t` is not one.
@@ -153,8 +179,7 @@ impl Interp {
             TK_ELSE | TK_ELSE_IF => {
                 // Reached at the end of the previous branch: go to End If
                 // (or the end of a one-line If).
-                let target = self.compiled().else_exit.get(&p).copied().unwrap_or(p + 4);
-                self.pc = target;
+                self.pc = self.else_target(p);
             }
             tk::END_IF => self.pc = p + 2,
             _ => return self.exec_flow_other(hw, t),

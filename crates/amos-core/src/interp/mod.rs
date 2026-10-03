@@ -259,6 +259,10 @@ pub struct Interp {
     /// `code` is this code (not for direct mode lines or code swapped in).
     prog_code: Rc<Vec<u8>>,
     str_consts: Vec<Option<value::AStr>>,
+    /// Targets of the Else / Else If met (index = position / 2, 0 = not
+    /// known yet) for the program `else_cache_prg`.
+    pub(crate) else_cache: Vec<u32>,
+    pub(crate) else_cache_prg: Option<Rc<Compiled>>,
 }
 
 impl Default for Interp {
@@ -311,6 +315,8 @@ impl Interp {
             proc_args: Vec::new(),
             prog_code: Rc::new(Vec::new()),
             str_consts: Vec::new(),
+            else_cache: Vec::new(),
+            else_cache_prg: None,
         }
     }
 
