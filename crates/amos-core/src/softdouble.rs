@@ -90,6 +90,17 @@ pub fn neg(v: u64) -> u64 {
     if efield(v) == 0 { 0 } else { v ^ SIGN }
 }
 
+/// `L3DE1C`: sign test (-1, 0, 1); a zero exponent field is 0.
+pub fn test(v: u64) -> i32 {
+    if efield(v) == 0 {
+        0
+    } else if v & SIGN != 0 {
+        -1
+    } else {
+        1
+    }
+}
+
 /// `L3DDC6`: compares `a` with `b`: -1, 0 or 1 (sign and magnitude; a zero
 /// exponent field is 0).
 pub fn cmp(a: u64, b: u64) -> i32 {
@@ -143,6 +154,29 @@ pub fn add(a: u64, b: u64) -> u64 {
     let (p, q) = if s4 != 0 { (m5, m4) } else { (m4, m5) };
     let (r, borrow) = p.overflowing_sub(q);
     if borrow { pack(r.wrapping_neg(), e4, 0xFF) } else { pack(r, e4, 0) }
+}
+
+/// `L3DE7A`: `a - b` (the sign of `b` flipped, then `add`).
+pub fn sub(a: u64, b: u64) -> u64 {
+    add(a, b ^ SIGN)
+}
+
+/// `L3DD4A`: double -> long, truncated towards zero. From 2^32: $7FFFFFFF,
+/// negated if bit 31 of the low long is set (the original tests the wrong
+/// register there).
+pub fn to_long(v: u64) -> i32 {
+    let (hi, lo) = ((v >> 32) as u32, v as u32);
+    let neg = hi & 0x8000_0000 != 0;
+    let e = ((hi >> 20) & 0x7FF) as i32 - 0x3FF;
+    if e < 0 {
+        return 0;
+    }
+    if e > 0x1F {
+        return if lo & 0x8000_0000 != 0 { -0x7FFF_FFFF } else { 0x7FFF_FFFF };
+    }
+    let m = (hi << 11) | 0x8000_0000 | (lo >> 21);
+    let r = m >> (0x1F - e);
+    if neg { (r as i32).wrapping_neg() } else { r as i32 }
 }
 
 /// `L3DFA0`: `a * b`. The 16 bit word products of weight 2^48 and more
@@ -406,7 +440,7 @@ pub fn asc_to_f64(s: &[u8]) -> f64 {
 
 #[cfg(test)]
 #[path = "softdouble_reference.rs"]
-mod reference;
+pub(crate) mod reference;
 
 #[cfg(test)]
 mod tests {
@@ -457,6 +491,13 @@ mod tests {
             assert_eq!(cmp(a, b), reference::cmp(a, b), "cmp {a:016X} {b:016X}");
             assert_eq!(neg(a), reference::neg(a), "neg {a:016X}");
         }
+        for _ in 0..count(1_000_000) {
+            let a = operand(&mut r);
+            assert_eq!(to_long(a), reference::to_long(a), "to_long {a:016X}");
+            assert_eq!(test(a), reference::test(a), "test {a:016X}");
+            let b = operand(&mut r);
+            assert_eq!(sub(a, b), reference::sub(a, b), "sub {a:016X} {b:016X}");
+        }
         for v in (-70_000i32..70_000).chain([i32::MIN, i32::MAX, i32::MIN + 1]) {
             assert_eq!(from_long(v), reference::from_long(v), "{v}");
             assert_eq!(from_long(v), (v as f64).to_bits(), "{v}");
@@ -472,6 +513,77 @@ mod tests {
             let d = (r.next() & 0x800F_0000_0000_0000) | (r.below(0x7FE) + 1) << 52;
             assert_eq!(div(a, d), reference::div(a, d), "div {a:016X} {d:016X}");
             assert_eq!(div(d, d), reference::div(d, d), "div {d:016X} {d:016X}");
+        }
+    }
+
+    /// The operations of `Dtoa` other than its rounding addition give the
+    /// IEEE results on the values reaching them (`ffp::dtoa` relies on it):
+    /// x * 10 for normal x < 1 (10 has a single mantissa word and the
+    /// operand 11 zero low bits: the product is exact before its single
+    /// rounding), x / 10 for x >= 10 (the quotient n * 2^14 / 5 is never a
+    /// half with a remainder), x - trunc(x) for x < 10 (exact), the
+    /// truncation and the comparisons.
+    #[test]
+    fn dtoa_operations_are_ieee() {
+        let mut r = Rng(0x1EEE_7357_D70A_0001);
+        let step = if cfg!(debug_assertions) { 997 } else { 13 };
+        let check = |x: f64| {
+            let b = x.to_bits();
+            if x < 1.0 {
+                assert_eq!(mul(b, TEN), (x * 10.0).to_bits(), "{x:e} * 10");
+            }
+            if x >= 10.0 {
+                assert_eq!(div(b, TEN), (x / 10.0).to_bits(), "{x:e} / 10");
+            }
+            if x < 10.0 {
+                let d = to_long(b);
+                assert_eq!(d, x as i32, "trunc {x:e}");
+                assert_eq!(sub(b, from_long(d)), (x - d as f64).to_bits(), "{x:e} - {d}");
+            }
+            for c in [ONE, TEN] {
+                assert_eq!(cmp(b, c), x.partial_cmp(&f64::from_bits(c)).unwrap() as i32, "{x:e}");
+            }
+        };
+        // Every exponent of normal values, mantissas spread over the range.
+        for e in 1..0x7FFu64 {
+            for m in (0..1u64 << 52).step_by((1usize << 52) / 4096 * step / 13 + 1) {
+                check(f64::from_bits((e << 52) | m));
+            }
+            check(f64::from_bits((e << 52) | 0x000F_FFFF_FFFF_FFFF));
+        }
+        // The digit loop: [0, 10).
+        for _ in 0..count(3_000_000) {
+            check(f64::from_bits((r.next() & 0x000F_FFFF_FFFF_FFFF) | ((0x3FF - 60 + r.below(64)) << 52)));
+        }
+        // The rounding addition of 5 * 10^-k (`DDebut[k + 1]`) to x in [1, 10).
+        let consts: Vec<u64> = crate::ffp::DTAB[2..].to_vec();
+        for _ in 0..count(3_000_000) {
+            let c = consts[r.below(consts.len() as u64) as usize];
+            let x = match r.below(2) {
+                0 => f64::from_bits((r.next() & 0x000F_FFFF_FFFF_FFFF) | ((0x3FF + r.below(4)) << 52)),
+                _ => f64::from_bits([2.0f64, 4.0, 8.0, 10.0][r.below(4) as usize].to_bits() - 1 - r.below(1 << 30)),
+            };
+            assert_eq!(add(c, x.to_bits()), (f64::from_bits(c) + x).to_bits(), "{x:e} + {:e}", f64::from_bits(c));
+        }
+    }
+
+    /// The only case where the rounding addition of `Dtoa` could differ from
+    /// IEEE: a carry drops the sticky bit while the bits kept are exactly a
+    /// half. With x in [1, 10) (eleven zero low bits) those bits are bits 1
+    /// to 10 of the aligned constant, which are never all zero.
+    #[test]
+    fn dtoa_rounding_addition_never_loses_a_tie() {
+        for (k, &c) in crate::ffp::DTAB.iter().enumerate().skip(2) {
+            let ec = efield(c) as i32 - 0x3FF;
+            for ex in 0..4 {
+                let n = (ex - ec) as u32;
+                if !(12..0x37).contains(&n) {
+                    continue;
+                }
+                let m = m64(c);
+                let aligned = (m >> n) | ((m & ((1 << n) - 1) != 0) as u64);
+                assert!((aligned >> 1) & 0x3FF != 0, "k={k} exponent {ex}");
+            }
         }
     }
 

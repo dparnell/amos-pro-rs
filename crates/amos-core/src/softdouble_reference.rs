@@ -783,3 +783,255 @@ pub fn asc_to_double(text: &[u8]) -> u64 {
 fn l3dae6(d6: bool) -> u64 {
     if d6 { OVERFLOW | (1 << 63) } else { OVERFLOW }
 }
+
+/// `L3DE7A`: `EORI.L #$80000000,D2`, then `L3DE80`.
+pub fn sub(a: u64, b: u64) -> u64 {
+    add(a, b ^ (1 << 63))
+}
+
+/// `L3DD4A`: double (`D0:D1`) -> long in `D0`.
+pub fn to_long(v: u64) -> i32 {
+    let (mut d0, mut d1) = (hi(v), lo(v));
+    let mut d2 = d0;
+    // SMI D1 (the sign of D0, from MOVE.L D0,D2).
+    d1 = (d1 & !0xFF) | if d0 & 0x8000_0000 != 0 { 0xFF } else { 0 };
+    d2 = swap(d2);
+    d2 = set_w(d2, (d2 & 0xFFFF) >> 4);
+    d2 = set_w(d2, d2 & 0x7FF);
+    let e = ((d2 & 0xFFFF) as u16).wrapping_sub(0x3FF);
+    if (e as i16) < 0 {
+        return 0;
+    }
+    let e = e.wrapping_sub(0x1F);
+    if (e as i16) > 0 {
+        // L3DD94
+        // (MOVE.L D1,D1: bit 31 of the low long, before EXT.W / SWAP.)
+        let r: i32 = 0x7FFF_FFFF;
+        return if d1 & 0x8000_0000 != 0 { -r } else { r };
+    }
+    let shift = (e.wrapping_neg() as u32) & 63;
+    d0 <<= 8;
+    d0 <<= 3;
+    d0 |= 0x8000_0000;
+    // EXT.W D1 / SWAP D1 / LSR.W #5,D1 / ANDI.W #$7FF,D1 / OR.W D1,D0
+    let ext = if d1 & 0x80 != 0 { 0xFFFF } else { 0 };
+    d1 = set_w(d1, ext);
+    d1 = swap(d1);
+    d1 = set_w(d1, (d1 & 0xFFFF) >> 5);
+    d1 = set_w(d1, d1 & 0x7FF);
+    d0 = set_w(d0, (d0 & 0xFFFF) | (d1 & 0xFFFF));
+    d0 = if shift >= 32 { 0 } else { d0 >> shift };
+    if d1 & 0x8000_0000 != 0 { (d0 as i32).wrapping_neg() } else { d0 as i32 }
+}
+
+/// `DDebut`: 10, 1, then 0.5, 0.05, ... 5e-16.
+const DDEBUT: [u64; 18] = [
+    0x4024_0000_0000_0000,
+    0x3FF0_0000_0000_0000,
+    0x3FE0_0000_0000_0000,
+    0x3FA9_9999_9999_999A,
+    0x3F74_7AE1_47AE_147B,
+    0x3F40_624D_D2F1_A9FC,
+    0x3F0A_36E2_EB1C_432D,
+    0x3ED4_F8B5_88E3_68F1,
+    0x3EA0_C6F7_A0B5_ED8E,
+    0x3E6A_D7F2_9ABC_AF49,
+    0x3E35_798E_E230_8C3A,
+    0x3E01_2E0B_E826_D695,
+    0x3DCB_7CDF_D9D7_BDBB,
+    0x3D95_FD7F_E179_6496,
+    0x3D61_9799_812D_EA12,
+    0x3D2C_25C2_6849_7682,
+    0x3CF6_849B_86A1_2B9C,
+    0x3CC2_03AF_9EE7_5616,
+];
+
+/// `Dtoa` (`DoubleToAsc`, `+Lib.s:27080`) transcribed label by label: `x`
+/// (8/$C(A5)), `ndig` ($14(A5)), `mode` ($18(A5), low byte $1B(A5) with
+/// bit 5 set on entry); returns the text written at $10(A5).
+pub fn dtoa(x: u64, ndig: i32, mode: i32) -> Vec<u8> {
+    let mut flags = (mode as u8) | 0x20;
+    let mut a2: Vec<u8> = Vec::new();
+    let mut x = x;
+    let mut d6 = ndig;
+    let (ten, one) = (DDEBUT[0], DDEBUT[1]);
+    // MOVE.W 8(A5),D0 / EXT.L / ANDI.L #$7FF0 / CMPI.L #$7FF0
+    let w = (hi(x) >> 16) as u16 as i16 as i32 as u32;
+    if w & 0x7FF0 == 0x7FF0 {
+        let d4 = if (hi(x) >> 16) & 0x8000 != 0 { 0x2D } else { 0x2B };
+        loop {
+            let d0 = d6;
+            d6 = d6.wrapping_sub(1);
+            if d0 == 0 {
+                break;
+            }
+            a2.push(d4);
+        }
+        return l3d730(a2, &mut flags);
+    }
+    // L3D738
+    let mut d4: i32 = 0;
+    if test(x) < 0 {
+        x = neg(x);
+        a2.push(0x2D);
+    }
+    // L3D760
+    if test(x) > 0 {
+        // L3D76E
+        while cmp(x, one) < 0 {
+            x = mul(x, ten);
+            d4 -= 1;
+        }
+        // L3D7A4
+        while cmp(x, ten) >= 0 {
+            x = div(x, ten);
+            d4 += 1;
+        }
+    }
+    // L3D7DA
+    let mut d7 = mode & 3;
+    let mut d5;
+    if d7 == 2 {
+        if d6 == 0 {
+            d6 = 1;
+        }
+        // CMPI.L #-4,D4 / BLT L3D7FE / CMP.L D6,D4 / BLT L3D800
+        if d4 < -4 || d4 >= d6 {
+            d7 = -1;
+        }
+        d5 = d6;
+    } else if d7 == 1 {
+        d5 = d6 + d4 + 1;
+    } else {
+        d5 = d6 + 1;
+    }
+    // L3D81A
+    if d5 > 0 {
+        let k = if d5 > 0x10 { 0x10 } else { d5 } as usize;
+        x = add(DDEBUT[k + 1], x);
+        if cmp(x, ten) >= 0 {
+            x = one;
+            d4 += 1;
+            if d7 > 0 {
+                d5 += 1;
+            }
+        }
+    }
+    // L3D872
+    let mut a6: i32;
+    if d7 > 0 {
+        if d4 >= 0 {
+            // L3D8A2
+            a6 = d4 + 1;
+        } else {
+            a2.push(0x30);
+            a2.push(0x2E);
+            let mut a3 = -d4 - 1;
+            if d5 <= 0 {
+                a3 = d6;
+            }
+            // L3D890
+            loop {
+                let d0 = a3;
+                a3 -= 1;
+                if d0 == 0 {
+                    break;
+                }
+                a2.push(0x30);
+            }
+            a6 = 0;
+        }
+    } else {
+        // L3D8A8
+        a6 = 1;
+    }
+    // L3D8AE
+    if d5 > 0 {
+        let mut a3 = 0;
+        loop {
+            // L3D8B4
+            if a3 < 0x10 {
+                let d = to_long(x);
+                a2.push((d as u8).wrapping_add(0x30));
+                x = mul(sub(x, from_long(d)), ten);
+            } else {
+                // L3D906
+                a2.push(0x30);
+            }
+            // L3D90A
+            d5 -= 1;
+            if d5 == 0 {
+                break;
+            }
+            if a6 != 0 {
+                a6 -= 1;
+                if a6 == 0 {
+                    a2.push(0x2E);
+                }
+            }
+            // L3D91C
+            a3 += 1;
+        }
+    }
+    // L3D920
+    if a6 != 0 && flags & 0x20 != 0 {
+        a2.push(0x2E);
+    }
+    // L3D930
+    if d7 <= 0 {
+        a2.push(if flags & 0x10 != 0 { 0x45 } else { 0x65 });
+        if d4 < 0 {
+            d4 = -d4;
+            a2.push(0x2D);
+        } else {
+            a2.push(0x2B);
+        }
+        a2.push(((d4 / 100) as u8).wrapping_add(0x30));
+        d4 %= 100;
+        a2.push(((d4 / 10) as u8).wrapping_add(0x30));
+        a2.push(((d4 % 10) as u8).wrapping_add(0x30));
+    }
+    // L3D98E: trailing zeros (not with bit 5, always set here).
+    if a6 == 0 && (d7 == 2 || d7 == -1) && flags & 0x20 == 0 {
+        while a2.last() == Some(&0x30) {
+            a2.pop();
+        }
+        if a2.last() == Some(&0x2E) {
+            // (CMPI.B #$2E,(A2) / BEQ: the point is overwritten by the NUL.)
+            a2.pop();
+        }
+    }
+    // L3D9BA
+    l3d730(a2, &mut flags)
+}
+
+/// `L3D730`: in mode 2 the zeros after the point and before the exponent
+/// (and a bare point) are removed.
+fn l3d730(mut s: Vec<u8>, flags: &mut u8) -> Vec<u8> {
+    *flags &= !0x20;
+    if *flags != 2 {
+        return s;
+    }
+    s.push(0);
+    let (mut d1, mut d2) = (0usize, 0usize);
+    let mut a0 = 0;
+    loop {
+        let d0 = s[a0];
+        a0 += 1;
+        if d0 == 0 || d0 == 0x65 || d0 == 0x45 {
+            break;
+        }
+        if d0 == 0x2E {
+            d2 = a0;
+        } else if d0 != 0x30 && d2 != 0 {
+            d1 = a0;
+        }
+    }
+    if d2 != 0 {
+        let a1 = a0 - 1;
+        let to = if d1 != 0 { d1 } else { d2 - 1 };
+        s.drain(to..a1);
+    }
+    s.pop();
+    s
+}

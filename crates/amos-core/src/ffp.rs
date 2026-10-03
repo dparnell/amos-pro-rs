@@ -1226,7 +1226,7 @@ pub fn format_int(v: i32) -> String {
 // ---------------------------------------------------------------------------
 
 /// `DDebut` table: 10.0, 1.0, then 0.5, 0.05, ... 5e-16 as stored.
-const DTAB: [u64; 18] = [
+pub(crate) const DTAB: [u64; 18] = [
     0x4024_0000_0000_0000,
     0x3FF0_0000_0000_0000,
     0x3FE0_0000_0000_0000,
@@ -1247,7 +1247,25 @@ const DTAB: [u64; 18] = [
     0x3CC2_03AF_9EE7_5616,
 ];
 
-/// `Dtoa` (`+Lib.s:27080`) with the '#' flag forced on.
+/// `Dtoa` (`+Lib.s:27080`) with the '#' flag forced on. The original
+/// computes with the double routines of its C runtime (`softdouble`; the
+/// instruction by instruction transcription is `softdouble::reference::
+/// dtoa`), which are not correctly rounded in general; on the values that
+/// reach them here they give the IEEE results, so `f64` arithmetic is
+/// bit-exact (tests `softdouble::dtoa_operations_are_ieee` and
+/// `dtoa_matches_the_transcription`):
+///
+/// * x * 10 (normal x < 1): 10 has one mantissa word and x eleven zero low
+///   bits, so the product is exact before its single rounding;
+/// * x / 10 (x >= 10): the truncated quotient n * 2^14 / 5 is never a half
+///   with a non zero remainder;
+/// * x - trunc(x), the truncation and the comparisons: exact;
+/// * x + 5 * 10^-k (1 <= x < 10): the addition keeps a sticky bit, and the
+///   one case where it loses it (a carry) needs bits of the aligned
+///   constant that are never all zero for these constants and exponents
+///   (the other tie cases cannot occur);
+/// * zero and unnormalised x (zero exponent field): treated as 0, as the
+///   original's routines do.
 fn dtoa(x: f64, ndig: i32, mode: i32) -> Vec<u8> {
     let mut out = Vec::new();
     let bits = x.to_bits();
@@ -1553,6 +1571,89 @@ mod shortcut_tests {
         for _ in 0..count(4_000_000) {
             let x = r.next() as u32;
             assert_eq!(div_ten(x), ffp_div(x, TEN), "{x:08x}");
+        }
+    }
+
+    fn random_double(r: &mut Rng) -> u64 {
+        let v = r.next();
+        match r.below(6) {
+            0 => v,
+            1 => (v & 0x800F_FFFF_FFFF_FFFF) | ((r.below(3) + 0x7FD * r.below(2)) << 52),
+            2 => (r.next() as i32 as f64 / [1.0, 7.0, 100.0, 3.0][r.below(4) as usize]).to_bits(),
+            3 => crate::softdouble::asc_to_double(format!("{}.{}", r.below(100000), r.below(1000)).as_bytes()),
+            _ => (v & 0x800F_FFFF_FFFF_FFFF) | ((0x3FF - 70 + r.below(140)) << 52),
+        }
+    }
+
+    #[test]
+    fn dtoa_matches_the_transcription() {
+        let mut r = Rng(0xD70A_1234_5678_9ABC);
+        let mut xs: Vec<u64> = vec![0, 1 << 63, 0x7FF0_0000_0000_0000, 0xFFF8_0000_0000_0001, 0x0000_0000_0000_0001];
+        xs.extend(DTAB);
+        for k in 0..400 {
+            xs.push(crate::softdouble::pow10(k));
+            xs.push(crate::softdouble::pow10(k) - 1);
+            xs.push(crate::softdouble::pow10(k) + 1);
+        }
+        for p in [2.0f64, 4.0, 8.0, 10.0, 1.0] {
+            for d in 1..2000u64 {
+                xs.push(p.to_bits() - d);
+                xs.push(p.to_bits() - (d << 20));
+            }
+        }
+        for _ in 0..count(200_000) {
+            xs.push(random_double(&mut r));
+        }
+        for (i, &x) in xs.iter().enumerate() {
+            // Print / Str$ (mode 2, 15 digits or Fix n; mode 0 for Fix -n).
+            for (ndig, mode) in [(15, 2), ((i % 17) as i32, 2), ((i % 17) as i32, 0), ((i % 23) as i32, 1)] {
+                let want = crate::softdouble::reference::dtoa(x, ndig, mode);
+                assert_eq!(dtoa(f64::from_bits(x), ndig, mode), want, "{x:016X} ndig={ndig} mode={mode}");
+            }
+        }
+    }
+
+    /// The original's `Dtoa` (the transcription, with its double routines)
+    /// against `dtoa` on more values: `SURVEY_N=... cargo test --release -p
+    /// amos-core survey_dtoa -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn survey_dtoa_vs_transcription() {
+        let mut r = Rng(0x5EED_D7A0_0000_0001);
+        type Gen = Box<dyn Fn(&mut Rng) -> f64>;
+        let cats: Vec<(&str, Gen)> = vec![
+            ("integers", Box::new(|r| (r.next() >> r.below(64)) as i64 as f64)),
+            ("I/7 (I < 10^6)", Box::new(|r| r.below(1_000_000) as f64 / 7.0)),
+            (
+                "short decimals (Val)",
+                Box::new(|r| {
+                    let t = format!("{}.{}", r.below(100000), r.below(1000));
+                    f64::from_bits(crate::softdouble::asc_to_double(t.as_bytes()))
+                }),
+            ),
+            (
+                "random bits (normal range)",
+                Box::new(|r| f64::from_bits((r.next() & 0x800F_FFFF_FFFF_FFFF) | ((0x3FF - 200 + r.below(400)) << 52))),
+            ),
+            (
+                "just below 2, 4, 8, 10 (rounding carries)",
+                Box::new(|r| {
+                    f64::from_bits([2.0f64, 4.0, 8.0, 10.0][r.below(4) as usize].to_bits() - 1 - r.below(1 << 40))
+                }),
+            ),
+            ("any bits", Box::new(|r| f64::from_bits(r.next()))),
+        ];
+        let n: usize = std::env::var("SURVEY_N").ok().and_then(|v| v.parse().ok()).unwrap_or(300_000);
+        for (name, g) in &cats {
+            let mut diff = 0;
+            for i in 0..n {
+                let x = g(&mut r);
+                let (nd, mode) = [(15, 2), (4, 2), (10, 0), ((i % 17) as i32, 1)][i % 4];
+                if dtoa(x, nd, mode) != crate::softdouble::reference::dtoa(x.to_bits(), nd, mode) {
+                    diff += 1;
+                }
+            }
+            println!("{name}: {diff} of {n} differ");
         }
     }
 

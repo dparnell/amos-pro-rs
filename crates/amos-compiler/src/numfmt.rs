@@ -194,9 +194,14 @@ fn copy(s: &mut InstructionSink) {
 
 /// The body of helper `n`.
 pub fn body(n: N, ix: &Idx, double: bool) -> Function {
-    // The double precision Val helpers are only called by double precision
-    // programs (their tables are large).
-    if !double && matches!(n, N::DTab | N::DTerm | N::DPack | N::DMul | N::DDiv | N::DAdd | N::DPow10 | N::DA2d) {
+    // The double precision helpers are only called by double precision
+    // programs (`str_f` / `val` get the precision as a constant).
+    if !double
+        && matches!(
+            n,
+            N::DTab | N::DTerm | N::DPack | N::DMul | N::DDiv | N::DAdd | N::DPow10 | N::DA2d | N::Dtoa | N::FmtDouble
+        )
+    {
         let mut f = Function::new([]);
         f.instructions().unreachable().end();
         return f;
@@ -745,7 +750,8 @@ fn float_to_asc(s: &mut InstructionSink, ix: &Idx) {
     s.local_get(5).i32_const(4).i32_sub();
 }
 
-/// `dtoa(x, ndig, mode)` into `dst`; returns the length.
+/// `dtoa(x, ndig, mode)` into `dst`; returns the length. IEEE operations
+/// give the original's results here (see `ffp::dtoa`).
 /// x=0(f64) ndig=1 mode=2 dst=3; o=4 d4=5 d6=6 d7=7 d5=8 a6=9 a3=10 d=11
 /// k=12 z=13 point=14 last=15 end=16 to=17 c=18 sg=19; bits=20(i64) t=21(f64)
 fn dtoa(s: &mut InstructionSink) {
