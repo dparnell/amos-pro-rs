@@ -1136,6 +1136,25 @@ impl Screen {
         let (t, bw) = (self.target_index(), self.width as usize);
         let bm = &mut self.bitmaps[t];
         let font = super::font::font();
+        if keep == 0 {
+            // Usual case, no plane kept: the pixels are not read. Character
+            // by character, its 8 rows from one load; with `fg & m | bg &
+            // !m` written `bg ^ ((fg ^ bg) & m)`.
+            let mut lines = bm[y as usize * bw + x0 as usize..].chunks_mut(bw);
+            let mut rows: [&mut [[u8; 8]]; 8] =
+                std::array::from_fn(|_| lines.next().unwrap()[..8 * n].as_chunks_mut::<8>().0);
+            let diff = fg ^ bg;
+            for (k, &c) in text[..n].iter().enumerate() {
+                let g = u64::from_le_bytes(font[c as usize]);
+                for (r, row) in rows.iter_mut().enumerate() {
+                    let m = expand_bits((g >> (8 * r)) as u8);
+                    row[k] = (bg ^ (diff & m)).to_ne_bytes();
+                }
+            }
+            self.version += n as u64;
+            self.win_mut().wx -= n as i32;
+            return n;
+        }
         #[allow(clippy::needless_range_loop)] // (r indexes the glyph rows)
         for r in 0..8 {
             let i = (y as usize + r) * bw + x0 as usize;
@@ -1803,6 +1822,43 @@ mod tests {
 
     fn row(s: &Screen, y: i32, x0: i32, n: i32) -> Vec<u8> {
         (x0..x0 + n).map(|x| s.pixel(x, y).unwrap()).collect()
+    }
+
+    /// Runs of characters (`cout_run`, with and without kept planes) draw
+    /// what the characters sent one by one through `cout` draw.
+    #[test]
+    fn glyph_runs_match_single_glyphs() {
+        let mut seed = 5u32;
+        let mut rnd = |n: u32| {
+            seed = seed.wrapping_mul(1103515245).wrapping_add(12345);
+            (seed >> 8) % n
+        };
+        for colours in [2, 4, 16, 32, 64] {
+            let mut ss = Screens::new();
+            ss.open(0, 320, 200, colours, 0).unwrap();
+            let mut a = ss.current_mut().unwrap().clone();
+            let mask = a.colour_mask();
+            for p in a.bitmaps[0].iter_mut() {
+                *p = rnd(256) as u8 & mask;
+            }
+            a.win_mut().cursor = false;
+            for _ in 0..300 {
+                let w = a.win_mut();
+                w.pen = rnd(300) as i32;
+                w.paper = rnd(300) as i32;
+                w.planes_off = if rnd(3) == 0 { rnd(256) as u8 } else { 0 };
+                let (x, y) = (rnd(40) as i32, rnd(25) as i32);
+                a.locate(Some(x), Some(y)).unwrap();
+                let text: Vec<u8> = (0..1 + rnd(50)).map(|_| 32 + rnd(224) as u8).collect();
+                let mut b = a.clone();
+                a.print_text(&text).unwrap();
+                for &c in &text {
+                    b.cout(c).unwrap();
+                }
+                assert!(a.bitmaps[0] == b.bitmaps[0], "{colours} {text:?}");
+                assert_eq!(a.cursor_pos(), b.cursor_pos());
+            }
+        }
     }
 
     /// Glyphs in every writing mode, source, shade / underline flag and
