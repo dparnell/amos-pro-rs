@@ -34,6 +34,65 @@ clipping, minterms and No Mask; sprite / bob collisions every frame) were
 written as small programs and compared over 400 frames with the same
 checksums produced by a build of the baseline commit.
 
+## Summary of rounds 1-2
+
+Baseline 58d103d (before this work) against 1f534a9 (rounds 1-2 and the
+round 3 ellipse change), same harness (`perf.rs` copied into a worktree of
+the baseline), 200 frames, `--no-hash`, printed text copied to the log (as
+the baseline always did).
+
+| | baseline | now | ratio |
+|---|---|---|---|
+| CPU instructions, all examples + stress + editor (load independent) | 3 037.9 G | 1 310.3 G | 2.3x fewer |
+| all 195 examples, ms of `Machine::vbl`, best of 3 | 106 979 | 41 828 | 2.6x |
+| stress programs, ms, best of 3 | 12 664 | 5 050 | 2.5x |
+
+| example (ms of vbl, best of 3) | baseline | now | speed-up |
+|---|---|---|---|
+| Help_55 (Print / Locate busy loop) | 13 319 | 2 169 | 6.1x |
+| AMAL_3 (sprite collisions every frame) | 9 873 | 399 | 25x |
+| Help_61 (Print busy loop) | 5 504 | 1 986 | 2.8x |
+| _Splines (maths + Draw) | 4 261 | 1 174 | 3.6x |
+| Help_21 (zones, Mouse Zone / Mouse Key loop) | 4 192 | 1 698 | 2.5x |
+| Help_15 | 3 181 | 1 847 | 1.7x |
+| Help_57 (Peek / Poke) | 2 927 | 1 519 | 1.9x |
+| Help_43 | 2 777 | 651 | 4.3x |
+| Help_13 | 2 770 | 1 350 | 2.1x |
+| Font8x8_Editor (Mouse Key tests) | 2 402 | 991 | 2.4x |
+| Help_36 | 2 259 | 1 234 | 1.8x |
+| Disc_Manager | 2 118 | 866 | 2.4x |
+
+| stress program (us of vbl per frame) | baseline | now | speed-up |
+|---|---|---|---|
+| text_print | 1 496 | 39 | 38x |
+| text_scroll | 2 577 | 43 | 60x |
+| draw_prims | 2 320 | 104 | 22x |
+| draw_paint | 202 | 72 | 2.8x |
+| bobs | 325 | 22 | 15x |
+| sprites | 3.2 | 1.1 | 2.9x |
+| screen_copy | 15.1 | 11.1 | 1.4x |
+| interp_maths | 14 928 | 5 225 | 2.9x |
+| interp_arrays | 12 952 | 5 374 | 2.4x |
+| interp_procs | 9 966 | 3 976 | 2.5x |
+| interp_strings | 18 532 | 10 378 | 1.8x |
+| amal, music, rainbow, editor | < 0.1 ms, unchanged | | |
+
+Compiled code (wasmhost `suite`, 100 frames): all 194 examples 21.7 s
+interpreted, 5.1 s compiled (4.2x).
+
+Top remaining costs (`sample` of all examples, interpreted): the
+interpreter core is ~70% (`int_prec` 20%, `Interp::run` 14%, `eval_prec`
+12%, `exec_flow` 7%, `eval_int` 3%, `binop` 2.4%, `args_into` 2.1%,
+variable access `var_slot` / `var_slot_ref` / `var_ref` 4%), function
+dispatch `Host::function` + `function_value` 10% (busy-wait loops on Mouse
+Key / Mouse Zone), text printing 3%, string allocation (`Rc<[u8]>`
+results, `Var` drops) 2%. Compiled (`suite`): `Interp::run` and the
+evaluator for the code still interpreted 30%, line drawing (`line_pen`,
+Bresenham, already one store per pixel) 6.5%, text 4%, ellipses 3.5%,
+`Host::function` 3.4%. Further interpreter gains are limited by
+`Interp::run`'s code generation: changing anything it inlines moves every
+statement by +-20 instructions (see the note at the end of round 2).
+
 ## Results
 
 Baseline = HEAD 58d103d (before this work). Best of 3 runs of 200 frames,
