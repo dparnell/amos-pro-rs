@@ -63,6 +63,15 @@ macro_rules! def {
     }};
 }
 
+/// An import that needs neither the runtime nor the memory.
+macro_rules! pure {
+    ($l:expr, $m:literal $n:literal |$($a:ident : $t:ty),*| -> $r:ty $body:block) => {{
+        let f = Closure::<dyn FnMut($($t),*) -> $r>::new(move |$($a: $t),*| -> $r { $body });
+        let target = if $m == "host" { &$l.host } else { &$l.rt };
+        Reflect::set(target, &JsValue::from_str($n), &f.into_js_value()).map_err(js_err)?;
+    }};
+}
+
 fn js_err(e: JsValue) -> String {
     e.as_string()
         .or_else(|| e.dyn_ref::<js_sys::Error>().map(|e| String::from(e.message())))

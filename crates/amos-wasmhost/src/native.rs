@@ -51,6 +51,13 @@ macro_rules! def {
     };
 }
 
+/// An import that needs neither the runtime nor the memory.
+macro_rules! pure {
+    ($l:expr, $m:literal $n:literal |$($a:ident : $t:ty),*| -> $r:ty $body:block) => {
+        $l.func_wrap($m, $n, |$($a: $t),*| -> $r { $body }).map_err(|e| e.to_string())?;
+    };
+}
+
 /// A compiled program instantiated for one machine.
 pub struct CompiledProgram {
     store: Store<Ctx>,

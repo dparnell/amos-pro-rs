@@ -70,6 +70,44 @@ fn input_stale(mem: &mut [u8]) {
     }
 }
 
+/// Bits of the `op` of [`math`] after the token.
+pub const MATH_DOUBLE: i32 = 1 << 16;
+pub const MATH_DEGREES: i32 = 1 << 17;
+
+/// `Interp::string_maths_function` for `Log`, `Ln` (`x` >= 0: the module
+/// raises the error), `Exp`, the circular and hyperbolic functions: the
+/// token in the low bits of `op`, with `MATH_DOUBLE` (double precision) and
+/// `MATH_DEGREES` (`Degree`); `x` converted as `float_arg` converts it.
+pub fn math(op: i32, x: f64) -> f64 {
+    use crate::tokens::tk::*;
+    let degrees = op & MATH_DEGREES != 0;
+    let r = match op as u16 {
+        LOG => x.log10(),
+        LN => x.ln(),
+        EXP => x.exp(),
+        SIN | COS | TAN => {
+            let x = if degrees { x.to_radians() } else { x };
+            match op as u16 {
+                SIN => x.sin(),
+                COS => x.cos(),
+                _ => x.tan(),
+            }
+        }
+        ASIN | ACOS | ATAN => {
+            let r = match op as u16 {
+                ASIN => x.asin(),
+                ACOS => x.acos(),
+                _ => x.atan(),
+            };
+            if degrees { r.to_degrees() } else { r }
+        }
+        HSIN => x.sinh(),
+        HCOS => x.cosh(),
+        _ => x.tanh(),
+    };
+    if op & MATH_DOUBLE != 0 { r } else { Ffp::from_f64(r).to_f64() }
+}
+
 // ----------------------------------------------------------------------
 // Memory access
 // ----------------------------------------------------------------------
@@ -2133,6 +2171,18 @@ impl Runtime {
     }
 
     /// `x^y` (`round_float(x.powf(y))`).
+    /// `math` with the angle unit of the interpreter (programs that use
+    /// `Degree`).
+    pub fn math(&mut self, env: &mut dyn Env, op: i32, x: f64) -> f64 {
+        let degrees = env.parts().0.degrees;
+        math(op | if degrees { MATH_DEGREES } else { 0 }, x)
+    }
+
+    /// `Rnd(n)`.
+    pub fn rnd(&mut self, env: &mut dyn Env, n: i32) -> i32 {
+        env.parts().0.rnd(n)
+    }
+
     pub fn pow(&self, a: f64, b: f64) -> f64 {
         let r = a.powf(b);
         if self.double { r } else { Ffp::from_f64(r).to_f64() }

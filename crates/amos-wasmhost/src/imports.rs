@@ -23,6 +23,9 @@
     def!(l, "host" "pfn_n" |rt, env, mem, p: i32, t: i32, k: i32, b: i32| -> f64 { rt.pfn_n(env, mem, p, t, k, b) });
     def!(l, "host" "pfn_s" |rt, env, mem, p: i32, t: i32, k: i32, b: i32| -> i32 { rt.pfn_s(env, mem, p, t, k, b) });
     def!(l, "host" "input_sync" |rt, env, mem| -> i32 { rt.input_sync(env, mem) });
+    def!(l, "host" "math" |rt, env, mem, t: i32, x: f64| -> f64 { rt.math(env, t, x) });
+    pure!(l, "rt" "math" |t: i32, x: f64| -> f64 { amos_core::compiled::runtime::math(t, x) });
+    def!(l, "host" "rnd" |rt, env, mem, n: i32| -> i32 { rt.rnd(env, n) });
     def!(l, "host" "push_i" |rt, env, mem, v: i32| { rt.push_i(v) });
     def!(l, "host" "push_f" |rt, env, mem, v: f64| { rt.push_f(v) });
     def!(l, "host" "push_s" |rt, env, mem, v: i32| { rt.push_s(mem, v) });

@@ -85,6 +85,9 @@ imports! {
     PfnN = "host" "pfn_n" (i i i i) -> f;
     PfnS = "host" "pfn_s" (i i i i) -> i;
     InputSync = "host" "input_sync" () -> i;
+    Math = "host" "math" (i f) -> f;
+    MathPure = "rt" "math" (i f) -> f;
+    Rnd = "host" "rnd" (i) -> i;
     PushI = "host" "push_i" (i);
     PushF = "host" "push_f" (f);
     PushS = "host" "push_s" (i);
@@ -225,6 +228,8 @@ struct Gen<'a> {
     /// The For loop of each `Next` (by instruction index) that is known
     /// statically (`static_fors`).
     next_for: std::collections::HashMap<usize, StaticFor>,
+    /// The program has a `Degree` instruction.
+    uses_degree: bool,
 }
 
 /// A For loop on a scalar variable and its `Next`, found in the program
@@ -1551,6 +1556,51 @@ impl<'a> Gen<'a> {
                     amos_core::ffp::Ffp::from_f64(std::f64::consts::PI).to_f64()
                 };
                 self.w(W::F64Const(pi.into()));
+            }
+            Nf::Math(t) => {
+                self.expr(&a[0]);
+                self.as_float(a[0].ty);
+                if t == tk::SQR {
+                    // Correctly rounded as Rust's `sqrt`; Illegal function call below 0.
+                    let x = self.tmp(ValType::F64);
+                    self.w(W::LocalTee(x));
+                    self.w(W::F64Const(0.0f64.into()));
+                    self.w(W::F64Lt);
+                    self.if_(BlockType::Empty);
+                    self.raise(errors::ILLEGAL_FUNCTION_CALL);
+                    self.end();
+                    self.get(x);
+                    self.release(x, ValType::F64);
+                    self.w(W::F64Sqrt);
+                    if !self.double {
+                        self.helper(H::F2b);
+                        self.helper(H::B2f);
+                    }
+                } else {
+                    // (`f64` maths of the host's library, as the interpreter.)
+                    let x = self.tmp(ValType::F64);
+                    self.set(x);
+                    if t == tk::LOG || t == tk::LN {
+                        self.get(x);
+                        self.w(W::F64Const(0.0f64.into()));
+                        self.w(W::F64Lt);
+                        self.if_(BlockType::Empty);
+                        self.raise(errors::ILLEGAL_FUNCTION_CALL);
+                        self.end();
+                    }
+                    let double = if self.double { amos_core::compiled::runtime::MATH_DOUBLE } else { 0 };
+                    self.i32c(t as i32 | double);
+                    self.get(x);
+                    self.release(x, ValType::F64);
+                    // The angle unit is known when the program has no
+                    // `Degree` (radians from the start of every run).
+                    let angles = matches!(t, tk::SIN | tk::COS | tk::TAN | tk::ASIN | tk::ACOS | tk::ATAN);
+                    self.call(if angles && self.uses_degree { Imp::Math } else { Imp::MathPure });
+                }
+            }
+            Nf::Rnd => {
+                self.int_arg(&a[0]);
+                self.call(Imp::Rnd);
             }
         }
     }
@@ -3898,6 +3948,7 @@ pub fn module(
         nparams: 1,
         options: *options,
         next_for: Default::default(),
+        uses_degree: instrs.iter().any(|i| structure::rd(&prg.code, i.pos) == tk::DEGREE),
     };
     let fns = g.functions(stmts)?;
     let mut code = CodeSection::new();

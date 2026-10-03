@@ -106,6 +106,11 @@ pub enum Nf {
     ParamF,
     ParamS,
     Pi,
+    /// `Sqr`, `Log`, `Ln`, `Exp`, the circular and hyperbolic functions (the
+    /// token) on a number.
+    Math(u16),
+    /// `Rnd(n)`.
+    Rnd,
 }
 
 impl Expr {

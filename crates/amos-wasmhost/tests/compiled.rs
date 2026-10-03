@@ -798,3 +798,27 @@ fn static_for_loops() {
         }
     }
 }
+
+/// `Sqr` (native), the functions of the host's maths library (`rt.math`,
+/// or `host.math` with `Degree`) and `Rnd` against the interpreter: every
+/// function on integers, floats and dynamic numbers, errors, angle units,
+/// both precisions.
+#[test]
+fn maths_functions() {
+    let body = "For I=-3 To 12\nX#=I*0.37\nPrint Sqr(Abs(I));Sqr(Abs(X#));Exp(X#);Sin(I);Cos(X#);Tan(X#);Atan(X#);Hsin(X#);Hcos(I);Htan(X#)\nIf I>0 Then Print Log(I);Ln(X#);Log(X#)\nIf Abs(X#)<=1 Then Print Asin(X#);Acos(X#)\nNext\nPrint Sqr(2)*Sqr(2);Sin(Pi#);Cos(Pi#/3);Ln(Exp(1.5))\nV=Val(\"2\")+Val(\"0.5\") : Print Sqr(V);Sin(V);Log(V)\nRandomize 7 : For I=1 To 30 : Print Rnd(I);Rnd(-I);Rnd(0); : Next\nR=Rnd(10.7) : Print R";
+    let progs = [
+        body.to_string(),
+        format!("Degree\n{body}"),
+        format!("Degree : Print Sin(30);Cos(60);Atan(1)\nRadian\n{body}"),
+        format!("Set Double Precision\n{body}"),
+        format!("Set Double Precision\nDegree\n{body}"),
+        "Print Sqr(-1)".to_string(),
+        "Print Log(-2)".to_string(),
+        "X#=-0.5 : Print Ln(X#)".to_string(),
+        "On Error Goto H\nFor I=2 To -2 Step -1 : Print Sqr(I);Log(I+1); : Next : End\nH: Print \"e\";Errn; : Resume Next".to_string(),
+    ];
+    for p in &progs {
+        same(p);
+        same_budget(p, 3);
+    }
+}

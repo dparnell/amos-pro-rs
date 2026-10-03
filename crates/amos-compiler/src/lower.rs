@@ -1186,6 +1186,12 @@ fn native_function(t: u16, args: &[Expr]) -> Option<Nf> {
         PARAM_F => Nf::ParamF,
         PARAM_S => Nf::ParamS,
         PI_F => Nf::Pi,
+        SQR | LOG | LN | EXP | SIN | COS | TAN | ASIN | ACOS | ATAN | HSIN | HCOS | HTAN
+            if num(0) && args.len() == 1 =>
+        {
+            Nf::Math(t)
+        }
+        RND if num(0) && args.len() == 1 => Nf::Rnd,
         _ => return None,
     })
 }
