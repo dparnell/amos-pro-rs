@@ -74,11 +74,11 @@ imports! {
     Raise = "host" "raise" (i i) -> i;
     TestPoint = "host" "test_point" (i) -> i;
     Interp = "host" "interp" (i) -> i;
-    Keyword = "host" "keyword" (i) -> i;
-    FnI = "host" "fn_i" (i i) -> i;
-    FnF = "host" "fn_f" (i i) -> f;
-    FnN = "host" "fn_n" (i i) -> f;
-    FnS = "host" "fn_s" (i i) -> i;
+    Keyword = "host" "keyword" (i i) -> i;
+    FnI = "host" "fn_i" (i i i) -> i;
+    FnF = "host" "fn_f" (i i i) -> f;
+    FnN = "host" "fn_n" (i i i) -> f;
+    FnS = "host" "fn_s" (i i i) -> i;
     PushI = "host" "push_i" (i);
     PushF = "host" "push_f" (f);
     PushS = "host" "push_s" (i);
@@ -197,6 +197,9 @@ struct Gen<'a> {
     consts: Vec<usize>,
     /// Position of the instruction being compiled.
     pos: usize,
+    /// First free keyword bridge slot (`layout::BRIDGE_SLOT`): the
+    /// parameters of the calls being evaluated are in the slots before.
+    bridge_top: u32,
 }
 
 fn mem32(offset: u32) -> MemArg {
@@ -696,6 +699,74 @@ impl<'a> Gen<'a> {
     }
 
     /// Pushes a value of type `ty` on the runtime parameter stack.
+    /// Evaluates the parameters of a keyword bridge call into the bridge
+    /// slots (`layout::BRIDGE_SLOT`) and returns the first slot; -1 if they
+    /// do not fit (then pushed on the runtime's stack).
+    fn bridge_args(&mut self, args: &[Expr]) -> i32 {
+        let base = self.bridge_top;
+        if args.is_empty() {
+            return base as i32;
+        }
+        if base + args.len() as u32 > layout::BRIDGE_SLOTS {
+            for a in args {
+                self.expr(a);
+                self.push_value(a.ty);
+            }
+            return -1;
+        }
+        // Calls inside the parameters use the following slots.
+        self.bridge_top = base + args.len() as u32;
+        for (k, a) in args.iter().enumerate() {
+            let slot = self.layout.bridge + (base + k as u32) * layout::BRIDGE_SLOT;
+            match a.ty {
+                Ty::Int | Ty::Str => {
+                    let t = self.tmp(ValType::I32);
+                    self.expr(a);
+                    self.set(t);
+                    self.get(L_BASE);
+                    self.get(t);
+                    self.w(W::I32Store(mem32(slot + 8)));
+                    self.release(t, ValType::I32);
+                    self.get(L_BASE);
+                    self.i32c(if a.ty == Ty::Int { layout::BRIDGE_INT } else { layout::BRIDGE_STR });
+                    self.w(W::I32Store(mem32(slot)));
+                }
+                Ty::Float => {
+                    let t = self.tmp(ValType::F64);
+                    self.expr(a);
+                    self.set(t);
+                    self.get(L_BASE);
+                    self.get(t);
+                    self.w(W::F64Store(mem64(slot + 8)));
+                    self.release(t, ValType::F64);
+                    self.get(L_BASE);
+                    self.i32c(layout::BRIDGE_FLOAT);
+                    self.w(W::I32Store(mem32(slot)));
+                }
+                Ty::Dyn => {
+                    // f64 payload and runtime type (0 integer, 1 float).
+                    let (x, tg) = (self.tmp(ValType::F64), self.tmp(ValType::I32));
+                    self.expr(a);
+                    self.set(tg);
+                    self.set(x);
+                    self.get(L_BASE);
+                    self.get(x);
+                    self.w(W::F64Store(mem64(slot + 8)));
+                    self.get(L_BASE);
+                    self.i32c(layout::BRIDGE_FLOAT);
+                    self.i32c(layout::BRIDGE_DYN_INT);
+                    self.get(tg);
+                    self.w(W::Select);
+                    self.w(W::I32Store(mem32(slot)));
+                    self.release(x, ValType::F64);
+                    self.release(tg, ValType::I32);
+                }
+            }
+        }
+        self.bridge_top = base;
+        base as i32
+    }
+
     fn push_value(&mut self, ty: Ty) {
         self.call(match ty {
             Ty::Int => Imp::PushI,
@@ -865,12 +936,10 @@ impl<'a> Gen<'a> {
             ExprKind::Bin(op, a, b) => self.binop(*op, a, b, e.ty),
             ExprKind::Native(nf, args) => self.native(*nf, args, e.ty),
             ExprKind::Call(fpos, args) => {
-                for a in args {
-                    self.expr(a);
-                    self.push_value(a.ty);
-                }
+                let base = self.bridge_args(args);
                 self.i32c(self.pos as i32);
                 self.i32c(*fpos as i32);
+                self.i32c(base);
                 match e.ty {
                     Ty::Int => self.call(Imp::FnI),
                     Ty::Float => self.call(Imp::FnF),
@@ -2530,11 +2599,9 @@ impl<'a> Gen<'a> {
                 self.status_check();
             }
             Stmt::Keyword(args) => {
-                for a in args {
-                    self.expr(a);
-                    self.push_value(a.ty);
-                }
+                let base = self.bridge_args(args);
                 self.i32c(pos);
+                self.i32c(base);
                 self.call(Imp::Keyword);
                 self.status_check();
             }
@@ -2824,6 +2891,7 @@ pub fn module(
         uses_num: false,
         consts: structure::string_constants(prg),
         pos: 0,
+        bridge_top: 0,
     };
     // Locals 1..N_FIXED are the fixed ones; temporaries follow.
     g.run_function(stmts)?;
@@ -2842,11 +2910,8 @@ pub fn module(
     for (h, ..) in string_helpers::HELPERS {
         code.function(&string_helpers::body(*h, first_str, Imp::StrChunk as u32));
     }
-    let ix = num_helpers::Idx {
-        ffp: n_imports + 3,
-        str: first_str,
-        num: first_str + string_helpers::HELPERS.len() as u32,
-    };
+    let ix =
+        num_helpers::Idx { ffp: n_imports + 3, str: first_str, num: first_str + string_helpers::HELPERS.len() as u32 };
     for (h, ..) in num_helpers::HELPERS {
         if g.uses_num {
             code.function(&num_helpers::body(*h, &ix, prg.double));

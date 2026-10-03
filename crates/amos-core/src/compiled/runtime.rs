@@ -17,6 +17,7 @@
 //! [`Runtime::raise`].
 
 use std::collections::HashMap;
+use std::hash::{BuildHasherDefault, Hasher};
 use std::rc::Rc;
 
 use super::layout::{self, Layout};
@@ -85,6 +86,43 @@ pub fn st_f64(mem: &mut [u8], a: u32, v: f64) {
     }
 }
 
+/// Hasher of code positions (small integers): a multiplication, instead of
+/// SipHash for the maps looked up on every bridge call.
+#[derive(Default)]
+struct PosHasher(u64);
+
+impl Hasher for PosHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+    fn write(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.0 = (self.0 ^ b as u64).wrapping_mul(0x100_0000_01B3);
+        }
+    }
+    fn write_usize(&mut self, v: usize) {
+        self.0 = (v as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    }
+}
+
+type PosHash = BuildHasherDefault<PosHasher>;
+
+/// A call site of the keyword bridge: the call, and its token stream (the
+/// keyword with the parameter values as constants) kept for the next call:
+/// numbers of the same types are written over the previous ones.
+struct Site {
+    call: Option<Rc<Call>>,
+    /// Present parameters.
+    n: usize,
+    /// The token stream (taken while the interpreter reads it).
+    code: Option<Rc<Vec<u8>>>,
+    /// Type of each parameter value in `code` (0 integer, 1 float, 2
+    /// string) and the position of its bytes.
+    kinds: Vec<(u8, u32)>,
+    /// End of the parameters in `code`.
+    end: usize,
+}
+
 /// Runtime state of one compiled program.
 pub struct Runtime {
     prg: Rc<Compiled>,
@@ -111,9 +149,12 @@ pub struct Runtime {
     frames: Vec<usize>,
     /// Scalars kept in the interpreter (`structure::resident_vars`).
     resident: Vec<(usize, u16)>,
-    vars: HashMap<usize, Rc<[(u16, u8)]>>,
-    calls: HashMap<usize, Option<Rc<Call>>>,
-    bridge_buf: Vec<u8>,
+    vars: HashMap<usize, Rc<[(u16, u8)]>, PosHash>,
+    /// Keyword bridge call sites: index in `sites` by code position.
+    site_at: HashMap<usize, u32, PosHash>,
+    sites: Vec<Site>,
+    /// Parameters of a bridge call read from memory (`layout::BRIDGE_SLOT`).
+    margs: Vec<Value>,
     stopped: Option<StopInfo>,
     /// Procedure frames of returned calls, reused (no allocation per call:
     /// the boxes go back into `Ctl::Proc` as they are).
@@ -150,9 +191,10 @@ impl Runtime {
             print_buf: Vec::new(),
             pending: None,
             frames: Vec::new(),
-            vars: HashMap::new(),
-            calls: HashMap::new(),
-            bridge_buf: Vec::new(),
+            vars: HashMap::default(),
+            site_at: HashMap::default(),
+            sites: Vec::new(),
+            margs: Vec::new(),
             stopped: None,
             frame_pool: Vec::new(),
             heap: arrays::Heap::new(heap, layout.size),
@@ -719,108 +761,159 @@ impl Runtime {
     // Keyword bridge
     // ------------------------------------------------------------------
 
-    fn call_at(&mut self, p: usize, function: bool) -> Option<Rc<Call>> {
-        if let Some(c) = self.calls.get(&p) {
-            return c.clone();
-        }
-        let c = if function {
-            structure::function_call(&self.prg.code, p)
-        } else {
-            structure::instruction_call(&self.prg.code, p)
-        }
-        .map(Rc::new);
-        self.calls.insert(p, c.clone());
-        c
+    /// The call site at `p` (`None` if it is not a bridged call).
+    fn site(&mut self, p: usize, function: bool) -> Option<usize> {
+        let i = match self.site_at.get(&p) {
+            Some(&i) => i as usize,
+            None => {
+                let call = if function {
+                    structure::function_call(&self.prg.code, p)
+                } else {
+                    structure::instruction_call(&self.prg.code, p)
+                };
+                let n = call.as_ref().map_or(0, |c| c.slots.iter().filter(|s| s.present).count());
+                self.sites.push(Site { call: call.map(Rc::new), n, code: None, kinds: Vec::new(), end: 0 });
+                self.site_at.insert(p, self.sites.len() as u32 - 1);
+                self.sites.len() - 1
+            }
+        };
+        self.sites[i].call.is_some().then_some(i)
     }
 
-    /// Builds the token stream of the call at `p` with the parameter values
-    /// on the stack as constants. Returns it and the position of its end.
-    fn bridge_code(&mut self, p: usize, call: &Call) -> (Vec<u8>, usize) {
-        let n = call.slots.iter().filter(|s| s.present).count();
-        let values = self.stack.split_off(self.stack.len().saturating_sub(n));
-        let mut buf = std::mem::take(&mut self.bridge_buf);
-        buf.clear();
-        buf.extend_from_slice(&[0, 0]);
-        buf.extend_from_slice(&self.prg.code[p..call.tok_end]);
-        let w = |buf: &mut Vec<u8>, t: u16| buf.extend_from_slice(&t.to_be_bytes());
-        if call.paren {
-            w(&mut buf, TK_PAR1);
+    /// The token stream of call site `i` (at `p`) with the parameter values
+    /// as constants, and the position of its end. The values are in the
+    /// bridge slots from `base` (`layout::BRIDGE_SLOT`), or on the stack
+    /// (popped) for a negative `base`.
+    fn bridge_code(&mut self, i: usize, p: usize, mem: &mut [u8], base: i32) -> (Rc<Vec<u8>>, usize) {
+        let n = self.sites[i].n;
+        if base >= 0 {
+            self.margs.clear();
+            for k in 0..n as u32 {
+                let a = self.layout.bridge + (base as u32 + k) * layout::BRIDGE_SLOT;
+                let v = match ld_i32(mem, a) {
+                    layout::BRIDGE_INT => Value::Int(ld_i32(mem, a + 8)),
+                    layout::BRIDGE_FLOAT => Value::Float(ld_f64(mem, a + 8)),
+                    layout::BRIDGE_DYN_INT => Value::Int(ld_f64(mem, a + 8) as i32),
+                    _ => Value::Str(self.str_of(mem, ld_i32(mem, a + 8))),
+                };
+                self.margs.push(v);
+            }
         }
-        let mut vi = values.iter();
-        for s in &call.slots {
-            if s.present {
-                match vi.next() {
-                    Some(Value::Int(i)) => {
-                        w(&mut buf, TK_ENT);
-                        buf.extend_from_slice(&(*i as u32).to_be_bytes());
-                    }
-                    Some(Value::Float(f)) => {
-                        w(&mut buf, TK_DFL);
-                        buf.extend_from_slice(&f.to_be_bytes());
-                    }
-                    Some(Value::Str(s)) => {
-                        w(&mut buf, TK_CH1);
-                        let n = s.len().min(0xFFFF);
-                        w(&mut buf, n as u16);
-                        buf.extend_from_slice(&s[..n]);
-                        if n & 1 != 0 {
-                            buf.push(0);
-                        }
-                    }
-                    None => {}
+        let first = if base >= 0 { self.stack.len() } else { self.stack.len().saturating_sub(n) };
+        let site = &mut self.sites[i];
+        let values = if base >= 0 { &self.margs[..] } else { &self.stack[first..] };
+        // Same parameter types as last time (numbers): new values in place.
+        let same = values.len() == site.kinds.len()
+            && values.iter().zip(&site.kinds).all(|(v, &(k, _))| match v {
+                Value::Int(_) => k == 0,
+                Value::Float(_) => k == 1,
+                Value::Str(_) => false,
+            });
+        if same && let Some(buf) = site.code.as_mut().and_then(Rc::get_mut) {
+            for (v, &(_, at)) in values.iter().zip(&site.kinds) {
+                let at = at as usize;
+                match v {
+                    Value::Int(i) => buf[at..at + 4].copy_from_slice(&(*i as u32).to_be_bytes()),
+                    Value::Float(f) => buf[at..at + 8].copy_from_slice(&f.to_be_bytes()),
+                    Value::Str(_) => {}
                 }
             }
-            if s.sep != 0 {
-                w(&mut buf, s.sep);
+        } else {
+            let call = site.call.clone().expect("bridged call");
+            let mut rc = site.code.take().filter(|c| Rc::strong_count(c) == 1).unwrap_or_default();
+            let buf = Rc::get_mut(&mut rc).expect("unique");
+            site.kinds.clear();
+            buf.clear();
+            buf.extend_from_slice(&[0, 0]);
+            buf.extend_from_slice(&self.prg.code[p..call.tok_end]);
+            let w = |buf: &mut Vec<u8>, t: u16| buf.extend_from_slice(&t.to_be_bytes());
+            if call.paren {
+                w(buf, TK_PAR1);
             }
+            let mut vi = values.iter();
+            for s in &call.slots {
+                if s.present {
+                    match vi.next() {
+                        Some(Value::Int(i)) => {
+                            w(buf, TK_ENT);
+                            site.kinds.push((0, buf.len() as u32));
+                            buf.extend_from_slice(&(*i as u32).to_be_bytes());
+                        }
+                        Some(Value::Float(f)) => {
+                            w(buf, TK_DFL);
+                            site.kinds.push((1, buf.len() as u32));
+                            buf.extend_from_slice(&f.to_be_bytes());
+                        }
+                        Some(Value::Str(s)) => {
+                            w(buf, TK_CH1);
+                            site.kinds.push((2, buf.len() as u32));
+                            let n = s.len().min(0xFFFF);
+                            w(buf, n as u16);
+                            buf.extend_from_slice(&s[..n]);
+                            if n & 1 != 0 {
+                                buf.push(0);
+                            }
+                        }
+                        None => {}
+                    }
+                }
+                if s.sep != 0 {
+                    w(buf, s.sep);
+                }
+            }
+            if call.paren {
+                w(buf, TK_PAR2);
+            }
+            site.end = buf.len();
+            buf.extend_from_slice(&[0, 0, 0, 0]);
+            site.code = Some(rc);
         }
-        if call.paren {
-            w(&mut buf, TK_PAR2);
-        }
-        let end = buf.len();
-        buf.extend_from_slice(&[0, 0, 0, 0]);
-        (buf, end)
+        let end = site.end;
+        let code = site.code.take().expect("bridge code");
+        self.stack.truncate(first);
+        (code, end)
     }
 
     /// Runs `f` with the interpreter reading `code` from `start`; checks
     /// that the parameters were read up to `end`.
+    #[allow(clippy::too_many_arguments)]
     fn with_code<T>(
         &mut self,
         it: &mut Interp,
         hw: &mut dyn Host,
-        code: Vec<u8>,
+        site: usize,
+        code: Rc<Vec<u8>>,
         start: usize,
         end: usize,
         f: impl FnOnce(&mut Interp, &mut dyn Host) -> R<T>,
     ) -> R<T> {
-        let saved_code = std::mem::replace(&mut it.code, Rc::new(code));
+        let saved_code = std::mem::replace(&mut it.code, code);
         let saved_pc = it.pc;
         it.pc = start;
         let r = f(it, hw);
         let consumed = it.pc == end;
         let syn = std::mem::replace(&mut it.code, saved_code);
         it.pc = saved_pc;
-        if let Ok(v) = Rc::try_unwrap(syn) {
-            self.bridge_buf = v;
-        }
+        self.sites[site].code = Some(syn);
         match r {
             Ok(_) if !consumed => Err(Exc::Message("Compiled program: keyword parameters not read as expected".into())),
             r => r,
         }
     }
 
-    /// Instruction of a subsystem at `pos`, parameters on the stack.
-    pub fn keyword(&mut self, env: &mut dyn Env, mem: &mut [u8], pos: i32) -> i32 {
+    /// Instruction of a subsystem at `pos`, parameters in the bridge slots
+    /// from `base` (or on the stack if `base` < 0).
+    pub fn keyword(&mut self, env: &mut dyn Env, mem: &mut [u8], pos: i32, base: i32) -> i32 {
         let (it, hw) = env.parts();
         let pos = pos as usize;
         it.inst_pos = pos;
-        let r = match self.call_at(pos, false) {
+        let r = match self.site(pos, false) {
             None => Err(Exc::Message("Compiled program: bad keyword call".into())),
-            Some(call) => {
-                let (code, end) = self.bridge_code(pos, &call);
-                let start = 2 + (call.tok_end - pos);
-                let kw = call.kw;
-                self.with_code(it, hw, code, start, end, |it, hw| hw.instruction(it, kw)).map(|_| ST_CONTINUE)
+            Some(i) => {
+                let call = self.sites[i].call.as_ref().expect("bridged call");
+                let (start, kw) = (2 + (call.tok_end - pos), call.kw);
+                let (code, end) = self.bridge_code(i, pos, mem, base);
+                self.with_code(it, hw, i, code, start, end, |it, hw| hw.instruction(it, kw)).map(|_| ST_CONTINUE)
             }
         };
         self.result(it, hw, mem, r, pos)
@@ -828,15 +921,23 @@ impl Runtime {
 
     /// Value of the function call at `fpos` in the instruction at `pos`,
     /// parameters on the stack. `None` (and a pending error) on error.
-    fn function(&mut self, env: &mut dyn Env, mem: &mut [u8], pos: i32, fpos: i32) -> Option<Value> {
+    fn function(&mut self, env: &mut dyn Env, mem: &mut [u8], pos: i32, fpos: i32, base: i32) -> Option<Value> {
         let (it, hw) = env.parts();
         it.inst_pos = pos as usize;
         let fpos = fpos as usize;
-        let r = match self.call_at(fpos, true) {
+        let r = match self.site(fpos, true) {
             None => Err(Exc::Message("Compiled program: bad function call".into())),
-            Some(call) => {
-                let (code, end) = self.bridge_code(fpos, &call);
-                self.with_code(it, hw, code, 2, end, |it, hw| it.eval(hw))
+            Some(i) => {
+                let call = self.sites[i].call.as_ref().expect("bridged call");
+                let (kw, start) = (call.kw, 2 + (call.tok_end - fpos));
+                let (code, end) = self.bridge_code(i, fpos, mem, base);
+                if kw.slot != 0 {
+                    // An extension function: `Interp::operand_value` calls
+                    // the machine directly for those.
+                    self.with_code(it, hw, i, code, start, end, |it, hw| hw.function(it, kw))
+                } else {
+                    self.with_code(it, hw, i, code, 2, end, |it, hw| it.eval(hw))
+                }
             }
         };
         match r {
@@ -848,8 +949,8 @@ impl Runtime {
         }
     }
 
-    pub fn fn_i(&mut self, env: &mut dyn Env, mem: &mut [u8], pos: i32, fpos: i32) -> i32 {
-        match self.function(env, mem, pos, fpos) {
+    pub fn fn_i(&mut self, env: &mut dyn Env, mem: &mut [u8], pos: i32, fpos: i32, base: i32) -> i32 {
+        match self.function(env, mem, pos, fpos, base) {
             Some(Value::Int(i)) => i,
             Some(Value::Float(f)) => float_to_int(f),
             Some(Value::Str(_)) => {
@@ -860,8 +961,8 @@ impl Runtime {
         }
     }
 
-    pub fn fn_f(&mut self, env: &mut dyn Env, mem: &mut [u8], pos: i32, fpos: i32) -> f64 {
-        match self.function(env, mem, pos, fpos) {
+    pub fn fn_f(&mut self, env: &mut dyn Env, mem: &mut [u8], pos: i32, fpos: i32, base: i32) -> f64 {
+        match self.function(env, mem, pos, fpos, base) {
             Some(Value::Float(f)) => f,
             Some(Value::Int(i)) => {
                 let (it, _) = env.parts();
@@ -876,8 +977,8 @@ impl Runtime {
     }
 
     /// Numeric result of unknown type: the type goes to the `TAG` word.
-    pub fn fn_n(&mut self, env: &mut dyn Env, mem: &mut [u8], pos: i32, fpos: i32) -> f64 {
-        match self.function(env, mem, pos, fpos) {
+    pub fn fn_n(&mut self, env: &mut dyn Env, mem: &mut [u8], pos: i32, fpos: i32, base: i32) -> f64 {
+        match self.function(env, mem, pos, fpos, base) {
             Some(Value::Int(i)) => {
                 st_i32(mem, layout::TAG, 0);
                 i as f64
@@ -894,8 +995,8 @@ impl Runtime {
         }
     }
 
-    pub fn fn_s(&mut self, env: &mut dyn Env, mem: &mut [u8], pos: i32, fpos: i32) -> i32 {
-        match self.function(env, mem, pos, fpos) {
+    pub fn fn_s(&mut self, env: &mut dyn Env, mem: &mut [u8], pos: i32, fpos: i32, base: i32) -> i32 {
+        match self.function(env, mem, pos, fpos, base) {
             Some(Value::Str(s)) => self.alloc(mem, s),
             Some(_) => {
                 self.set_pending(mem, Exc::Error(errors::TYPE_MISMATCH));

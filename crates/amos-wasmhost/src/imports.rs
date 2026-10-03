@@ -10,11 +10,11 @@
     def!(l, "host" "raise" |rt, env, mem, p: i32, c: i32| -> i32 { rt.raise(env, mem, p, c) });
     def!(l, "host" "test_point" |rt, env, mem, p: i32| -> i32 { rt.test_point(env, mem, p) });
     def!(l, "host" "interp" |rt, env, mem, p: i32| -> i32 { rt.interp(env, mem, p) });
-    def!(l, "host" "keyword" |rt, env, mem, p: i32| -> i32 { rt.keyword(env, mem, p) });
-    def!(l, "host" "fn_i" |rt, env, mem, p: i32, f: i32| -> i32 { rt.fn_i(env, mem, p, f) });
-    def!(l, "host" "fn_f" |rt, env, mem, p: i32, f: i32| -> f64 { rt.fn_f(env, mem, p, f) });
-    def!(l, "host" "fn_n" |rt, env, mem, p: i32, f: i32| -> f64 { rt.fn_n(env, mem, p, f) });
-    def!(l, "host" "fn_s" |rt, env, mem, p: i32, f: i32| -> i32 { rt.fn_s(env, mem, p, f) });
+    def!(l, "host" "keyword" |rt, env, mem, p: i32, b: i32| -> i32 { rt.keyword(env, mem, p, b) });
+    def!(l, "host" "fn_i" |rt, env, mem, p: i32, f: i32, b: i32| -> i32 { rt.fn_i(env, mem, p, f, b) });
+    def!(l, "host" "fn_f" |rt, env, mem, p: i32, f: i32, b: i32| -> f64 { rt.fn_f(env, mem, p, f, b) });
+    def!(l, "host" "fn_n" |rt, env, mem, p: i32, f: i32, b: i32| -> f64 { rt.fn_n(env, mem, p, f, b) });
+    def!(l, "host" "fn_s" |rt, env, mem, p: i32, f: i32, b: i32| -> i32 { rt.fn_s(env, mem, p, f, b) });
     def!(l, "host" "push_i" |rt, env, mem, v: i32| { rt.push_i(v) });
     def!(l, "host" "push_f" |rt, env, mem, v: f64| { rt.push_f(v) });
     def!(l, "host" "push_s" |rt, env, mem, v: i32| { rt.push_s(mem, v) });

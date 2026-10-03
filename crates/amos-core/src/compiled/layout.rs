@@ -122,6 +122,17 @@ pub const MIRROR_WORDS: [u32; 9] =
 pub const NORM_KEY: u32 = 180;
 pub const NORM_XN: u32 = 184;
 pub const NORM_E: u32 = 188;
+/// Parameters of a keyword bridge call (instead of `host.push_*`): slot `k`
+/// of the call holds an `i32` type at +0 (`BRIDGE_INT`, `BRIDGE_FLOAT`,
+/// `BRIDGE_STR` or `BRIDGE_DYN_INT`) and the value at +8 (`i32`, `f64`,
+/// string handle, or an integer as an `f64`). Each call site writes from a
+/// fixed slot (calls inside its parameters use the following slots).
+pub const BRIDGE_SLOT: u32 = 16;
+pub const BRIDGE_SLOTS: u32 = 64;
+pub const BRIDGE_INT: i32 = 0;
+pub const BRIDGE_FLOAT: i32 = 1;
+pub const BRIDGE_STR: i32 = 2;
+pub const BRIDGE_DYN_INT: i32 = 3;
 /// Scratch buffers of the number formatting helpers (128 bytes each).
 pub const SCR_A: u32 = 192;
 pub const SCR_B: u32 = 320;
@@ -141,6 +152,9 @@ pub struct Layout {
     pub n_consts: u32,
     /// Pending Gosubs and procedure calls (`PEND_ENTRY` bytes each).
     pub pending: u32,
+    /// Parameters of keyword bridge calls (`BRIDGE_SLOTS` of
+    /// `BRIDGE_SLOT` bytes: see `BRIDGE_SLOT`).
+    pub bridge: u32,
     pub locals: u32,
     pub frame_size: u32,
     pub max_frames: u32,
@@ -159,7 +173,8 @@ impl Layout {
         let consts = (args + max_params * 8).next_multiple_of(16);
         let stack_limit = ((c.stack_size + 1) * 42).saturating_sub(64) as u32;
         let pending = (consts + n_consts * 4).next_multiple_of(16);
-        let locals = (pending + (stack_limit / 12 + 2) * PEND_ENTRY).next_multiple_of(16);
+        let bridge = (pending + (stack_limit / 12 + 2) * PEND_ENTRY).next_multiple_of(16);
+        let locals = (bridge + BRIDGE_SLOTS * BRIDGE_SLOT).next_multiple_of(16);
         let max_locals = c.procs.iter().map(|p| p.locals.len() as u32).max().unwrap_or(0).max(1);
         let frame_size = max_locals * 8;
         // The control stack limit of the interpreter (`Interp::start`)
@@ -174,6 +189,7 @@ impl Layout {
             consts,
             n_consts,
             pending,
+            bridge,
             locals,
             frame_size,
             max_frames,
