@@ -5,6 +5,8 @@
 //! reproduces AMOS quirks such as `10*3/4 = 0` (evaluated as `10*(3/4)`).
 
 use super::value::{AStr, ENT_NUL, STRING_MAX, Value, Var, astr, empty_str, float_to_int};
+use std::rc::Rc;
+
 use super::params::ArgVec;
 use super::{Exc, Host, Interp, R, err};
 use crate::errors;
@@ -124,9 +126,17 @@ impl Interp {
             }
             TK_CH1 | TK_CH2 => {
                 let n = self.rd(p + 2) as usize;
-                let s = astr(&self.code[p + 4..p + 4 + n]);
                 self.pc = p + 4 + n + (n & 1);
-                Ok(Value::Str(s))
+                if !Rc::ptr_eq(&self.code, &self.prog_code) {
+                    return Ok(Value::Str(astr(&self.code[p + 4..p + 4 + n])));
+                }
+                // A constant of the program: made once, then shared.
+                if self.str_consts.is_empty() {
+                    self.str_consts.resize(self.code.len() / 2 + 1, None);
+                }
+                let slot = &mut self.str_consts[p / 2];
+                let s = slot.get_or_insert_with(|| astr(&self.code[p + 4..p + 4 + n]));
+                Ok(Value::Str(s.clone()))
             }
             TK_PAR1 => {
                 self.pc += 2;

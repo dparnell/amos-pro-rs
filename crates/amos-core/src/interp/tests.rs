@@ -195,3 +195,11 @@ fn input() {
     let out = run_with("Input \"Name\";N$ : Print \"Hi \";N$", &["Bob"]).unwrap();
     assert_eq!(out, "Name\nHi Bob\n");
 }
+
+#[test]
+fn shared_string_constants_are_never_changed() {
+    // String constants are shared between evaluations: changing a
+    // variable that holds one must not change the constant.
+    let src = "For I=1 To 3\nA$=\"abc\" : Mid$(A$,1,1)=\"X\" : Left$(A$,1)=\"Y\" : Right$(A$,1)=\"Z\"\nPrint A$;\"abc\"\nNext I";
+    assert_eq!(run(src), "YbZabc\nYbZabc\nYbZabc\n");
+}

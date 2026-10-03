@@ -253,6 +253,12 @@ pub struct Interp {
     frame_pool: Vec<Box<ProcFrame>>,
     /// Vector reused for the arguments of procedure calls.
     proc_args: Vec<Value>,
+    /// The program's code as `start` set it, and the string constants
+    /// met in it (index = position / 2): evaluating a constant again
+    /// shares its string instead of allocating a copy. Only used while
+    /// `code` is this code (not for direct mode lines or code swapped in).
+    prog_code: Rc<Vec<u8>>,
+    str_consts: Vec<Option<value::AStr>>,
 }
 
 impl Default for Interp {
@@ -303,6 +309,8 @@ impl Interp {
             preset_set: false,
             frame_pool: Vec::new(),
             proc_args: Vec::new(),
+            prog_code: Rc::new(Vec::new()),
+            str_consts: Vec::new(),
         }
     }
 
@@ -315,6 +323,8 @@ impl Interp {
 
     pub fn start(&mut self, compiled: Rc<Compiled>) {
         self.code = Rc::new(compiled.code.clone());
+        self.prog_code = self.code.clone();
+        self.str_consts.clear();
         self.prog_len = compiled.code.len();
         self.globals = compiled.globals.iter().map(|_| Var::Unset).collect();
         self.ctl.clear();
