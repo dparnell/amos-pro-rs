@@ -399,3 +399,42 @@ A$=\"abcdef\" : N=2 : Print Mid$(A$+\"gh\",N*2,N+1);Left$(A$,N)+Right$(A$,N);Ins
     ];
     assert_eq!(errs, expected);
 }
+
+/// Integer array elements read by the integer evaluator: the same values
+/// and errors as the general path (expected values from the interpreter
+/// before the change).
+#[test]
+fn integer_array_elements_in_expressions() {
+    let src = "Dim T(10),U(3,4),F#(5),S$(5)\n\
+For I=0 To 10 : T(I)=I*I-7 : Next I\n\
+For I=0 To 3 : For J=0 To 4 : U(I,J)=I*10+J : Next J : Next I\n\
+F#(2)=2.5 : S$(1)=\"x\" : I=3\n\
+Print T(3);T(I+1)+1;-T(2);T(T(3)+1)*2;U(2,3);U(I,I+1)-U(1,0);T(10)/T(4)\n\
+Print T(I)=2;T(1) And 3;F#(2)+T(1);S$(1)+\"y\";(T(5)+T(6))*-1;Not T(0)\n";
+    let out = run(src);
+    let cases = [
+        "Dim T(5) : A=T(6)",
+        "Dim T(5) : A=T(-1)+1",
+        "Dim U(2,2) : A=U(1,3)",
+        "Dim U(2,2) : A=U(1)",
+        "A=T(1)",
+        "Dim T(5) : A=T(1.6)+T(2)",
+        "Dim T(5) : T(2)=$7FFFFFFF : A=T(2)+1",
+    ];
+    let errs: Vec<String> = cases
+        .iter()
+        .map(|c| format!("{:?}", run_with(c, &[])))
+        .collect();
+    assert_eq!(out, " 2 10 3 4 23 24 10\n-1 2-3.5xy-47 6\n");
+    let ill = "Err(Error(23))";
+    let expected = [
+        ill,
+        ill,
+        ill,
+        ill,
+        "Err(Error(27))",
+        "Ok(\"\")",
+        "Err(Error(29))",
+    ];
+    assert_eq!(errs, expected);
+}

@@ -4,7 +4,9 @@
 //! token value, and operators of equal level associate to the left. This
 //! reproduces AMOS quirks such as `10*3/4 = 0` (evaluated as `10*(3/4)`).
 
-use super::value::{AStr, ENT_NUL, STRING_MAX, Value, Var, astr, empty_str, float_to_int};
+use super::value::{
+    AStr, ArrayData, ENT_NUL, STRING_MAX, Value, Var, astr, empty_str, float_to_int,
+};
 use std::rc::Rc;
 
 use super::params::ArgVec;
@@ -61,16 +63,19 @@ impl Interp {
             }
             TK_VAR => {
                 let flags = self.code[q + 5];
-                if flags & (crate::program::var_flags::ARRAY | 3) != 0 {
+                if flags & 3 != 0 {
                     return None;
                 }
-                let v = match self.var_slot_ref(self.rd(q + 2)) {
-                    Var::Scalar(Value::Int(i)) => *i,
-                    Var::Unset => 0,
-                    _ => return None,
-                };
                 *p = q + 6 + self.code[q + 4] as usize;
-                v
+                if flags & crate::program::var_flags::ARRAY != 0 {
+                    self.int_element(self.rd(q + 2), p)?
+                } else {
+                    match self.var_slot_ref(self.rd(q + 2)) {
+                        Var::Scalar(Value::Int(i)) => *i,
+                        Var::Unset => 0,
+                        _ => return None,
+                    }
+                }
             }
             TK_PAR1 => {
                 *p = q + 2;
@@ -88,6 +93,40 @@ impl Interp {
             _ => return None,
         };
         Some(if negate { v.wrapping_neg() } else { v })
+    }
+
+    /// `int_operand` for an element of the integer array in `slot`, `*p`
+    /// after the array token: `(i, ...)` with integer only indices, read
+    /// as `var_ref` / `read_loc` do (`None` for anything else, including
+    /// the errors, left to the general path).
+    #[inline(never)]
+    fn int_element(&self, slot: u16, p: &mut usize) -> Option<i32> {
+        if self.rd(*p) != TK_PAR1 {
+            return None;
+        }
+        *p += 2;
+        let mut idx = [0i32; 8];
+        let mut n = 0;
+        loop {
+            let v = self.int_prec(p, 0x7FFF)?;
+            *idx.get_mut(n)? = v;
+            n += 1;
+            match self.rd(*p) {
+                TK_COMMA => *p += 2,
+                TK_PAR2 => {
+                    *p += 2;
+                    break;
+                }
+                _ => return None,
+            }
+        }
+        match self.var_slot_ref(slot) {
+            Var::Array(a) => match &a.data {
+                ArrayData::Int(v) => v.get(a.index(&idx[..n])?).copied(),
+                _ => None,
+            },
+            _ => None,
+        }
     }
 
     pub fn eval_int(&mut self, hw: &mut dyn Host) -> R<i32> {
