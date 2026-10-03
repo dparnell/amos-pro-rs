@@ -47,7 +47,8 @@ pub fn compile(args: &[String]) -> Result<(), String> {
 pub fn start(m: &mut Machine, prg: &Program) -> Result<CompiledProgram, String> {
     let t = Instant::now();
     let o = amos_compiler::compile_full(prg).map_err(|e| e.to_string())?;
-    let p = CompiledProgram::start(m, prg, &o.wasm)?;
+    let cache = dirs::cache_dir().map(|d| d.join("amos-rs").join("jit"));
+    let p = CompiledProgram::start_cached(m, prg, &o.wasm, cache.as_deref())?;
     println!(
         "-- compiled: {} instructions ({} interpreted), {} bytes, {:.1} ms",
         o.instructions,

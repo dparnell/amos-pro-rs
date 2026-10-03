@@ -365,7 +365,8 @@ fn standalone_machine() -> Option<(Machine, String, Option<amos_wasmhost::Compil
     #[cfg(not(target_arch = "wasm32"))]
     let compiled = match (&bundle.module, &m.interp.prg) {
         (Some(wasm), Some(prg)) if m.interp.running => {
-            match amos_wasmhost::CompiledProgram::new(wasm, prg.clone()) {
+            let cache = dirs::cache_dir().map(|d| d.join("amos-rs").join("jit"));
+            match amos_wasmhost::CompiledProgram::new_cached(wasm, prg.clone(), cache.as_deref()) {
                 Ok(cp) => {
                     log::info!("Running the compiled program");
                     Some(cp)

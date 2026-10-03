@@ -10,4 +10,5 @@ amos-build = { version = "0.1.0", path = "../amos-build" }
 amos-compiler = { version = "0.1.0", path = "../amos-compiler" }
 amos-core = { version = "0.1.0", path = "../amos-core" }
 amos-wasmhost = { version = "0.1.0", path = "../amos-wasmhost" }
+dirs = "7.0.0"
 png = "0.18.1"
