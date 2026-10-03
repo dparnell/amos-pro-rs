@@ -382,6 +382,53 @@ impl Interp {
         Ok(v)
     }
 
+    // Parameters of the common string functions, read one by one: the same
+    // values, conversions and errors as `fn_args` (`args_into`) without the
+    // general list. (No new aggregate of values: their drop code changes
+    // what is inlined into `run`.)
+
+    /// One parameter of signature type `ty`: omitted (`ENT_NUL`), or
+    /// evaluated and converted.
+    #[inline]
+    fn fn_param(&mut self, hw: &mut dyn Host, ty: u8) -> R<Value> {
+        let t = self.peek();
+        if t == TK_COMMA || t == TK_TO || t == TK_PAR2 || Self::is_end(t) {
+            return Ok(Value::Int(ENT_NUL));
+        }
+        let v = self.eval(hw)?;
+        self.convert_param(ty, v)
+    }
+
+    /// The comma between two parameters.
+    #[inline]
+    fn fn_sep(&mut self) -> R<()> {
+        if self.peek() != TK_COMMA {
+            return err(errors::SYNTAX_ERROR);
+        }
+        self.pc += 2;
+        Ok(())
+    }
+
+    /// The parameter of a function of signature `4` (any type).
+    #[inline]
+    fn fn_arg_any(&mut self, hw: &mut dyn Host) -> R<Value> {
+        self.expect(TK_PAR1)?;
+        let v = self.fn_param(hw, b'4')?;
+        self.expect(TK_PAR2)?;
+        Ok(v)
+    }
+
+    /// `(string, integer)` parameters (signature `2,0`).
+    #[inline]
+    fn fn_str_int(&mut self, hw: &mut dyn Host) -> R<(AStr, i32)> {
+        self.expect(TK_PAR1)?;
+        let s = str_of(&self.fn_param(hw, b'2')?);
+        self.fn_sep()?;
+        let n = int_of(&self.fn_param(hw, b'0')?);
+        self.expect(TK_PAR2)?;
+        Ok((s, n))
+    }
+
     /// Functions implemented by the interpreter itself (strings, maths,
     /// procedures, errors). Returns `None` for others. pc is after the token.
     fn core_function(&mut self, hw: &mut dyn Host, t: u16) -> R<Option<Value>> {
@@ -500,14 +547,11 @@ impl Interp {
                 let s = self.str_arg(hw)?;
                 self.val(&s)
             }
-            STR_S => {
-                let mut a = self.fn_args(hw, "4")?;
-                match a.take(0) {
-                    Value::Int(i) => Value::Str(astr(crate::ffp::int_text(i, &mut [0; 11]))),
-                    Value::Float(f) => Value::Str(astr(self.format_float(f).as_bytes())),
-                    Value::Str(_) => return err(errors::TYPE_MISMATCH),
-                }
-            }
+            STR_S => match self.fn_arg_any(hw)? {
+                Value::Int(i) => Value::Str(astr(crate::ffp::int_text(i, &mut [0; 11]))),
+                Value::Float(f) => Value::Str(astr(self.format_float(f).as_bytes())),
+                Value::Str(_) => return err(errors::TYPE_MISMATCH),
+            },
             UPPER_S | LOWER_S => {
                 let s = self.str_arg(hw)?;
                 let upper = t == UPPER_S;
@@ -535,9 +579,7 @@ impl Interp {
                 Value::Str(filled(b' ', n))
             }
             STRING_S => {
-                let a = self.fn_args(hw, "2,0")?;
-                let s = str_of(&a[0]);
-                let n = int_of(&a[1]);
+                let (s, n) = self.fn_str_int(hw)?;
                 if n < 0 {
                     return err(errors::ILLEGAL_FUNCTION_CALL);
                 }
@@ -547,18 +589,14 @@ impl Interp {
                 }
             }
             REPEAT_S => {
-                let a = self.fn_args(hw, "2,0")?;
-                let s = str_of(&a[0]);
-                let n = int_of(&a[1]);
+                let (s, n) = self.fn_str_int(hw)?;
                 if !(0..207).contains(&n) {
                     return err(errors::ILLEGAL_FUNCTION_CALL);
                 }
                 Value::Str(repeat_code(&s, n))
             }
             LEFT_S | RIGHT_S => {
-                let a = self.fn_args(hw, "2,0")?;
-                let s = str_of(&a[0]);
-                let n = int_of(&a[1]);
+                let (s, n) = self.fn_str_int(hw)?;
                 if n < 0 {
                     return err(errors::ILLEGAL_FUNCTION_CALL);
                 }
@@ -566,17 +604,25 @@ impl Interp {
                 Value::Str(if t == LEFT_S { astr(&s[..n]) } else { astr(&s[s.len() - n..]) })
             }
             MID_S | MID_S_2 => {
-                let a = self.fn_args(hw, sig())?;
-                let s = str_of(&a[0]);
-                let p = int_of(&a[1]);
+                // `2,0,0` / `2,0`
+                self.expect(TK_PAR1)?;
+                let s = str_of(&self.fn_param(hw, b'2')?);
+                self.fn_sep()?;
+                let p = int_of(&self.fn_param(hw, b'0')?);
+                let n = if t == MID_S {
+                    self.fn_sep()?;
+                    Some(int_of(&self.fn_param(hw, b'0')?))
+                } else {
+                    None
+                };
+                self.expect(TK_PAR2)?;
                 if p < 0 {
                     return err(errors::ILLEGAL_FUNCTION_CALL);
                 }
                 let start = (p.max(1) - 1) as usize;
                 if start >= s.len() {
                     Value::Str(empty_str())
-                } else if a.len() == 3 {
-                    let n = int_of(&a[2]);
+                } else if let Some(n) = n {
                     if n == 0 {
                         Value::Str(empty_str())
                     } else if n < 0 {
@@ -590,10 +636,18 @@ impl Interp {
                 }
             }
             INSTR | INSTR_2 => {
-                let a = self.fn_args(hw, sig())?;
-                let h = str_of(&a[0]);
-                let n = str_of(&a[1]);
-                let start = if a.len() == 3 { int_of(&a[2]) } else { 1 };
+                // `2,2` / `2,2,0`
+                self.expect(TK_PAR1)?;
+                let h = str_of(&self.fn_param(hw, b'2')?);
+                self.fn_sep()?;
+                let n = str_of(&self.fn_param(hw, b'2')?);
+                let start = if t == INSTR_2 {
+                    self.fn_sep()?;
+                    int_of(&self.fn_param(hw, b'0')?)
+                } else {
+                    1
+                };
+                self.expect(TK_PAR2)?;
                 if start < 0 {
                     return err(errors::ILLEGAL_FUNCTION_CALL);
                 }
@@ -607,17 +661,17 @@ impl Interp {
                 let (b, len) = radix_text(n, hex, digits);
                 Value::Str(astr(&b[..len]))
             }
-            ABS => match self.fn_args(hw, "4")?.take(0) {
+            ABS => match self.fn_arg_any(hw)? {
                 Value::Int(i) => Value::Int(i.wrapping_abs()),
                 Value::Float(f) => Value::Float(f.abs()),
                 v => v,
             },
-            INT => match self.fn_args(hw, "4")?.take(0) {
+            INT => match self.fn_arg_any(hw)? {
                 Value::Float(f) => Value::Float(self.round_float(f.floor())),
                 v => v,
             },
             SGN => {
-                let v = self.fn_args(hw, "4")?.take(0);
+                let v = self.fn_arg_any(hw)?;
                 Value::Int(match v {
                     Value::Int(i) => i.signum(),
                     Value::Float(f) => {

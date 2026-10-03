@@ -19,7 +19,10 @@ impl Host for TextHost {
         Ok(())
     }
     fn function(&mut self, _it: &mut Interp, kw: Keyword) -> R<Value> {
-        Err(Exc::Message(format!("function {:?} not available", kw.def().map(|d| d.name))))
+        Err(Exc::Message(format!(
+            "function {:?} not available",
+            kw.def().map(|d| d.name)
+        )))
     }
     fn reserved_assign(&mut self, _it: &mut Interp, _kw: Keyword) -> R<()> {
         Ok(())
@@ -47,7 +50,10 @@ fn run_with(src: &str, input: &[&str]) -> Result<String, StopReasonOrError> {
     let prg = tokenise_program(src.as_bytes()).unwrap();
     let mut it = Interp::new();
     it.load(&prg).map_err(|e| StopReasonOrError::Test(e.code))?;
-    let mut host = TextHost { input: input.iter().map(|s| s.as_bytes().to_vec()).collect(), ..Default::default() };
+    let mut host = TextHost {
+        input: input.iter().map(|s| s.as_bytes().to_vec()).collect(),
+        ..Default::default()
+    };
     for _ in 0..10_000 {
         it.vbl();
         match it.run(&mut host, 100_000) {
@@ -108,14 +114,20 @@ fn floats() {
 
 #[test]
 fn strings() {
-    assert_eq!(run("A$=\"Hello\" : Print Left$(A$,2);Right$(A$,2);Mid$(A$,2,3)"), "Heloell\n");
+    assert_eq!(
+        run("A$=\"Hello\" : Print Left$(A$,2);Right$(A$,2);Mid$(A$,2,3)"),
+        "Heloell\n"
+    );
     assert_eq!(run("Print Len(\"abc\");Asc(\"A\");Chr$(66)"), " 3 65B\n");
     assert_eq!(run("Print Instr(\"hello\",\"l\")"), " 3\n");
     assert_eq!(run("Print \"aabb\"-\"ab\""), "\n");
     assert_eq!(run("Print Upper$(\"abc\")+Lower$(\"DEF\")"), "ABCdef\n");
     assert_eq!(run("Print Str$(12);Val(\"34\")"), " 12 34\n");
     assert_eq!(run("Print Hex$(255);Hex$(255,4);Bin$(5)"), "$FF$00FF%101\n");
-    assert_eq!(run("A$=\"Hello\" : Mid$(A$,2,3)=\"EYY\" : Print A$"), "HEYYo\n");
+    assert_eq!(
+        run("A$=\"Hello\" : Mid$(A$,2,3)=\"EYY\" : Print A$"),
+        "HEYYo\n"
+    );
     assert_eq!(run("Print String$(\"ab\",3);Space$(2);\"|\""), "aaa  |\n");
 }
 
@@ -126,9 +138,15 @@ fn loops() {
     assert_eq!(run("For I=6 To 0 Step -2\nPrint I;\nNext I"), " 6 4 2 0");
     assert_eq!(run("I=0\nRepeat\nInc I\nUntil I=5\nPrint I"), " 5\n");
     assert_eq!(run("I=0\nWhile I<3\nInc I\nWend\nPrint I"), " 3\n");
-    assert_eq!(run("I=0\nDo\nInc I\nIf I=4 Then Exit\nLoop\nPrint I"), " 4\n");
+    assert_eq!(
+        run("I=0\nDo\nInc I\nIf I=4 Then Exit\nLoop\nPrint I"),
+        " 4\n"
+    );
     assert_eq!(run("For I=1 To 10\nExit If I=3\nNext\nPrint I"), " 3\n");
-    assert_eq!(run("For I=1 To 2\nFor J=1 To 2\nPrint I*10+J;\nNext J\nNext I"), " 11 12 21 22");
+    assert_eq!(
+        run("For I=1 To 2\nFor J=1 To 2\nPrint I*10+J;\nNext J\nNext I"),
+        " 11 12 21 22"
+    );
 }
 
 #[test]
@@ -138,14 +156,23 @@ fn if_structures() {
     assert_eq!(run("A=1 : If A=1 Then Print \"y\" Else Print \"n\""), "y\n");
     assert_eq!(run("A=2 : If A=1 Then Print \"y\" Else Print \"n\""), "n\n");
     assert_eq!(run("A=2 : If A=1 Then Print \"y\"\nPrint \"z\""), "z\n");
-    assert_eq!(run("A=1\nIf A=1\nPrint \"1\"\nEnd If\nPrint \"2\""), "1\n2\n");
+    assert_eq!(
+        run("A=1\nIf A=1\nPrint \"1\"\nEnd If\nPrint \"2\""),
+        "1\n2\n"
+    );
 }
 
 #[test]
 fn gosub_goto() {
-    assert_eq!(run("Gosub L : Print \"b\" : End\nL: Print \"a\" : Return"), "a\nb\n");
+    assert_eq!(
+        run("Gosub L : Print \"b\" : End\nL: Print \"a\" : Return"),
+        "a\nb\n"
+    );
     assert_eq!(run("Goto 10\nPrint \"x\"\n10 Print \"y\""), "y\n");
-    assert_eq!(run("A=2 : On A Goto L1,L2\nL1: Print 1 : End\nL2: Print 2"), " 2\n");
+    assert_eq!(
+        run("A=2 : On A Goto L1,L2\nL1: Print 1 : End\nL2: Print 2"),
+        " 2\n"
+    );
 }
 
 #[test]
@@ -163,30 +190,57 @@ fn procedures() {
 
 #[test]
 fn arrays_and_data() {
-    assert_eq!(run("Dim A(3)\nFor I=0 To 3 : A(I)=I*I : Next\nPrint A(3)"), " 9\n");
+    assert_eq!(
+        run("Dim A(3)\nFor I=0 To 3 : A(I)=I*I : Next\nPrint A(3)"),
+        " 9\n"
+    );
     assert_eq!(run("Dim B$(2,2)\nB$(1,2)=\"x\"\nPrint B$(1,2)"), "x\n");
     assert_eq!(run("Read A,B$ : Print A;B$\nData 5,\"z\""), " 5z\n");
-    assert_eq!(run("For I=1 To 3 : Read A : Print A; : Next\nData 1,2\nData 3"), " 1 2 3");
-    assert_eq!(run("Read A : Restore : Read B : Print A;B\nData 7"), " 7 7\n");
-    assert_eq!(run("Dim C(3)\nC(0)=3 : C(1)=1 : C(2)=2 : C(3)=0\nSort C(0)\nPrint C(0);C(3)"), " 0 3\n");
+    assert_eq!(
+        run("For I=1 To 3 : Read A : Print A; : Next\nData 1,2\nData 3"),
+        " 1 2 3"
+    );
+    assert_eq!(
+        run("Read A : Restore : Read B : Print A;B\nData 7"),
+        " 7 7\n"
+    );
+    assert_eq!(
+        run("Dim C(3)\nC(0)=3 : C(1)=1 : C(2)=2 : C(3)=0\nSort C(0)\nPrint C(0);C(3)"),
+        " 0 3\n"
+    );
 }
 
 #[test]
 fn errors_and_trapping() {
-    assert_eq!(run_err("Print 1/0"), StopReasonOrError::Error(crate::errors::DIVISION_BY_ZERO));
-    assert_eq!(run_err("Read A"), StopReasonOrError::Error(crate::errors::OUT_OF_DATA));
-    assert_eq!(run_err("Return"), StopReasonOrError::Error(crate::errors::RETURN_WITHOUT_GOSUB));
+    assert_eq!(
+        run_err("Print 1/0"),
+        StopReasonOrError::Error(crate::errors::DIVISION_BY_ZERO)
+    );
+    assert_eq!(
+        run_err("Read A"),
+        StopReasonOrError::Error(crate::errors::OUT_OF_DATA)
+    );
+    assert_eq!(
+        run_err("Return"),
+        StopReasonOrError::Error(crate::errors::RETURN_WITHOUT_GOSUB)
+    );
     let p = "On Error Goto H\nPrint 1/0\nPrint \"after\"\nEnd\nH: Print \"err\";Errn\nResume Next";
     assert_eq!(run(p), "err 20\nafter\n");
     assert_eq!(run("Trap Print 1/0\nPrint Errtrap"), " 20\n");
-    assert_eq!(run_err("A=\"x\""), StopReasonOrError::Test(crate::interp::verify::terr::TYPE_MISMATCH));
+    assert_eq!(
+        run_err("A=\"x\""),
+        StopReasonOrError::Test(crate::interp::verify::terr::TYPE_MISMATCH)
+    );
 }
 
 #[test]
 fn def_fn_and_misc() {
     assert_eq!(run("Def Fn SQ(X)=X*X\nPrint Fn SQ(4)"), " 16\n");
     assert_eq!(run("A=1 : B=2 : Swap A,B : Print A;B"), " 2 1\n");
-    assert_eq!(run("A=5 : Add A,3 : Print A : Add A,10,0 To 10 : Print A"), " 8\n 0\n");
+    assert_eq!(
+        run("A=5 : Add A,3 : Print A : Add A,10,0 To 10 : Print A"),
+        " 8\n 0\n"
+    );
     assert_eq!(run("Print Max(3,7);Min(3,7)"), " 7 3\n");
 }
 
@@ -215,9 +269,18 @@ Print $7FFFFFFF-1;%101+$10;U;-(-A)\n";
     // (Expected output from the evaluator before the fast path.)
     assert_eq!(run(src), " 1-7 0-4-5-1 0 0\n 1\n 2147483646 21 0 7\n");
     // Errors: the same as the general evaluator.
-    assert_eq!(run_err("A=$7FFFFFFF : B=A+1"), StopReasonOrError::Error(crate::errors::OVERFLOW));
-    assert_eq!(run_err("A=0 : B=5/A"), StopReasonOrError::Error(crate::errors::DIVISION_BY_ZERO));
-    assert_eq!(run_err("A=0 : B=5/(A*1)+1"), StopReasonOrError::Error(crate::errors::DIVISION_BY_ZERO));
+    assert_eq!(
+        run_err("A=$7FFFFFFF : B=A+1"),
+        StopReasonOrError::Error(crate::errors::OVERFLOW)
+    );
+    assert_eq!(
+        run_err("A=0 : B=5/A"),
+        StopReasonOrError::Error(crate::errors::DIVISION_BY_ZERO)
+    );
+    assert_eq!(
+        run_err("A=0 : B=5/(A*1)+1"),
+        StopReasonOrError::Error(crate::errors::DIVISION_BY_ZERO)
+    );
 }
 
 /// Host whose instructions change the innermost For loop in place (its
@@ -285,4 +348,54 @@ fn ctl_generation_changes_with_the_stacks() {
 G: Repeat : Inc K : Until K=2 : While K<4 : Inc K : Wend : Do : Exit : Loop : Return\n\
 Procedure P[N]\nFor J=1 To N : Print J; : Next J\nIf N=2 Then Pop Proc\nEnd Proc\n");
     assert_eq!(out, " 1 1 2");
+}
+
+/// String and maths functions whose parameters are read one by one: the
+/// same results and errors as the general parameter list (expected values
+/// from the interpreter before the change).
+#[test]
+fn string_function_parameters() {
+    let out = run(
+        "Print Mid$(\"hello\",2,3);Mid$(\"hello\",2);Mid$(\"hello\",0,2);Mid$(\"hello\",9,2);\"<\";Mid$(\"hello\",2,0);\">\"\n\
+Print Left$(\"hello\",2);Left$(\"hello\",99);Right$(\"hello\",2);\"<\";Right$(\"hello\",0);\">\"\n\
+Print Instr(\"hello\",\"l\");Instr(\"hello\",\"l\",4);Instr(\"hello\",\"z\");Instr(\"hello\",\"\",2);Instr(\"hello\",\"l\",0)\n\
+Print Str$(12);Str$(-3);Str$(1.5);Abs(-3);Abs(-2.5);Int(2.7);Int(-2.5);Sgn(-4);Sgn(0.5);Sgn(0)\n\
+Print String$(\"ab\",3);Repeat$(\"ab\",3);Mid$(\"hello\",2.7,1.6);Left$(\"hello\",2.5);Right$(\"hello\",1.5)\n\
+A$=\"abcdef\" : N=2 : Print Mid$(A$+\"gh\",N*2,N+1);Left$(A$,N)+Right$(A$,N);Instr(A$+A$,\"cd\",N+2)\n",
+    );
+    let cases = [
+        "A$=Mid$(\"hello\",-1,2)",
+        "A$=Mid$(\"hello\",1,-1)",
+        "A$=Mid$(\"hello\",,2)",
+        "A$=Mid$(\"hello\",9,-1)",
+        "A$=Left$(\"hello\",-1)",
+        "A$=Right$(\"hello\",-1)",
+        "A=Instr(\"a\",\"b\",-1)",
+        "A$=Str$(\"a\")",
+        "A$=String$(\"a\",-1)",
+        "A$=Mid$(\"a\",1.5e10,1)",
+    ];
+    let errs: Vec<String> = cases
+        .iter()
+        .map(|c| format!("{:?}", run_with(c, &[])))
+        .collect();
+    assert_eq!(
+        out,
+        "ellellohe<>\nhehellolo<>\n 3 4 0 0 3\n 12-3 1.5 3 2.5 2-3-1 1 0\n\
+         aaa\u{1b}R0ab\u{1b}R3eheo\ndefabef 9\n"
+    );
+    let ill = "Err(Error(23))";
+    let expected = [
+        ill,
+        ill,
+        ill,
+        "Ok(\"\")",
+        ill,
+        ill,
+        ill,
+        "Err(Test(40))",
+        ill,
+        "Ok(\"\")",
+    ];
+    assert_eq!(errs, expected);
 }
