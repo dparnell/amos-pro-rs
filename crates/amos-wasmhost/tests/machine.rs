@@ -396,3 +396,23 @@ fn multi_wait_and_colour_match_the_interpreter() {
         compare_with_input(p, 12);
     }
 }
+
+/// The typed keyword functions called directly by compiled code
+/// (`runtime/direct.rs`): string parameters borrowed from the module's
+/// memory (constants, variables, results, empty, long), omitted
+/// parameters, every form, errors; collisions and Dialog.
+#[test]
+fn direct_typed_keywords_match_the_interpreter() {
+    let progs = [
+        "Curs Off\nA$=\"var\" : For I=0 To 6 : Locate 0,I : Centre \"hello\"+Str$(I) : Next : Centre A$ : Centre \"\"\nCentre String$(\"x\",200) : Centre Mid$(\"abcdef\",2,3)",
+        "Curs Off\nScreen Open 1,320,200,16,Lowres : Cls 0 : Ink 3\nFor I=0 To 9 : Text I*20,I*15+10,\"T\"+Str$(I) : Gr Locate I*10,I : Text ,,\"o\" : Next\nText 10,190,\"\" : Text ,50,\"y\"",
+        "Curs Off\nScreen Open 1,320,100,16,Lowres : Screen Open 2,320,100,16,Lowres\nFor I=0 To 3 : Screen I mod 3 : Print Screen; : Next\nOn Error Goto H : Screen 5 : Print \"no\" : End\nH: Print \"e\";Errn : Resume Next",
+        "Curs Off\nScreen Open 1,320,200,16,Lowres\nCls : Cls 2 : Cls 3,10,10 To 100,100 : Cls 4,-5,-5 To 400,400\nFor I=0 To 30 : Cls I mod 16,I,I To I+20,I+20 : Next",
+        "Screen Open 0,320,200,16,Lowres : Curs Off : Cls 0\nInk 3 : Bar 0,0 To 15,15 : Get Bob 1,0,0 To 16,16 : Cls 0\nBob 2,100,50,1 : Bob 3,160,50,1\nFor I=0 To 40 : Bob 1,I*5,50,1 : Bob 4,,I, : Wait Vbl\nC=Bob Col(1) : D=Bob Col(1,3 To 3) : Print I;C;D;Col(2);Col(3)\nNext",
+        "Screen Open 0,320,200,16,Lowres : Curs Off : Cls 0\nInk 3 : Bar 0,0 To 15,15 : Get Sprite 1,0,0 To 16,16 : Cls 0\nFor I=0 To 40 : Sprite 1,128+I*5,50+I*3,1 : Sprite 2,300-I*4,80,1 : Sprite 3,,,\nC=Sprite Col(1) : D=Sprite Col(2,1 To 3) : E=Bobsprite Col(1) : F=Spritebob Col(1,0 To 5)\nIf C or D or E or F Then Print I;C;D;E;F;\nWait Vbl : Next",
+        "Curs Off\nOn Error Goto H\nPrint Dialog(1) : Print Dialog(-1)\nEnd\nH: Print \"e\";Errn; : Resume Next",
+    ];
+    for p in progs {
+        compare_with_input(p, 50);
+    }
+}

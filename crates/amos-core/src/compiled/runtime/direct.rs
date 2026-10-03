@@ -23,14 +23,15 @@ pub(super) struct Ints<'a> {
 /// the keywords `instruction` / `function` run whose typed function takes
 /// strings (`&[u8]`). Every other given parameter must be an integer.
 pub(super) fn string_params(token: u16) -> u32 {
-    // (None yet: Centre and Text once their typed functions exist.)
-    let _ = token;
-    0
+    match token {
+        CENTRE => 1,
+        TEXT => 1 << 2,
+        _ => 0,
+    }
 }
 
 impl Ints<'_> {
     /// `Args::str(k)`: the empty string when omitted.
-    #[allow(dead_code)] // (the typed Centre / Text will use it)
     fn str(&self, k: usize) -> &[u8] {
         if self.given & (1 << k) == 0 { &[] } else { self.strs.get(k).copied().unwrap_or(&[]) }
     }
@@ -72,6 +73,15 @@ pub(super) fn has_instruction(token: u16) -> bool {
             | POKE
             | DOKE
             | LOKE
+            | SCREEN
+            | CENTRE
+            | GR_LOCATE
+            | CLS
+            | CLS_2
+            | CLS_3
+            | BOB
+            | SPRITE
+            | TEXT
     )
 }
 
@@ -99,6 +109,15 @@ pub(super) fn has_function(token: u16) -> bool {
             | LEEK
             | MOUSE_CLICK
             | SCANCODE
+            | DIALOG
+            | BOB_COL
+            | BOB_COL_2
+            | BOBSPRITE_COL
+            | BOBSPRITE_COL_2
+            | SPRITE_COL
+            | SPRITE_COL_2
+            | SPRITEBOB_COL
+            | SPRITEBOB_COL_2
     )
 }
 
@@ -130,6 +149,15 @@ pub(super) fn instruction(hw: &mut Hardware, it: &mut Interp, token: u16, a: Int
         POKE => hw.poke(it, a.int(0), a.int(1)),
         DOKE => hw.doke(it, a.int(0), a.int(1)),
         LOKE => hw.loke(it, a.int(0), a.int(1)),
+        SCREEN => hw.screen(a.int(0)),
+        CENTRE => hw.centre(a.str(0)),
+        GR_LOCATE => hw.gr_locate(a.opt(0), a.opt(1)),
+        CLS => hw.cls(None, None),
+        CLS_2 => hw.cls(Some(a.int(0)), None),
+        CLS_3 => hw.cls(Some(a.int(0)), Some((a.int(1), a.int(2), a.int(3), a.int(4)))),
+        BOB => hw.bob(a.int(0), a.opt(1), a.opt(2), a.opt(3)),
+        SPRITE => hw.sprite(a.int(0), a.opt(1), a.opt(2), a.opt(3)),
+        TEXT => hw.text(a.opt(0), a.opt(1), a.str(2)),
         _ => unreachable!("not a direct instruction"),
     }
 }
@@ -159,6 +187,25 @@ pub(super) fn function(hw: &mut Hardware, it: &mut Interp, token: u16, a: Ints) 
         LEEK => hw.leek(it, a.int(0)),
         MOUSE_CLICK => hw.mouse_click(),
         SCANCODE => hw.scancode(),
+        DIALOG => {
+            // (The handler checks the program before reading n, which the
+            // module evaluated without touching the dialogs.)
+            hw.dialogs_check_program(it);
+            hw.dialog_fn(it, a.int(0))?
+        }
+        BOB_COL | BOB_COL_2 | BOBSPRITE_COL | BOBSPRITE_COL_2 | SPRITE_COL | SPRITE_COL_2 | SPRITEBOB_COL
+        | SPRITEBOB_COL_2 => {
+            let range = match token {
+                BOB_COL_2 | BOBSPRITE_COL_2 | SPRITE_COL_2 | SPRITEBOB_COL_2 => Some((a.int(1), a.int(2))),
+                _ => None,
+            };
+            match token {
+                BOB_COL | BOB_COL_2 => hw.bob_col_fn(a.int(0), range)?,
+                BOBSPRITE_COL | BOBSPRITE_COL_2 => hw.bobsprite_col_fn(a.int(0), range)?,
+                SPRITE_COL | SPRITE_COL_2 => hw.sprite_col_fn(a.int(0), range)?,
+                _ => hw.spritebob_col_fn(a.int(0), range)?,
+            }
+        }
         _ => unreachable!("not a direct function"),
     }))
 }
