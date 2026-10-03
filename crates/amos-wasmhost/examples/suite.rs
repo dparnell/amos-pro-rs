@@ -75,6 +75,10 @@ const SYNTHETIC: &[(&str, &str)] = &[
     ("busy wait (Scin, X/Y Mouse, Mouse Key)", "Do : N=Scin(X Mouse,Y Mouse) : K=Mouse Key : Loop"),
     ("inkey$ / joy / timer", "Do : A$=Inkey$ : J=Joy(1) : T=Timer : K=Key State(69) : Loop"),
     (
+        "bit operations on variables",
+        "V=1\nDo\nFor I=1 To 1000 : Bset I and 31,V : Ror.w 3,V : Bclr 5,V : Rol.b 1,V : Next\nLoop",
+    ),
+    (
         "game main loop",
         "Screen Open 0,320,200,16,Lowres : Curs Off\nDim X(50),Y(50),DX(50),DY(50)\nFor I=0 To 50 : X(I)=Rnd(300) : Y(I)=Rnd(180) : DX(I)=1+Rnd(2) : DY(I)=1+Rnd(2) : Next\nDo\nCls 0\nFor I=0 To 50\nX(I)=X(I)+DX(I) : Y(I)=Y(I)+DY(I)\nIf X(I)<0 or X(I)>310 Then DX(I)=-DX(I)\nIf Y(I)<0 or Y(I)>190 Then DY(I)=-DY(I)\nInk 1+I mod 15 : Bar X(I),Y(I) To X(I)+8,Y(I)+8\nNext\nX=X Mouse : Y=Y Mouse : K=Inkey$<>\"\"\nWait Vbl\nLoop",
     ),

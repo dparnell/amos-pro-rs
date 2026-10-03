@@ -146,6 +146,10 @@ const PROGRAMS: &[(&str, &str)] = &[
         "string$/space$ building",
         "For I=1 To 300000 : S$=S$+String$(\"-\",I mod 10)+Space$(2) : If Len(S$)>200 Then S$=\"\"\nNext : Print Len(S$)",
     ),
+    (
+        "on n gosub 1,2,3",
+        "For I=1 To 300000 : On I mod 3+1 Gosub 1,2,3 : Next : Print A : End\n1 Inc A : Return\n2 Return\n3 Return",
+    ),
     ("gosub", "For I=1 To 300000 : Gosub L : Next : Print A : End\nL: A=A+1 : Return"),
 ];
 

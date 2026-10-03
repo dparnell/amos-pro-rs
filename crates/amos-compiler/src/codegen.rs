@@ -961,6 +961,79 @@ impl<'a> Gen<'a> {
 
     fn native(&mut self, nf: Nf, a: &[Expr], ty: Ty) {
         match nf {
+            Nf::BitOp(t) => {
+                // n (as `eval_int`), then the value: `Hardware::bit_op`.
+                let (n, v) = (self.tmp(ValType::I32), self.tmp(ValType::I32));
+                self.int_arg(&a[0]);
+                self.set(n);
+                self.int_arg(&a[1]);
+                self.set(v);
+                let mask = |g: &mut Self, m: i32| {
+                    g.get(n);
+                    g.i32c(m);
+                    g.w(W::I32And);
+                };
+                match t {
+                    tk::BSET | tk::BCLR | tk::BCHG => {
+                        self.get(v);
+                        self.i32c(1);
+                        mask(self, 31);
+                        self.w(W::I32Shl);
+                        match t {
+                            tk::BSET => self.w(W::I32Or),
+                            tk::BCHG => self.w(W::I32Xor),
+                            _ => {
+                                self.i32c(-1);
+                                self.w(W::I32Xor);
+                                self.w(W::I32And);
+                            }
+                        }
+                    }
+                    tk::ROR_L | tk::ROL_L => {
+                        self.get(v);
+                        mask(self, 31);
+                        self.w(if t == tk::ROR_L { W::I32Rotr } else { W::I32Rotl });
+                    }
+                    _ => {
+                        // Rotation of the low byte / word, the rest kept.
+                        let bits = if matches!(t, tk::ROR_B | tk::ROL_B) { 8 } else { 16 };
+                        let low = (1i32 << bits) - 1;
+                        let (x, k) = (self.tmp(ValType::I32), self.tmp(ValType::I32));
+                        self.get(v);
+                        self.i32c(low);
+                        self.w(W::I32And);
+                        self.set(x);
+                        mask(self, bits - 1);
+                        self.set(k);
+                        // right: x >> k | x << (bits - k); left: x << k | x >> (bits - k)
+                        let (first, second) = if matches!(t, tk::ROR_B | tk::ROR_W) {
+                            (W::I32ShrU, W::I32Shl)
+                        } else {
+                            (W::I32Shl, W::I32ShrU)
+                        };
+                        self.get(x);
+                        self.get(k);
+                        self.w(first);
+                        self.get(x);
+                        self.i32c(bits);
+                        self.get(k);
+                        self.w(W::I32Sub);
+                        self.w(second);
+                        self.w(W::I32Or);
+                        self.i32c(low);
+                        self.w(W::I32And);
+                        self.get(v);
+                        self.i32c(!low);
+                        self.w(W::I32And);
+                        self.w(W::I32Or);
+                        self.release(x, ValType::I32);
+                        self.release(k, ValType::I32);
+                    }
+                }
+                self.release(n, ValType::I32);
+                self.release(v, ValType::I32);
+                let _ = ty;
+            }
             Nf::Len | Nf::Asc => {
                 self.expr(&a[0]);
                 self.shelper(if nf == Nf::Len { S::Len } else { S::Asc });
@@ -2177,11 +2250,27 @@ impl<'a> Gen<'a> {
                 self.as_int(n.ty);
                 let nt = self.tmp(ValType::I32);
                 self.set(nt);
-                for (i, &t) in targets.iter().enumerate() {
+                for (i, t) in targets.iter().enumerate() {
                     self.get(nt);
                     self.i32c(i as i32 + 1);
                     self.w(W::I32Eq);
                     self.if_(BlockType::Empty);
+                    let t = match t {
+                        OnTarget::Label(t) => *t,
+                        OnTarget::Expr(e) => {
+                            // The label computed now (`Interp::label_target`).
+                            self.test_point();
+                            self.expr(e);
+                            self.push_value(e.ty);
+                            self.i32c(pos);
+                            self.i32c((*kind == tk::GOSUB) as i32);
+                            self.i32c(*after as i32);
+                            self.call(Imp::GotoValue);
+                            self.status_jump();
+                            self.end();
+                            continue;
+                        }
+                    };
                     match *kind {
                         tk::GOTO => self.goto_label(k, t)?,
                         tk::GOSUB => self.gosub(t, *after)?,

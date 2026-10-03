@@ -720,12 +720,28 @@ impl<'a> Lower<'a> {
                 let mut targets = Vec::new();
                 for i in 0..count {
                     let e = self.rd(r);
-                    let ok = if kind == tk::PROC { e == TK_PRO || e == TK_VAR } else { e == TK_LGO };
-                    if !ok {
-                        return Err("On with computed targets");
+                    if kind == tk::PROC {
+                        if e != TK_PRO && e != TK_VAR {
+                            return Err("On with computed targets");
+                        }
+                        targets.push(OnTarget::Label(self.rd(r + 2)));
+                        r += token_size(self.code, r);
+                    } else if e == TK_LGO {
+                        targets.push(OnTarget::Label(self.rd(r + 2)));
+                        r += token_size(self.code, r);
+                    } else {
+                        // A label number or name computed when the entry is
+                        // chosen; constants are found now.
+                        let (x, q) = self.expr(r)?;
+                        if x.ty == Ty::Dyn {
+                            return Err("On with computed targets");
+                        }
+                        targets.push(match self.const_label(&x) {
+                            Some(idx) => OnTarget::Label(idx),
+                            None => OnTarget::Expr(x),
+                        });
+                        r = q;
                     }
-                    targets.push(self.rd(r + 2));
-                    r += token_size(self.code, r);
                     if i + 1 < count {
                         r = self.expect(r, TK_COMMA)?;
                     }
@@ -734,7 +750,10 @@ impl<'a> Lower<'a> {
                     return Err("instruction boundaries");
                 }
                 if kind == tk::PROC
-                    && targets.iter().any(|&t| self.prg.procs.get(t as usize).is_none_or(|p| p.machine_code))
+                    && targets.iter().any(|t| match t {
+                        OnTarget::Label(t) => self.prg.procs.get(*t as usize).is_none_or(|p| p.machine_code),
+                        OnTarget::Expr(_) => true,
+                    })
                 {
                     return Err("procedure");
                 }
@@ -872,6 +891,27 @@ impl<'a> Lower<'a> {
         Ok(st)
     }
 
+    /// The label of the current scope a constant label expression names
+    /// (`Interp::label_target`: an integer or float as its decimal digits, a
+    /// string in lower case).
+    fn const_label(&self, e: &Expr) -> Option<u16> {
+        let name: Vec<u8> = match e.kind {
+            ExprKind::Int(i) => i.to_string().into_bytes(),
+            ExprKind::Float(f) => amos_core::interp::value::float_to_int(f).to_string().into_bytes(),
+            ExprKind::Str(p) => {
+                let n = self.rd(p + 2) as usize;
+                let s = &self.code[p + 4..p + 4 + n];
+                if s.len() >= 32 {
+                    return None;
+                }
+                s.iter().map(|c| c.to_ascii_lowercase()).collect()
+            }
+            _ => return None,
+        };
+        let scope = self.prg.scopes.get(self.scope.get())?;
+        scope.by_name.get(&name).map(|&i| i as u16)
+    }
+
     /// `Interp::array_ref`: an array variable, its indices (evaluated and
     /// ignored by the interpreter). Returns slot, type, indices, end.
     fn array_ref(&self, p: usize) -> Res<(u16, u8, Vec<Expr>, usize)> {
@@ -991,6 +1031,22 @@ impl<'a> Lower<'a> {
         let call = structure::instruction_call(self.code, p).ok_or("special syntax")?;
         if call.end != ins.end {
             return Err("instruction boundaries");
+        }
+        let present: Vec<_> = call.slots.iter().filter(|s| s.present).collect();
+        if takes_var_by_reference(kw) && present.len() == 2 && self.is_bare_var(present[1].start, present[1].end) {
+            // `Bset n,v` ... on an integer variable (`Hardware::bit_op`): n,
+            // then the variable read and written.
+            let (n, q) = self.num_expr(present[0].start)?;
+            if q != present[0].end {
+                return Err("variable parameter");
+            }
+            let (lv, _) = self.var_ref(present[1].start)?;
+            let (cur, _) = self.expr(present[1].start)?;
+            if lv.ty() != 0 || cur.ty != Ty::Int || !matches!(lv, LValue::Scalar { .. }) {
+                return Err("variable parameter");
+            }
+            let e = Expr::new(ExprKind::Native(Nf::BitOp(kw.token), vec![n, cur]), Ty::Int);
+            return Ok(Stmt::Assign(lv, e));
         }
         let mut args = Vec::new();
         for s in call.slots.iter().filter(|s| s.present) {

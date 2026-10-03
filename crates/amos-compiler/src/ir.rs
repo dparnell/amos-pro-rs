@@ -73,6 +73,9 @@ pub enum ExprKind {
 /// Natively compiled core functions.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Nf {
+    /// `Bset`/`Bclr`/`Bchg`/`Ror.x`/`Rol.x n,v` on an integer variable
+    /// (the token): the new value from `n` and the current value.
+    BitOp(u16),
     Len,
     Asc,
     Chr,
@@ -202,7 +205,7 @@ pub enum Stmt {
     On {
         n: Expr,
         kind: u16,
-        targets: Vec<u16>,
+        targets: Vec<OnTarget>,
         after: usize,
     },
     /// `Goto expr` / `Gosub expr` (label name or line number at run time).
@@ -256,4 +259,14 @@ pub enum Stmt {
     Keyword(Vec<Expr>),
     /// Instruction run by the interpreter (with its variables copied).
     Interp,
+}
+
+/// An entry of `On n Goto/Gosub/Proc`.
+#[derive(Clone, Debug)]
+pub enum OnTarget {
+    /// A label of the scope (Goto / Gosub) or a procedure (Proc).
+    Label(u16),
+    /// A label computed when the entry is chosen (`Interp::label_target`:
+    /// a number or a name).
+    Expr(Expr),
 }

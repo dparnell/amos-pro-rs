@@ -650,3 +650,45 @@ fn string_space_repeat_boundaries() {
         assert_eq!(run_err(p), StopReasonOrError::Error(errors::ILLEGAL_FUNCTION_CALL), "{p}");
     }
 }
+
+#[test]
+fn on_with_computed_targets() {
+    let progs = [
+        // Numeric labels (constants resolved at compile time).
+        "For J=0 To 5 : On J Gosub 1,2,3,1 : Next : Print : End\n1 Print \"a\"; : Return\n2 Print \"b\"; : Return\n3 Print \"c\"; : Return",
+        "For J=1 To 3 : On J Goto 10,20,30\n10 Print 10; : Goto 40\n20 Print 20; : Goto 40\n30 Print 30;\n40 Next : Print",
+        // Names as strings, computed values, a missing label (error 40).
+        "For J=1 To 2 : On J Gosub \"L1\",\"l2\" : Next : End\nL1: Print \"one\"; : Return\nL2: Print \"two\"; : Return",
+        "A=2 : B$=\"X\" : On 2 Gosub A+8,B$ : Print \"back\" : End\n10 Print \"ten\" : Return\nX: Print \"x\" : Return",
+        "On 2 Goto 1,99\n1 Print 1",
+        "On 1 Goto \"nowhere\"",
+        // In a procedure (its own labels), and Every during it.
+        "P[2]\nProcedure P[N]\nOn N Gosub 1,2 : Print \"done\"\nPop Proc\n1 Print \"p1\"; : Return\n2 Print \"p2\"; : Return\nEnd Proc",
+        "Every 1 Gosub E\nFor I=1 To 2000 : On I mod 3+1 Gosub 1,2,3 : Next\nEvery Off : Print C;D\nEnd\n1 Inc D : Return\n2 Return\n3 Return\nE: Inc C : Every On : Return",
+    ];
+    for p in progs {
+        same(p);
+        let budgets: &[usize] = if p.contains("Every") { &[40, 97] } else { &[1, 2, 3, 7] };
+        for &b in budgets {
+            same_budget(p, b);
+        }
+    }
+}
+
+#[test]
+fn bit_operations_on_variables() {
+    // (Bset... are machine instructions: on full machines.)
+    let mut src = String::from("V=$12345678 : W=-1 : Z=0 : C=0\n");
+    for op in ["Bset", "Bclr", "Bchg", "Ror.b", "Ror.w", "Ror.l", "Rol.b", "Rol.w", "Rol.l"] {
+        for n in ["0", "1", "3", "7", "8", "15", "16", "31", "32", "33", "-1", "-9", "2.6"] {
+            src.push_str(&format!("{op} {n},V : {op} {n},W : {op} {n},Z : C=C xor V xor W xor Z : Rol.l 5,C\n"));
+        }
+    }
+    src.push_str("Dim A(3) : A(1)=5 : Bset 3,A(1) : D=A(1)\n");
+    src.push_str("Print Hex$(V);\" \";Hex$(W);\" \";Hex$(Z);\" \";Hex$(C);\" \";D\nF#=1.5 : Bset 1,F#");
+    let (mut a, mut b) = machines(&src, 5);
+    assert!(global_value(&a.interp, "c").is_some(), "{:?} {:?}", a.state, a.hw.log);
+    let png = |m: &mut amos_core::Machine| amos_core::display::render_rgba(&m.frame());
+    assert!(png(&mut a) == png(&mut b), "displays differ");
+    assert_eq!(a.state, b.state);
+}
