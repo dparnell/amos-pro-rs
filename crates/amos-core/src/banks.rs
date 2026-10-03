@@ -44,6 +44,21 @@ impl Image {
         c
     }
 
+    /// True when the pixel is not colour 0 (`pixel(x, y) != 0`, stopping
+    /// at the first plane with the bit set).
+    #[inline]
+    pub fn opaque(&self, x: u32, y: u32) -> bool {
+        let row_bytes = self.width_words as usize * 2;
+        let plane_bytes = row_bytes * self.height as usize;
+        let byte = y as usize * row_bytes + (x / 8) as usize;
+        let bit = 0x80u8 >> (x % 8);
+        (0..self.planes as usize).any(|p| {
+            self.planar
+                .get(p * plane_bytes + byte)
+                .is_some_and(|b| b & bit != 0)
+        })
+    }
+
     /// Converts to one byte per pixel.
     pub fn to_chunky(&self) -> Vec<u8> {
         let w = self.width();

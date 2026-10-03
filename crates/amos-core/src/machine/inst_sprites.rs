@@ -40,6 +40,25 @@ pub struct Slice {
 }
 
 /// Images of the sprite bank (1) or icon bank (2).
+/// `Hardware::col_src` with the sprite bank already looked up (`images`):
+/// the image `image` (with its mask made) for a collision test, and its
+/// hot spot as flipped by `flags`.
+fn col_src_in<'a>(
+    images: Option<&'a Vec<Image>>,
+    sprites: &crate::gfx::sprites::SpriteState,
+    image: u16,
+    flags: u16,
+) -> Option<(bobs::ColImg<'a>, i32, i32)> {
+    let i = image & 0x3FFF;
+    // (`sprite_image`.)
+    let img = images?.get((bobs::index(i) as usize).checked_sub(1)?)?;
+    if img.is_empty() || sprites.mask(false, i) != MaskState::Made {
+        return None;
+    }
+    let (hx, hy) = images::flipped_hot(img, flags);
+    Some((bobs::ColImg::new(img, flags), hx, hy))
+}
+
 fn image_bank_of(banks: &crate::banks::BankSet, icons: bool) -> Option<&Vec<Image>> {
     let b = banks.banks.get(&if icons { 2 } else { 1 })?;
     if b.is_icons() != icons {
@@ -1075,17 +1094,6 @@ impl Hardware {
     // Collisions
     // ------------------------------------------------------------------
 
-    /// Image of a bob/sprite usable for collisions (needs a mask).
-    fn col_src(&self, image: u16, flags: u16) -> Option<(bobs::ColImg<'_>, i32, i32)> {
-        let i = image & 0x3FFF;
-        let img = self.sprite_image(i)?;
-        if self.sprites.mask(false, i) != MaskState::Made {
-            return None;
-        }
-        let (hx, hy) = images::flipped_hot(img, flags);
-        Some((bobs::ColImg::new(img, flags), hx, hy))
-    }
-
     /// Screen -> hardware coordinates of a bob (`CXyS`).
     fn bob_hard(&self, screen: usize, x: i32, y: i32) -> (i32, i32) {
         match self.screens.get(screen) {
@@ -1205,7 +1213,10 @@ impl Hardware {
             return 0;
         }
         let (screen, bx, by) = (bob.screen, bob.x as i32, bob.y as i32);
-        let Some((src, hx, hy)) = self.col_src(bob.image, bob.image & FLIP_MASK) else {
+        // (The sprite bank is looked up once.)
+        let bank = self.image_bank(false);
+        let Some((src, hx, hy)) = col_src_in(bank, &self.sprites, bob.image, bob.image & FLIP_MASK)
+        else {
             return 0;
         };
         let (mut ax, mut ay) = (bx - hx, by - hy);
@@ -1220,7 +1231,7 @@ impl Hardware {
                 if a.flag & 0x80 != 0 || a.image <= 0 {
                     continue;
                 }
-                if let Some((s2, h2x, h2y)) = self.col_src(a.image as u16, 0)
+                if let Some((s2, h2x, h2y)) = col_src_in(bank, &self.sprites, a.image as u16, 0)
                     && bobs::collide_img(&src, ax, ay, &s2, a.x as i32 - h2x, a.y as i32 - h2y)
                 {
                     hits.push(sn as u16);
@@ -1238,7 +1249,8 @@ impl Hardware {
                 if on == n || other.screen != screen || other.act < 0 {
                     continue;
                 }
-                if let Some((s2, h2x, h2y)) = self.col_src(other.image, other.image & FLIP_MASK)
+                if let Some((s2, h2x, h2y)) =
+                    col_src_in(bank, &self.sprites, other.image, other.image & FLIP_MASK)
                     && bobs::collide_img(
                         &src,
                         ax,
@@ -1265,7 +1277,9 @@ impl Hardware {
             return 0;
         }
         let a = self.sprites.act[n as usize];
-        let Some((src, hx, hy)) = self.col_src(a.image as u16, 0) else {
+        // (The sprite bank is looked up once.)
+        let bank = self.image_bank(false);
+        let Some((src, hx, hy)) = col_src_in(bank, &self.sprites, a.image as u16, 0) else {
             return 0;
         };
         let (ax, ay) = (a.x as i32 - hx, a.y as i32 - hy);
@@ -1283,7 +1297,8 @@ impl Hardware {
                     continue;
                 }
                 let (bx, by) = self.bob_hard(b.screen, b.x as i32, b.y as i32);
-                if let Some((s2, h2x, h2y)) = self.col_src(b.image, b.image & FLIP_MASK)
+                if let Some((s2, h2x, h2y)) =
+                    col_src_in(bank, &self.sprites, b.image, b.image & FLIP_MASK)
                     && bobs::collide_img(&src, ax, ay, &s2, bx - h2x, by - h2y)
                 {
                     hits.push(b.number);
@@ -1301,7 +1316,7 @@ impl Hardware {
                 if o.flag & 0x80 != 0 || o.image <= 0 {
                     continue;
                 }
-                if let Some((s2, h2x, h2y)) = self.col_src(o.image as u16, 0)
+                if let Some((s2, h2x, h2y)) = col_src_in(bank, &self.sprites, o.image as u16, 0)
                     && bobs::collide_img(&src, ax, ay, &s2, o.x as i32 - h2x, o.y as i32 - h2y)
                 {
                     hits.push(sn as u16);

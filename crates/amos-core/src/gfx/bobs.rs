@@ -343,6 +343,38 @@ impl<'a> ColImg<'a> {
         }
     }
 
+    /// Row `y` (0..h) of the flipped image as bits, for images at most 64
+    /// pixels wide: bit 63 - x is set when pixel x is not colour 0.
+    fn row_bits(&self, y: i32) -> u64 {
+        let img = self.img;
+        let y = if self.flags & images::FLIP_Y != 0 {
+            self.h as i32 - 1 - y
+        } else {
+            y
+        } as usize;
+        let row_bytes = img.width_words as usize * 2;
+        let plane_bytes = row_bytes * img.height as usize;
+        let mut m = 0u64;
+        for p in 0..img.planes as usize {
+            let start = p * plane_bytes + y * row_bytes;
+            // (Missing bytes of a short plane read as 0, as in `pixel`.)
+            for (k, &b) in img
+                .planar
+                .get(start..)
+                .unwrap_or(&[])
+                .iter()
+                .take(row_bytes)
+                .enumerate()
+            {
+                m |= (b as u64) << (56 - 8 * k);
+            }
+        }
+        if self.flags & images::FLIP_X != 0 {
+            m = m.reverse_bits() << (64 - self.w);
+        }
+        m
+    }
+
     /// Pixel (x, y) of the flipped image is not colour 0.
     #[inline]
     fn mask_at(&self, x: i32, y: i32) -> bool {
@@ -356,11 +388,12 @@ impl<'a> ColImg<'a> {
         if self.flags & images::FLIP_Y != 0 {
             y = self.h - 1 - y;
         }
-        self.img.pixel(x, y) != 0
+        self.img.opaque(x, y)
     }
 }
 
 /// [`collide`] for [`ColImg`]s.
+#[inline]
 pub fn collide_img(a: &ColImg, ax: i32, ay: i32, b: &ColImg, bx: i32, by: i32) -> bool {
     let x0 = ax.max(bx);
     let x1 = (ax + a.w as i32).min(bx + b.w as i32);
@@ -368,6 +401,31 @@ pub fn collide_img(a: &ColImg, ax: i32, ay: i32, b: &ColImg, bx: i32, by: i32) -
     let y1 = (ay + a.h as i32).min(by + b.h as i32);
     if x0 >= x1 || y0 >= y1 {
         return false;
+    }
+    collide_overlap(a, ax, ay, b, bx, by, (x0, y0, x1, y1))
+}
+
+/// `collide_img` once the rectangles overlap on `(x0, y0, x1, y1)`.
+#[inline(never)]
+fn collide_overlap(
+    a: &ColImg,
+    ax: i32,
+    ay: i32,
+    b: &ColImg,
+    bx: i32,
+    by: i32,
+    r: (i32, i32, i32, i32),
+) -> bool {
+    let (x0, y0, x1, y1) = r;
+    if a.w <= 64 && b.w <= 64 && (x1 - x0) * (y1 - y0) > 64 {
+        // Large overlaps a row at a time: the opaque pixels of both rows as
+        // bits, column x0 at the top bit. (Small ones: the pixel loop.)
+        let keep = !0u64 << (64 - (x1 - x0));
+        return (y0..y1).any(|y| {
+            let ra = a.row_bits(y - ay) << (x0 - ax);
+            let rb = b.row_bits(y - by) << (x0 - bx);
+            ra & rb & keep != 0
+        });
     }
     for y in y0..y1 {
         for x in x0..x1 {
@@ -392,6 +450,67 @@ mod tests {
     fn img() -> Image {
         // 4x2 image: 1 2 0 3 / 0 1 1 0, two planes
         grab(&[1, 2, 0, 3, 0, 1, 1, 0], 4, 0, 0, 4, 2, 2)
+    }
+
+    /// `collide_img` pixel by pixel (the reference of the row version).
+    fn collide_img_reference(a: &ColImg, ax: i32, ay: i32, b: &ColImg, bx: i32, by: i32) -> bool {
+        let x0 = ax.max(bx);
+        let x1 = (ax + a.w as i32).min(bx + b.w as i32);
+        let y0 = ay.max(by);
+        let y1 = (ay + a.h as i32).min(by + b.h as i32);
+        (y0..y1).any(|y| (x0..x1).any(|x| a.mask_at(x - ax, y - ay) && b.mask_at(x - bx, y - by)))
+    }
+
+    #[test]
+    fn collide_img_matches_the_pixel_loop() {
+        let mut seed = 9u32;
+        let mut rnd = |n: u32| {
+            seed = seed.wrapping_mul(1103515245).wrapping_add(12345);
+            (seed >> 8) % n
+        };
+        let image = |rnd: &mut dyn FnMut(u32) -> u32| {
+            let (ww, h, planes) = (1 + rnd(5) as u16, 1 + rnd(20) as u16, 1 + rnd(4) as u16);
+            let full = ww as usize * 2 * h as usize * planes as usize;
+            // Sparse pixels, sometimes truncated data.
+            let len = if rnd(5) == 0 {
+                rnd(full as u32 + 1) as usize
+            } else {
+                full
+            };
+            let planar = (0..len)
+                .map(|_| if rnd(3) == 0 { rnd(256) as u8 } else { 0 })
+                .collect();
+            Image {
+                width_words: ww,
+                height: h,
+                planes,
+                hot_x: 0,
+                hot_y: 0,
+                planar,
+            }
+        };
+        let mut hits = 0;
+        for _ in 0..20000 {
+            let (ia, ib) = (image(&mut rnd), image(&mut rnd));
+            for _ in 0..4 {
+                let (x, y) = (rnd(ia.width()), rnd(ia.height as u32));
+                assert_eq!(ia.opaque(x, y), ia.pixel(x, y) != 0);
+            }
+            let flags = [
+                0,
+                images::FLIP_X,
+                images::FLIP_Y,
+                images::FLIP_X | images::FLIP_Y,
+            ];
+            let a = ColImg::new(&ia, flags[rnd(4) as usize]);
+            let b = ColImg::new(&ib, flags[rnd(4) as usize]);
+            let (ax, ay) = (rnd(60) as i32 - 30, rnd(30) as i32 - 15);
+            let (bx, by) = (rnd(60) as i32 - 30, rnd(30) as i32 - 15);
+            let want = collide_img_reference(&a, ax, ay, &b, bx, by);
+            assert_eq!(collide_img(&a, ax, ay, &b, bx, by), want);
+            hits += want as usize;
+        }
+        assert!(hits > 2000, "{hits}");
     }
 
     /// The plane by plane minterm (reference for `draw`).
