@@ -132,6 +132,12 @@ const PROGRAMS: &[(&str, &str)] = &[
         "Dim F(40000)\nFor R=1 To 20\nC=0\nFor I=2 To 20000 : F(I)=0 : Next\nFor I=2 To 20000\nIf F(I)=0\nInc C\nFor J=I+I To 20000 Step I : F(J)=1 : Next J\nEnd If\nNext I\nNext R\nPrint C",
     ),
     ("host calls (Len x1M)", "B$=\"abc\"\nFor I=1 To 1000000 : A=Len(B$) : Next\nPrint A"),
+    ("hex$/bin$", "For I=1 To 300000 : A$=Hex$(I) : B$=Bin$(I) : Next : Print A$;B$"),
+    ("hex$/bin$ digits", "For I=1 To 300000 : A$=Hex$(-I*977,8) : B$=Bin$(I,32) : Next : Print A$;B$"),
+    (
+        "hex$/bin$ building",
+        "For I=1 To 300000 : N=N+Len(Hex$(I,4)+Bin$(I and 255,8)) : S$=S$+Hex$(I) : If Len(S$)>200 Then S$=\"\"\nNext : Print N;S$",
+    ),
     ("gosub", "For I=1 To 300000 : Gosub L : Next : Print A : End\nL: A=A+1 : Return"),
 ];
 

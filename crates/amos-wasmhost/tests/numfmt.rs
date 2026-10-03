@@ -480,3 +480,31 @@ fn double_precision_val() {
         }
     }
 }
+
+/// `Hex$` / `Bin$` on every digit count from -3 to 40 (and extremes) for
+/// edge values; nothing is written after the string.
+#[test]
+fn radix_all_digit_counts() {
+    let mut h = H::new();
+    let f = h.inst.get_typed_func::<(i32, i32, i32), i32>(&mut h.store, "radix").unwrap();
+    let mut values =
+        vec![0u32, 1, 9, 10, 15, 16, 255, 256, 0x7FFF_FFFF, 0x8000_0000, 0xFFFF_FFFF, 0x0123_4567, 0x89AB_CDEF];
+    for k in 0..32 {
+        values.extend([(1u32 << k).wrapping_sub(1), 1 << k, (1u32 << k) + 1]);
+    }
+    let mut r = Rng(0x0BAD_C0DE_1234_5678);
+    values.extend((0..count(20_000)).map(|_| (r.next() >> r.below(64)) as u32));
+    for &n in &values {
+        for hex in [false, true] {
+            for digits in (-3..=40).chain([i32::MIN, i32::MAX, -100, 100]) {
+                h.reset();
+                let a = f.call(&mut h.store, (n as i32, hex as i32, digits)).unwrap();
+                let want = amos_core::interp::expr::format_radix(n, hex, digits);
+                assert_eq!(String::from_utf8_lossy(&h.string(a)), want, "n={n:#x} hex={hex} digits={digits}");
+                let d = h.mem.data(&h.store);
+                let end = a as usize + 4 + want.len();
+                assert!(d[end..end + 16].iter().all(|&b| b == 0), "written after the string: {n:#x} {digits}");
+            }
+        }
+    }
+}

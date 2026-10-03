@@ -219,7 +219,7 @@ pub fn body(n: N, ix: &Idx, double: bool) -> Function {
         N::Renorm => vec![(3, I)],
         N::A2ffp => vec![(19, I)],
         N::Val => vec![(16, I), (2, L), (1, F), (1, I)],
-        N::Radix => vec![(8, I)],
+        N::Radix => vec![(5, I), (1, L)],
         N::Repeat => vec![(3, I)],
         N::StrF => vec![(2, I)],
         N::Tab => vec![],
@@ -1364,58 +1364,86 @@ fn val(s: &mut InstructionSink, ix: &Idx) {
     s.unreachable();
 }
 
-/// `format_radix(n, hex, digits)`: n=0 hex=1 digits=2; bits=3 maxd=4 r=5
-/// o=6 i=7 d=8 cnt=9 mask=10
+/// `format_radix(n, hex, digits)` (`expr::radix_text`): the digits are
+/// made 8 at a time in an i64, in memory order (most significant first):
+/// hex digits by spreading the nibbles to bytes, binary digits by spreading
+/// the bits of a byte with a multiplication; then stores of 8, 4, 2 and 1
+/// bytes (never beyond the string). n=0 hex=1 digits=2; cnt=3 r=4 p=5 k=6
+/// v=7; w=8 (i64)
 fn radix(s: &mut InstructionSink, ix: &Idx) {
-    s.i32_const(4).i32_const(1).local_get(1).select().local_set(3);
-    s.i32_const(8).i32_const(32).local_get(1).select().local_set(4);
-    s.i32_const(15).i32_const(1).local_get(1).select().local_set(10);
-    s.local_get(2).local_get(4).i32_le_u().if_(e());
-    // (0 <= digits <= max as unsigned compare)
-    s.local_get(2).local_set(9);
+    let mem = |o| MemArg { offset: o, align: 0, memory_index: 0 };
+    // Digit count.
+    s.local_get(2).i32_const(8).i32_const(32).local_get(1).select().i32_le_u().if_(e());
+    s.local_get(2).local_set(3);
     s.else_();
-    // Without leading zeros ("0" for 0).
     s.local_get(0).i32_eqz().if_(e());
-    s.i32_const(1).local_set(9);
+    s.i32_const(1).local_set(3);
     s.else_();
-    s.i32_const(32)
-        .local_get(0)
-        .i32_clz()
-        .i32_sub()
-        .local_get(3)
-        .i32_add()
-        .i32_const(1)
-        .i32_sub()
-        .local_get(3)
-        .i32_div_u()
-        .local_set(9);
+    s.i32_const(32).local_get(0).i32_clz().i32_sub().local_tee(3).i32_const(3).i32_add().i32_const(2).i32_shr_u();
+    s.local_get(3).local_get(1).select().local_set(3);
     s.end();
     s.end();
-    s.local_get(9).i32_const(1).i32_add().call(ix.s(S::Alloc)).i32_const(4).i32_add().local_set(5);
-    s.local_get(5).i32_const(b'$' as i32).i32_const(b'%' as i32).local_get(1).select().i32_store8(b8());
-    s.i32_const(1).local_set(6);
-    s.local_get(9).local_set(7);
-    s.block(e()).loop_(e());
+    s.local_get(3).i32_const(1).i32_add().call(ix.s(S::Alloc)).i32_const(4).i32_add().local_tee(4);
+    s.i32_const(b'$' as i32).i32_const(b'%' as i32).local_get(1).select().i32_store8(b8());
+    s.local_get(4).i32_const(1).i32_add().local_set(5);
+    s.local_get(3).local_set(6);
+    s.local_get(1).if_(e());
     {
-        s.local_get(7).i32_eqz().br_if(1);
-        s.local_get(7).i32_const(1).i32_sub().local_set(7);
-        s.local_get(0).local_get(7).local_get(3).i32_mul().i32_shr_u().local_get(10).i32_and().local_set(8);
-        out(s, 5, 6, |s| {
-            s.local_get(8)
-                .i32_const(48)
-                .i32_add()
-                .local_get(8)
-                .i32_const(55)
-                .i32_add()
-                .local_get(8)
-                .i32_const(10)
-                .i32_lt_u()
-                .select();
-        });
-        s.br(0);
+        // Hex: nibble 7-i to byte i, then to ASCII ('A' = '9' + 8).
+        s.local_get(0).i64_extend_i32_u().local_tee(8).i64_const(16).i64_shr_u();
+        s.local_get(8).i64_const(0xFFFF).i64_and().i64_const(32).i64_shl().i64_or().local_set(8);
+        for (sh, m, up) in [(8, 0x0000_00FF_0000_00FFi64, 16), (4, 0x000F_000F_000F_000F, 8)] {
+            s.local_get(8).i64_const(sh).i64_shr_u().i64_const(m).i64_and();
+            s.local_get(8).i64_const(m).i64_and().i64_const(up).i64_shl().i64_or().local_set(8);
+        }
+        s.local_get(8).i64_const(0x3030_3030_3030_3030).i64_add();
+        s.local_get(8).i64_const(0x0606_0606_0606_0606).i64_add().i64_const(4).i64_shr_u();
+        s.i64_const(0x0101_0101_0101_0101).i64_and().i64_const(7).i64_mul().i64_add().local_set(8);
+        // The last `cnt` of the 8 digits.
+        s.local_get(3).i32_const(8).i32_eq().if_(e());
+        s.local_get(5).local_get(8).i64_store(mem(0));
+        s.i32_const(0).local_set(6);
+        s.else_();
+        s.local_get(8).i32_const(8).local_get(3).i32_sub().i32_const(3).i32_shl().i64_extend_i32_u().i64_shr_u();
+        s.local_set(8);
+        s.end();
     }
-    s.end().end();
-    s.local_get(5).i32_const(4).i32_sub();
+    s.else_();
+    {
+        // Binary: 8 digits per byte of n, from the top.
+        let spread = |s: &mut InstructionSink| {
+            s.i64_extend_i32_u().i64_const(0x8040_2010_0804_0201u64 as i64).i64_mul().i64_const(7).i64_shr_u();
+            s.i64_const(0x0101_0101_0101_0101).i64_and().i64_const(0x3030_3030_3030_3030).i64_or();
+        };
+        s.block(e()).loop_(e());
+        s.local_get(6).i32_const(8).i32_lt_u().br_if(1);
+        s.local_get(5);
+        s.local_get(0).local_get(6).i32_const(8).i32_sub().i32_shr_u().i32_const(0xFF).i32_and();
+        spread(s);
+        s.i64_store(mem(0));
+        s.local_get(5).i32_const(8).i32_add().local_set(5);
+        s.local_get(6).i32_const(8).i32_sub().local_set(6);
+        s.br(0).end().end();
+        // The last k < 8 bits, at the top of a byte.
+        s.local_get(0).i32_const(8).local_get(6).i32_sub().i32_shl().i32_const(0xFF).i32_and();
+        spread(s);
+        s.local_set(8);
+    }
+    s.end();
+    // The remaining k < 8 digits of w.
+    for (bit, bytes) in [(4, 32), (2, 16), (1, 8)] {
+        s.local_get(6).i32_const(bit).i32_and().if_(e());
+        s.local_get(5).local_get(8);
+        match bit {
+            4 => s.i64_store32(mem(0)),
+            2 => s.i64_store16(mem(0)),
+            _ => s.i64_store8(mem(0)),
+        };
+        s.local_get(8).i64_const(bytes).i64_shr_u().local_set(8);
+        s.local_get(5).i32_const(bytes as i32 / 8).i32_add().local_set(5);
+        s.end();
+    }
+    s.local_get(4).i32_const(4).i32_sub();
 }
 
 /// `Repeat$(a$, n)` (n checked): a=0 n=1; la=2 r=3 o=4

@@ -512,7 +512,8 @@ impl Interp {
                 let n = int_of(&a[0]) as u32;
                 let digits = if a.len() == 2 { int_of(&a[1]) } else { -1 };
                 let hex = t == HEX_S || t == HEX_S_2;
-                Value::Str(astr(format_radix(n, hex, digits).as_bytes()))
+                let (b, len) = radix_text(n, hex, digits);
+                Value::Str(astr(&b[..len]))
             }
             ABS => match self.fn_args(hw, "4")?.remove(0) {
                 Value::Int(i) => Value::Int(i.wrapping_abs()),
@@ -734,21 +735,31 @@ pub fn instr(h: &[u8], n: &[u8], start: usize) -> i32 {
 
 /// `Hex$` / `Bin$` with optional digit count.
 pub fn format_radix(n: u32, hex: bool, digits: i32) -> String {
-    let (prefix, bits) = if hex { ('$', 4) } else { ('%', 1) };
-    let max_digits = 32 / bits;
-    let mut s = String::new();
-    s.push(prefix);
-    if (0..=max_digits as i32).contains(&digits) {
-        for i in (0..digits as u32).rev() {
-            let d = (n >> (i * bits)) & ((1 << bits) - 1);
-            s.push(std::char::from_digit(d, 16).unwrap().to_ascii_uppercase());
-        }
-    } else if hex {
-        s.push_str(&format!("{n:X}"));
+    let (b, len) = radix_text(n, hex, digits);
+    b[..len].iter().map(|&c| c as char).collect()
+}
+
+/// The text of `Hex$` / `Bin$` (`$` or `%`, then the digits) in a buffer,
+/// and its length: `digits` digits if 0 <= digits <= 8 (hex) / 32 (binary),
+/// else as many as the value needs ("0" for 0).
+pub fn radix_text(n: u32, hex: bool, digits: i32) -> ([u8; 33], usize) {
+    const DIGITS: &[u8; 16] = b"0123456789ABCDEF";
+    let (bits, prefix) = if hex { (4, b'$') } else { (1, b'%') };
+    let max = 32 / bits;
+    let count = if (0..=max as i32).contains(&digits) {
+        digits as u32
+    } else if n == 0 {
+        1
     } else {
-        s.push_str(&format!("{n:b}"));
+        (32 - n.leading_zeros()).div_ceil(bits)
+    };
+    let mut b = [0u8; 33];
+    b[0] = prefix;
+    let mask = (1 << bits) - 1;
+    for i in 0..count {
+        b[1 + i as usize] = DIGITS[((n >> ((count - 1 - i) * bits)) & mask) as usize];
     }
-    s
+    (b, count as usize + 1)
 }
 
 /// `Match(a(0),v)` binary then linear search (see the research notes).
@@ -791,3 +802,51 @@ fn array_match(arr: &super::value::Array, v: &Value) -> i32 {
 
 #[allow(dead_code)]
 fn _unused(_: Exc) {}
+
+#[cfg(test)]
+mod radix_tests {
+    use super::*;
+
+    /// The earlier `format_radix`, as the reference.
+    fn reference(n: u32, hex: bool, digits: i32) -> String {
+        let (prefix, bits) = if hex { ('$', 4) } else { ('%', 1) };
+        let max_digits = 32 / bits;
+        let mut s = String::new();
+        s.push(prefix);
+        if (0..=max_digits as i32).contains(&digits) {
+            for i in (0..digits as u32).rev() {
+                let d = (n >> (i * bits)) & ((1 << bits) - 1);
+                s.push(std::char::from_digit(d, 16).unwrap().to_ascii_uppercase());
+            }
+        } else if hex {
+            s.push_str(&format!("{n:X}"));
+        } else {
+            s.push_str(&format!("{n:b}"));
+        }
+        s
+    }
+
+    #[test]
+    fn radix_matches_the_reference() {
+        let mut values = vec![0u32, 1, 2, 9, 10, 15, 16, 255, 256, 0x7FFF_FFFF, 0x8000_0000, 0xFFFF_FFFF, 0xDEAD_BEEF];
+        for k in 0..32 {
+            values.extend([(1u32 << k).wrapping_sub(1), 1 << k, (1u32 << k) + 1]);
+        }
+        let mut x: u64 = 0x9E37_79B9_7F4A_7C15;
+        for _ in 0..20_000 {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            values.push((x >> (x % 33)) as u32);
+        }
+        for &n in &values {
+            for hex in [false, true] {
+                for digits in (-3..=40).chain([i32::MIN, i32::MAX, 100, -100]) {
+                    assert_eq!(format_radix(n, hex, digits), reference(n, hex, digits), "{n:#x} {hex} {digits}");
+                    let (b, len) = radix_text(n, hex, digits);
+                    assert_eq!(&b[..len], reference(n, hex, digits).as_bytes());
+                }
+            }
+        }
+    }
+}
