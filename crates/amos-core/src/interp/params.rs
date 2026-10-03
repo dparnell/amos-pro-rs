@@ -77,6 +77,11 @@ impl std::ops::DerefMut for ArgVec {
     }
 }
 
+/// `Interp::preset_set`: no preset, `preset` values, integers.
+pub(crate) const PRESET_NONE: u8 = 0;
+pub(crate) const PRESET_VALUES: u8 = 1;
+pub(crate) const PRESET_INTS: u8 = 2;
+
 /// Parameters of an instruction or function, already converted to the
 /// types of the signature. Omitted parameters hold [`ENT_NUL`].
 #[derive(Debug, Default)]
@@ -175,7 +180,7 @@ impl Interp {
     pub fn inst_args(&mut self, hw: &mut dyn Host, kw: Keyword) -> R<Args> {
         let sig = param_types_of(kw);
         let mut out = Args::default();
-        if self.preset_set {
+        if self.preset_set != PRESET_NONE {
             self.take_preset_into(sig, &mut out.0)?;
         } else {
             self.args_into(hw, sig, &mut out.0)?;
@@ -188,7 +193,7 @@ impl Interp {
     pub fn func_args(&mut self, hw: &mut dyn Host, kw: Keyword) -> R<Args> {
         let sig = param_types_of(kw);
         let mut out = Args::default();
-        if self.preset_set {
+        if self.preset_set != PRESET_NONE {
             self.take_preset_into(sig, &mut out.0)?;
         } else if !sig.is_empty() {
             // `fn_args` into `out`.
@@ -203,12 +208,35 @@ impl Interp {
     /// fills it); the preset is used up (also on error) and its vector kept
     /// for the next one.
     fn take_preset_into(&mut self, sig: &str, out: &mut ArgVec) -> R<()> {
-        self.preset_set = false;
+        let kind = std::mem::replace(&mut self.preset_set, PRESET_NONE);
+        if kind == PRESET_INTS {
+            let (vals, mask) = (&self.preset_int_vals, self.preset_int_mask);
+            let get = |k: usize| (k < 32 && mask & (1 << k) != 0).then(|| Value::Int(vals[k]));
+            return self.preset_from(sig, vals.len(), get, out);
+        }
         let mut values = std::mem::take(&mut self.preset);
         let r = self.preset_into(sig, &mut values, out);
         values.clear();
         self.preset = values;
         r
+    }
+
+    /// The preset vector, emptied, for the caller to fill in place: the
+    /// same as `preset_args` with the values pushed (no copy).
+    pub fn preset_buf(&mut self) -> &mut Vec<Option<Value>> {
+        self.preset.clear();
+        self.preset_set = PRESET_VALUES;
+        &mut self.preset
+    }
+
+    /// `preset_args` for integer values: parameter k is `vals[k]` when bit
+    /// k of `given` is set, omitted otherwise (at most 32 parameters). The
+    /// values are converted to the signature like any preset value.
+    pub fn preset_ints(&mut self, vals: &[i32], given: u32) {
+        self.preset_int_vals.clear();
+        self.preset_int_vals.extend_from_slice(vals);
+        self.preset_int_mask = given;
+        self.preset_set = PRESET_INTS;
     }
 
     /// Gives the parameters of the next `inst_args` / `func_args` call,
@@ -223,7 +251,7 @@ impl Interp {
     pub fn preset_args(&mut self, args: &[Option<Value>]) {
         self.preset.clear();
         self.preset.extend_from_slice(args);
-        self.preset_set = true;
+        self.preset_set = PRESET_VALUES;
     }
 
     /// `args(sig)` on values already evaluated: the same conversions and
@@ -232,22 +260,35 @@ impl Interp {
     /// value given); more values, the separator left unread, is reported
     /// once the signature's values are converted.
     fn preset_into(&self, sig: &str, values: &mut [Option<Value>], out: &mut ArgVec) -> R<()> {
+        let n = values.len();
+        self.preset_from(sig, n, |k| values.get_mut(k).and_then(Option::take), out)
+    }
+
+    /// `preset_into` for `n` values given by `get` (`None`: omitted).
+    #[inline]
+    fn preset_from(
+        &self,
+        sig: &str,
+        n: usize,
+        mut get: impl FnMut(usize) -> Option<Value>,
+        out: &mut ArgVec,
+    ) -> R<()> {
         let sig = sig.as_bytes();
         let mut i = 0;
         let mut k = 0;
         while i < sig.len() {
-            let v = match values.get_mut(k).and_then(Option::take) {
+            let v = match if k < n { get(k) } else { None } {
                 None => Value::Int(ENT_NUL),
                 Some(v) => self.convert_param(sig[i], v)?,
             };
             out.push(v);
             k += 1;
-            if sig.get(i + 1).is_some() && k >= values.len() {
+            if sig.get(i + 1).is_some() && k >= n {
                 return err(errors::SYNTAX_ERROR);
             }
             i += 2;
         }
-        if k < values.len() {
+        if k < n {
             return err(errors::SYNTAX_ERROR);
         }
         Ok(())
@@ -465,6 +506,49 @@ mod tests {
         }
     }
 
+    /// `preset_ints` and `preset_buf` give the same `Args` (or error) as
+    /// `preset_args` with the same values.
+    #[test]
+    fn preset_ints_and_buf_match_preset_args() {
+        let mut host = Capture::default();
+        let mut it = Interp::new();
+        let mut seed = 11u32;
+        let mut rnd = |n: u32| {
+            seed = seed.wrapping_mul(1103515245).wrapping_add(12345);
+            (seed >> 8) % n
+        };
+        let show = |r: R<Args>| format!("{:?}", r.map(|a| a.0.to_vec()));
+        let mut checked = 0;
+        for d in crate::tokens::MAIN.iter() {
+            let kw = Keyword {
+                slot: 0,
+                token: d.token,
+            };
+            if d.param_types().is_empty() {
+                continue;
+            }
+            for _ in 0..4 {
+                let n = rnd(d.param_types().len().div_ceil(2) as u32 + 2) as usize;
+                let vals: Vec<i32> = (0..n).map(|_| rnd(200) as i32 - 100).collect();
+                let given = rnd(1 << n.min(16)) | if rnd(2) == 0 { u32::MAX << n } else { 0 };
+                let opts: Vec<Option<Value>> = (0..n)
+                    .map(|k| (given & (1 << k) != 0).then(|| Value::Int(vals[k])))
+                    .collect();
+                it.degrees = rnd(2) == 0;
+                it.preset_args(&opts);
+                let a = show(it.inst_args(&mut host, kw));
+                it.preset_ints(&vals, given);
+                let b = show(it.inst_args(&mut host, kw));
+                it.preset_buf().extend(opts.iter().cloned());
+                let c = show(it.func_args(&mut host, kw));
+                assert_eq!(a, b, "{}", d.name);
+                assert_eq!(a, c, "{}", d.name);
+                checked += 1;
+            }
+        }
+        assert!(checked > 1000);
+    }
+
     #[test]
     fn preset_conversions_and_errors() {
         let mut it = Interp::new();
@@ -534,10 +618,10 @@ mod tests {
         };
         it.preset_args(&[s(), i(1)]);
         assert!(it.inst_args(&mut host, kw).is_err());
-        assert!(!it.preset_set);
+        assert_eq!(it.preset_set, PRESET_NONE);
         it.preset_args(&[i(3), None]);
         let a = it.inst_args(&mut host, kw).unwrap();
         assert_eq!((a.int(0), a.opt(1)), (3, None));
-        assert!(!it.preset_set);
+        assert_eq!(it.preset_set, PRESET_NONE);
     }
 }

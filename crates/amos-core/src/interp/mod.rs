@@ -245,8 +245,13 @@ pub struct Interp {
     /// evaluated by compiled code (`preset_args`).
     /// (The vector is kept between presets: no allocation per call.)
     preset: Vec<Option<Value>>,
-    /// `preset` holds parameters for the next call.
-    preset_set: bool,
+    /// Integer parameters given with `preset_ints` and the mask of those
+    /// given (bit k: parameter k).
+    preset_int_vals: Vec<i32>,
+    preset_int_mask: u32,
+    /// What holds parameters for the next call: `PRESET_NONE`,
+    /// `PRESET_VALUES` (`preset`) or `PRESET_INTS`.
+    preset_set: u8,
     /// Frames of returned procedures, reused by the next calls (boxed: the
     /// boxes themselves are reused, `Ctl::Proc` holds one).
     #[allow(clippy::vec_box)]
@@ -310,7 +315,9 @@ impl Interp {
             not_core: Vec::new(),
             host_inst: Vec::new(),
             preset: Vec::new(),
-            preset_set: false,
+            preset_int_vals: Vec::new(),
+            preset_int_mask: 0,
+            preset_set: 0,
             frame_pool: Vec::new(),
             proc_args: Vec::new(),
             prog_code: Rc::new(Vec::new()),
