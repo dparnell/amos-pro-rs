@@ -264,6 +264,8 @@ enum InputKind {
     Inkey,
     /// `Scin(x,y)`: the last value of the runtime for the same x, y.
     Scin,
+    /// `Mouse Zone`: the last value of the runtime.
+    MouseZone,
 }
 
 /// `Gen::input_fn`: the function and its direct call.
@@ -272,6 +274,8 @@ struct InputFn {
     kind: InputKind,
     token: i32,
     mask: i32,
+    /// Called through the token bridge (not a plain call): its position.
+    bridged: Option<usize>,
 }
 
 /// The parameters of a `Stmt::Keyword`.
@@ -2258,7 +2262,14 @@ impl<'a> Gen<'a> {
     /// `Joy(n)` and `Key State(n)` with an integer parameter, `Inkey$`.
     fn input_fn(&self, fpos: usize, args: &[Expr], ty: Ty) -> Option<InputFn> {
         use tk::*;
-        let (token, mask) = self.plain_call(fpos, true, args.len())?;
+        // (`Key Shift` is not a plain call: the token bridge otherwise.)
+        let (token, mask, bridged) = match self.plain_call(fpos, true, args.len()) {
+            Some((t, m)) => (t, m, None),
+            None if args.is_empty() && structure::function_call(&self.prg.code, fpos)?.kw.token == KEY_SHIFT => {
+                (KEY_SHIFT as i32, 0, Some(fpos))
+            }
+            None => return None,
+        };
         let int_args = |n: usize| {
             args.len() == n
                 && args.iter().all(|a| a.ty == Ty::Int)
@@ -2271,6 +2282,7 @@ impl<'a> Gen<'a> {
             MOUSE_KEY if args.is_empty() => InputKind::Word(layout::IN_MOUSE_KEY),
             TIMER if args.is_empty() => InputKind::Word(layout::IN_TIMER),
             KEY_SHIFT if args.is_empty() => InputKind::KeyShift,
+            MOUSE_ZONE if args.is_empty() => InputKind::MouseZone,
             JOY if int_arg => InputKind::Joy,
             KEY_STATE if int_arg => InputKind::KeyState,
             INKEY_S if args.is_empty() && ty == Ty::Str => InputKind::Inkey,
@@ -2280,7 +2292,7 @@ impl<'a> Gen<'a> {
         if kind != InputKind::Inkey && ty != Ty::Int {
             return None;
         }
-        Some(InputFn { kind, token, mask })
+        Some(InputFn { kind, token, mask, bridged })
     }
 
     /// `input_fn` call: the value from the mirror when it is valid (and,
@@ -2331,6 +2343,10 @@ impl<'a> Gen<'a> {
                 self.w(W::I32Eq);
                 self.w(W::I32And);
             }
+            InputKind::MouseZone => {
+                self.hdr(layout::IN_MZONE_OK);
+                self.w(W::I32And);
+            }
             InputKind::Word(_) | InputKind::KeyShift => {}
         }
         self.if_(BlockType::Result(ValType::I32));
@@ -2369,6 +2385,7 @@ impl<'a> Gen<'a> {
             // The empty string.
             InputKind::Inkey => self.i32c(0),
             InputKind::Scin => self.hdr(layout::IN_SCIN_V),
+            InputKind::MouseZone => self.hdr(layout::IN_MZONE_V),
         }
         self.else_();
         let base = self.bridge_top;
@@ -2382,10 +2399,16 @@ impl<'a> Gen<'a> {
             self.w(W::I32Store(mem32(slot)));
         }
         self.i32c(self.pos as i32);
-        self.i32c(f.token);
-        self.i32c(f.mask);
-        self.i32c(base as i32);
-        self.call(if f.kind == InputKind::Inkey { Imp::PfnS } else { Imp::PfnI });
+        if let Some(fpos) = f.bridged {
+            self.i32c(fpos as i32);
+            self.i32c(base as i32);
+            self.call(Imp::FnI);
+        } else {
+            self.i32c(f.token);
+            self.i32c(f.mask);
+            self.i32c(base as i32);
+            self.call(if f.kind == InputKind::Inkey { Imp::PfnS } else { Imp::PfnI });
+        }
         self.end();
         self.release(a, ValType::I32);
         self.release(b, ValType::I32);

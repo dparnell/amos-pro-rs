@@ -178,8 +178,14 @@ pub const IN_SCIN_OK: u32 = 496;
 pub const IN_SCIN_X: u32 = 500;
 pub const IN_SCIN_Y: u32 = 504;
 pub const IN_SCIN_V: u32 = 508;
+/// The last `Mouse Zone` of the runtime while the mirror is valid: 1 when
+/// set (reset by `host.input_sync`), value. The mouse, the screens and the
+/// zones only change through statements and functions that mark the
+/// mirror stale.
+pub const IN_MZONE_OK: u32 = 512;
+pub const IN_MZONE_V: u32 = 516;
 /// Start of the global variables.
-pub const GLOBALS: u32 = 512;
+pub const GLOBALS: u32 = 576;
 
 pub const PAGE: u32 = 65536;
 

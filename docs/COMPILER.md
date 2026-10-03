@@ -131,7 +131,7 @@ Mid$= ...) are compiled specially.
   (`--interpreted` skips it) and fall back to interpreting on failure.
 * Hosts: `amos-wasmhost` (wasmtime natively, `WebAssembly.instantiate` on
   the web) share the import list in `amos-wasmhost/src/imports.rs`
-  (interface version 17, `amos_core::compiled::ABI_VERSION`).
+  (interface version 18, `amos_core::compiled::ABI_VERSION`).
 * Polling functions read a mirror of the input state in memory
   (`layout::IN_VALID`): `X Mouse`, `Y Mouse`, `Mouse Key`, `Timer`,
   `Joy(0/1)`, `Key State(n)`, `Inkey$` while the key buffer is empty, and

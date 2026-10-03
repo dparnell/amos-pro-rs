@@ -1237,6 +1237,7 @@ impl Runtime {
             b.copy_from_slice(&inp.key_matrix);
         }
         st_i32(mem, layout::IN_SCIN_OK, 0);
+        st_i32(mem, layout::IN_MZONE_OK, 0);
         st_i32(mem, layout::IN_VALID, 1);
         1
     }
@@ -1346,6 +1347,13 @@ impl Runtime {
         let r = r.and_then(|()| it.function_value(hw, Keyword { slot: 0, token: token as u16 }));
         if !structure::input_read_only(token as u16) {
             input_stale(mem);
+        } else if token as u16 == crate::tokens::tk::MOUSE_ZONE
+            && ld_i32(mem, layout::IN_VALID) == 1
+            && let Ok(Value::Int(v)) = &r
+        {
+            // Kept for the module (`layout::IN_MZONE_OK`).
+            st_i32(mem, layout::IN_MZONE_V, *v);
+            st_i32(mem, layout::IN_MZONE_OK, 1);
         } else if token as u16 == crate::tokens::tk::SCIN
             && ld_i32(mem, layout::IN_VALID) == 1
             && let (Ok(Value::Int(v)), Some((x, y))) = (&r, self.last_xy)

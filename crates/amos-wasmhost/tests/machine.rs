@@ -334,6 +334,8 @@ fn polling_functions_match_the_interpreter() {
         "Curs Off\nEvery 3 Gosub E\nDo : T=Timer : K=Key State(69) : If T<Q Then Print T;Q;\nQ=T : Loop\nE: Timer=0 : Clear Key : Every On : Return",
         "Curs Off\nDo : A$=Inkey$ : If A$<>\"\" Then Print A$;\nX=X Mouse : Inc N : If N mod 3000=0 Then Put Key \"q\"\nLoop",
         "Curs Off\nDo : If Key Shift=1 or Key Shift>2 Then Print Key Shift;\nInc N : If N mod 4000=0 Then Print Key Shift<>0;\nLoop",
+        // Mouse Zone kept while the mirror is valid; zones and screens change.
+        "Curs Off\nReserve Zone 4 : Set Zone 1,0,0 To 100,60 : Set Zone 2,100,0 To 200,100\nDo : Z=Mouse Zone : Inc N\nIf N mod 3000=0 Then Print Z;Mouse Zone;\nIf N mod 7000=0 Then Set Zone 3,0,60 To 320,200\nIf N mod 11000=0 Then Reset Zone 1\nIf N mod 13000=0 Then Screen Display 0,,40+(N mod 3)*10,,\nLoop",
     ];
     for p in progs {
         compare_with_input(p, 40);
