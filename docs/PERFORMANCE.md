@@ -256,6 +256,67 @@ interpreted instructions, load independent):
     (store forwarding of the 176 byte copy): compiled Plot loop 4.28 ->
     3.97 G cycles over 200 frames, Ink 3.52 -> 3.26.
 
+### Round 2 (profile of all examples at 9b4eab4: interpreter 84%)
+
+Instruction counts are M instructions per frame of a micro program (the
+statement in a `Do : Loop`), before -> after.
+
+19. **Procedure calls** (`interp/mod.rs`): procedure frames and argument
+    vectors pooled. `r_proc` 233.8 -> 123.3.
+20. **String constants shared** (`interp`): a string constant is one `Rc`
+    per program, cloned instead of copied. `A$="abc"` 79.9 -> 44.5.
+21. **Integer evaluator** (`interp/expr.rs`, `int_prec`): integer-only
+    expressions (constants, integer variables, operators) evaluated
+    without `Value`s first; anything else, or an error, falls back to the
+    general evaluator (no side effects). `exec_flow` split. m3_expr 110.8
+    -> 77.9, interp_maths 152.9 -> 123.0.
+22. **Else cache** (`interp/flow.rs`): the end of an Else block per
+    position, cached per program. If/Else 50.2 -> 43.6.
+23. **Put Block / Zoom / Appear** (`gfx/blocks.rs`, `machine/inst_draw.rs`):
+    no clone of the block or of the source bitmap per call; Put Block row
+    by row with byte masks; Zoom row-major fast path. Put Block 64x64
+    28242 -> 810, Zoom 160x128 -> 320x256 168202 -> 102883. Reference
+    versions kept as tests.
+24. **Text in writing modes** (`gfx/window.rs`): glyphs with Writing /
+    Shade / Under flags 8 pixels at a time. Writing 2 27735 -> 3553
+    (Print of 33 characters). Pixel by pixel version kept for clipped
+    cells and as test reference.
+25. **Print and scrolling** (`gfx/window.rs`, `interp/stmt.rs`): scrolled
+    rows copied without reading the destination when no plane is kept;
+    Print's text buffer kept in `Interp`, integers formatted in place
+    (`ffp::push_int`). Print with scroll 4313 -> 2912, `Print A;` 285.5 ->
+    218.3.
+26. **String results in one allocation** (`interp/expr.rs`, `stmt.rs`):
+    `A$+B$`, Upper$/Lower$/Flip$, Mid$ statement collected straight into
+    the `Rc<[u8]>`; Str$ of an integer formatted on the stack; Pen/Paper &
+    co no longer copy their control string; cursor save in place.
+    `C$=A$+B$` 159.6 -> 123.2, `Str$(I)` 197.3 -> 138.3, `Pen 4 : Paper
+    3` 178.5 -> 135.0. (No interning of short strings: the interface
+    compares strings by address, as the original does.)
+27. **String/maths function parameters** (`interp/expr.rs`): Mid$,
+    Left$, Right$, Instr, String$, Repeat$, Str$, Abs, Int, Sgn read their
+    parameters one by one instead of through the general list. Mid$ 184.3
+    -> 158.7, Abs 96.5 -> 72.9.
+28. **Integer array elements** (`interp/expr.rs`, `int_element`): read by
+    the integer evaluator. `A=T(5)` 75.0 -> 55.2, `T(I+1)=T(I)+1` 140.2 ->
+    113.5 (scalar integer statements +0.6..1.5%).
+29. **Integer presets** (`interp/params.rs`): `preset_ints` values written
+    into the `Args` slots in place. Compiled `Ink 2,3,4` loop 105.8 ->
+    97.1, `Bar` 142.8 -> 131.3.
+30. **Input functions first** (`machine/dispatch.rs`): Mouse Key is called
+    798 M times over all examples (busy-wait loops); the function chain
+    now starts with the input handler (no keyword has two handlers: test
+    `every_keyword_has_at_most_one_handler`). `Repeat : Until Mouse Key`
+    91.8 -> 81.6. All examples: 1418.5 G -> 1363.5 G instructions (items
+    27-30).
+
+Codegen trap met several times: `Interp::run` inlines much of the
+interpreter, and unrelated changes (a grown inlined helper, a new
+`[Value; N]` type whose drop glue changes inlining, a first-token check
+before `int_prec`) cost +20 instructions per statement on every program.
+Check `m0_loop` (`Do : Loop`, 26.0) after any interpreter change; keep
+new code out of line (`#[inline(never)]` helpers) when it moves.
+
 ## API notes for the compiler side
 
 * `Interp::function_value(hw, kw)` (interp/expr.rs): value of the function
@@ -282,3 +343,21 @@ interpreted instructions, load independent):
   preset as from the tokens (all values, each one omitted, two value
   sets), and calling every plain handler with presets (pc elsewhere) gives
   the same result, log and display as the statement in a program.
+* `plain_args` also covers Screen To Front/Back, Hide/Show, Screen (both),
+  Zone / Hzone, Choice, Dialog, Scancode, Key Shift, Limit Mouse,
+  Peek/Deek/Leek, Poke/Doke/Loke, Centre and the collision functions
+  (Bob Col, Sprite Col...).
+* `Interp::preset_buf()` (the preset vector, filled in place) and
+  `Interp::preset_ints(&[i32], given_mask)` (integer presets, no `Value`).
+* `Interp::ctl_generation()`: changes with every structural change of the
+  control stack or the frame stack (`push_frame_index` /
+  `pop_frame_index` / `clear_frame_stack` / `bump_ctl_generation` for
+  changes made on the fields); debug builds check it after every
+  interpreted instruction.
+* Typed keyword functions on `Hardware` (`pub(crate)`, one implementation
+  per keyword, the token arms call them): locate, pen, paper, zone_fn,
+  ink, plot, draw_to, draw, box_, bar, circle, point, limit_mouse /
+  limit_mouse_screen / limit_mouse_area, screen_to_front, colour_fn,
+  x_screen / y_screen / x_hard / y_hard, choice_fn, dialog_fn,
+  poke / doke / loke, peek / deek / leek, mouse_click, scancode
+  (signatures in their doc comments; tests in `typed_keywords`).
