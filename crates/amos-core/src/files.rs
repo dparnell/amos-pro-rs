@@ -229,6 +229,47 @@ impl FileSystem {
         self.mount_native("AMOSPro", &[], root);
     }
 
+    /// Mounts the host's disks so that any file can be reached: on Windows
+    /// each drive letter becomes volume "DriveC" (device "C:"), elsewhere
+    /// the root directory is "Root", the home directory "Home" and, on
+    /// macOS, each disk in /Volumes is mounted under its own name.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn mount_host_drives(&mut self) {
+        #[cfg(windows)]
+        {
+            #[link(name = "kernel32")]
+            unsafe extern "system" {
+                fn GetLogicalDrives() -> u32;
+            }
+            // The drive bitmask avoids touching the drives themselves, which
+            // can block on disconnected network shares.
+            let mask = unsafe { GetLogicalDrives() };
+            for i in 0..26u8 {
+                if mask & (1 << i) != 0 {
+                    let letter = (b'A' + i) as char;
+                    let root = PathBuf::from(format!("{letter}:\\"));
+                    self.mount_native(&format!("Drive{letter}"), &[&letter.to_string()], &root);
+                }
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            self.mount_native("Root", &[], Path::new("/"));
+            if let Some(home) = std::env::var_os("HOME") {
+                self.mount_native("Home", &[], Path::new(&home));
+            }
+            #[cfg(target_os = "macos")]
+            if let Ok(rd) = std::fs::read_dir("/Volumes") {
+                for e in rd.flatten() {
+                    let name = e.file_name().to_string_lossy().replace(':', "_");
+                    if e.path().is_dir() && self.volume_index(&name).is_none() {
+                        self.mount_native(&name, &[], &e.path());
+                    }
+                }
+            }
+        }
+    }
+
     fn volume_index(&self, name: &str) -> Option<usize> {
         self.volumes.iter().position(|v| {
             v.name.eq_ignore_ascii_case(name) || v.aliases.iter().any(|a| a.eq_ignore_ascii_case(name))
@@ -592,5 +633,17 @@ mod tests {
         let l = fs.list("Ram:*.txt").unwrap();
         assert_eq!(l.len(), 2); // sub (dir) + test.txt
         assert!(wildcard_match("#?.AMOS", "Game.amos"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn host_drives() {
+        let mut fs = FileSystem::new();
+        fs.mount_host_drives();
+        let drive = std::env::current_dir().unwrap().to_string_lossy().chars().next().unwrap();
+        let vol = format!("Drive{}", drive.to_ascii_uppercase());
+        assert!(fs.volume_names().contains(&vol));
+        assert!(fs.is_dir(&format!("{drive}:")));
+        assert!(fs.list(&format!("{vol}:")).is_ok());
     }
 }

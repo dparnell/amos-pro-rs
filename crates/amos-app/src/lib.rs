@@ -429,6 +429,7 @@ fn new_machine() -> (Machine, Option<Editor>) {
         {
             m.hw.files.mount_amos_distribution(&root);
         }
+        m.hw.files.mount_host_drives();
         let mut ed = Editor::new(&mut m);
         if let Some(path) = arg {
             let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
