@@ -232,6 +232,15 @@ impl ApplicationHandler<UserEvent> for App {
         }
     }
 
+    /// The next frame is requested once the pending events are handled.
+    /// Requesting it from `RedrawRequested` instead loses the request on
+    /// Windows when input arrives between frames, and the display stops.
+    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
+        if let Some(w) = &self.window {
+            w.request_redraw();
+        }
+    }
+
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
@@ -258,9 +267,6 @@ impl ApplicationHandler<UserEvent> for App {
                     } else {
                         r.render(None);
                     }
-                }
-                if let Some(w) = &self.window {
-                    w.request_redraw();
                 }
             }
             WindowEvent::KeyboardInput { event, .. } => {
