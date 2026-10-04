@@ -116,6 +116,17 @@ pub struct Screen {
 }
 
 impl Screen {
+    /// Area of the display showing the bitmap, in display units, clipped
+    /// to the display.
+    pub fn display_rect(&self) -> crate::display::Rect {
+        use crate::display::{DISPLAY_HEIGHT, DISPLAY_WIDTH, hw_x_to_display, hw_y_to_display};
+        let x0 = hw_x_to_display(self.display_x).clamp(0, DISPLAY_WIDTH as i32);
+        let y0 = hw_y_to_display(self.display_y).clamp(0, DISPLAY_HEIGHT as i32);
+        let x1 = (hw_x_to_display(self.display_x) + self.display_w as i32 * 2).clamp(x0, DISPLAY_WIDTH as i32);
+        let y1 = (hw_y_to_display(self.display_y) + self.display_h as i32 * 2).clamp(y0, DISPLAY_HEIGHT as i32);
+        crate::display::Rect { x: x0, y: y0, w: (x1 - x0) as u32, h: (y1 - y0) as u32 }
+    }
+
     /// Creates a screen; `mode` has the Screen Open bits ($8000 hires,
     /// $4 laced). Validation is done by the caller. No text window is
     /// opened (see [`Screens::open`]).

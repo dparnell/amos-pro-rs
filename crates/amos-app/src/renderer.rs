@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use amos_core::display::{DISPLAY_HEIGHT, DISPLAY_WIDTH, Frame, Layer, LayerFormat};
+use amos_core::display::{DISPLAY_HEIGHT, DISPLAY_WIDTH, Frame, Layer, LayerFormat, Rect};
 use bytemuck::{Pod, Zeroable};
 use winit::window::Window;
 
@@ -26,6 +26,7 @@ struct LayerUniforms {
 struct BlitUniforms {
     rect: [f32; 4],
     sizes: [f32; 4],
+    src: [f32; 4],
 }
 
 /// GPU resources kept for one AMOS screen between frames.
@@ -62,6 +63,8 @@ pub struct Renderer {
     /// Layers of the last frame, back to front, and its border colour.
     order: Vec<u32>,
     border: [u8; 4],
+    /// Part of the display shown in the window.
+    view: Rect,
     /// The display texture does not show the last frame yet.
     needs_composite: bool,
     /// Palette being prepared (kept to avoid an allocation per layer).
@@ -203,6 +206,7 @@ impl Renderer {
             layers: HashMap::new(),
             order: Vec::new(),
             border: [0, 0, 0, 255],
+            view: Rect { x: 0, y: 0, w: DISPLAY_WIDTH, h: DISPLAY_HEIGHT },
             needs_composite: true,
             scratch_palette: Vec::new(),
         })
@@ -217,10 +221,22 @@ impl Renderer {
         self.surface.configure(&self.device, &self.config);
     }
 
-    /// Rectangle (x, y, w, h) in window pixels where the display is shown.
+    /// Sets the part of the display shown in the window (display units).
+    pub fn set_view(&mut self, view: Rect) {
+        if view.w > 0 && view.h > 0 {
+            self.view = view;
+        }
+    }
+
+    /// The part of the display shown in the window.
+    pub fn view(&self) -> Rect {
+        self.view
+    }
+
+    /// Rectangle (x, y, w, h) in window pixels where the view is shown.
     pub fn display_rect(&self) -> [f32; 4] {
         let (sw, sh) = (self.config.width as f32, self.config.height as f32);
-        let (dw, dh) = (DISPLAY_WIDTH as f32, DISPLAY_HEIGHT as f32);
+        let (dw, dh) = (self.view.w as f32, self.view.h as f32);
         let mut scale = (sw / dw).min(sh / dh);
         if scale >= 1.0 {
             // Prefer integer scales when they fill most of the window.
@@ -276,6 +292,7 @@ impl Renderer {
                     self.config.width as f32,
                     self.config.height as f32,
                 ],
+                src: [self.view.x as f32, self.view.y as f32, self.view.w as f32, self.view.h as f32],
             }),
         );
 

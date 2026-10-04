@@ -39,6 +39,14 @@ fn listing(ed: &Editor) -> String {
 }
 
 #[test]
+fn display_rect_is_the_editor_screen() {
+    let mut m = Machine::new();
+    let ed = Editor::new(&mut m);
+    let r = ed.display_rect(&m);
+    assert_eq!((r.x, r.y, r.w, r.h), (64, 48, 640, 512));
+}
+
+#[test]
 fn starts_with_editor_screen() {
     let mut m = Machine::new();
     let mut ed = Editor::new(&mut m);

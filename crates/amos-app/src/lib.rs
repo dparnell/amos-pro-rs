@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use amos_core::Machine;
 use amos_core::editor::Editor;
-use amos_core::display::{DISPLAY_HEIGHT, DISPLAY_WIDTH};
+use amos_core::display::{DISPLAY_HEIGHT, DISPLAY_WIDTH, Rect};
 use amos_core::input::{InputEvent, MouseButton};
 use amos_core::machine::VBL_HZ;
 use winit::application::ApplicationHandler;
@@ -40,6 +40,9 @@ struct App {
     editor: Option<Editor>,
     /// Window title (the program name for standalone applications).
     title: String,
+    /// Part of the display shown in the window: the editor screen, or the
+    /// whole display for a standalone application.
+    view: Rect,
     /// Game controllers used as Amiga joysticks.
     gamepads: gamepad::Gamepads,
     /// The program of a standalone application compiled to WebAssembly
@@ -76,12 +79,17 @@ impl App {
         // one `console.info` per Print).
         machine.hw.log_print = log::log_enabled!(target: "amos_print", log::Level::Debug);
         let max_budget = machine.instructions_per_frame;
+        let view = match &editor {
+            Some(ed) if !overscan_requested() => ed.display_rect(&machine),
+            _ => Rect { x: 0, y: 0, w: DISPLAY_WIDTH, h: DISPLAY_HEIGHT },
+        };
         Self {
             proxy,
             max_budget,
             machine,
             editor,
             title,
+            view,
             gamepads: gamepad::Gamepads::new(),
             compiled,
             window: None,
@@ -174,9 +182,10 @@ impl App {
         match &self.renderer {
             Some(r) => {
                 let [rx, ry, rw, rh] = r.display_rect();
+                let v = r.view();
                 (
-                    (x as f32 - rx) * DISPLAY_WIDTH as f32 / rw,
-                    (y as f32 - ry) * DISPLAY_HEIGHT as f32 / rh,
+                    v.x as f32 + (x as f32 - rx) * v.w as f32 / rw,
+                    v.y as f32 + (y as f32 - ry) * v.h as f32 / rh,
                 )
             }
             None => (x as f32, y as f32),
@@ -192,7 +201,8 @@ impl ApplicationHandler<UserEvent> for App {
         #[allow(unused_mut)]
         let mut attributes = Window::default_attributes()
             .with_title(self.title.clone())
-            .with_inner_size(winit::dpi::LogicalSize::new(DISPLAY_WIDTH as f64 * 1.5, DISPLAY_HEIGHT as f64 * 1.5));
+            .with_inner_size(winit::dpi::LogicalSize::new(self.view.w as f64 * 1.5, self.view.h as f64 * 1.5))
+            .with_resizable(false);
         #[cfg(target_arch = "wasm32")]
         {
             use winit::platform::web::WindowAttributesExtWebSys;
@@ -217,6 +227,8 @@ impl ApplicationHandler<UserEvent> for App {
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
         match event {
             UserEvent::RendererReady(Ok(renderer)) => {
+                let mut renderer = renderer;
+                renderer.set_view(self.view);
                 self.renderer = Some(renderer);
                 self.frame_dirty = true;
                 if let Some(w) = &self.window {
@@ -402,7 +414,7 @@ fn new_machine() -> (Machine, Option<Editor>) {
     let mut m = Machine::new();
     #[cfg(not(target_arch = "wasm32"))]
     {
-        let arg = std::env::args().nth(1).map(std::path::PathBuf::from);
+        let arg = std::env::args().skip(1).find(|a| !a.starts_with("--")).map(std::path::PathBuf::from);
         // The program's folder (or the current one) is the current AMOS
         // directory; the AMOS distribution is searched from there, then from
         // the executable's folder.
@@ -465,6 +477,16 @@ fn find_distribution_from_exe() -> Option<std::path::PathBuf> {
         d = p.parent();
     }
     None
+}
+
+/// `--overscan` on the command line: the editor window shows the whole
+/// display (the overscan area around the editor screen) instead of only the
+/// editor screen.
+fn overscan_requested() -> bool {
+    #[cfg(not(target_arch = "wasm32"))]
+    return std::env::args().skip(1).any(|a| a == "--overscan");
+    #[cfg(target_arch = "wasm32")]
+    false
 }
 
 /// Start AMOS Professional (native entry point; on the web see [`web::start`]).

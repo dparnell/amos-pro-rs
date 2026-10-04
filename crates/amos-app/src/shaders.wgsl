@@ -73,6 +73,8 @@ struct BlitUniforms {
     rect: vec4<f32>,
     // Source texture size, surface size.
     sizes: vec4<f32>,
+    // Shown part of the source texture (x, y, w, h in texels).
+    src: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> blit: BlitUniforms;
@@ -100,8 +102,8 @@ fn blit_vs(@builtin(vertex_index) vi: u32) -> BlitOut {
 @fragment
 fn blit_fs(in: BlitOut) -> @location(0) vec4<f32> {
     let tex_size = blit.sizes.xy;
-    let texel = in.uv * tex_size;
-    let scale = blit.rect.zw / tex_size;
+    let texel = blit.src.xy + in.uv * blit.src.zw;
+    let scale = blit.rect.zw / blit.src.zw;
     let texel_floor = floor(texel);
     let frac = fract(texel);
     let region = clamp(0.5 / scale, vec2<f32>(0.0), vec2<f32>(0.5));

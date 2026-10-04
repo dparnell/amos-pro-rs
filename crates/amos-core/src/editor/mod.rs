@@ -262,6 +262,14 @@ impl Editor {
         }
     }
 
+    /// Area of the display showing the editor screen.
+    pub fn display_rect(&self, m: &Machine) -> crate::display::Rect {
+        match &self.screen {
+            Some(s) => s.display_rect(),
+            None => m.hw.screens.get(EC_EDIT).map_or_else(|| self.new_screen().display_rect(), Screen::display_rect),
+        }
+    }
+
     pub fn doc(&self) -> &Doc {
         &self.docs[self.current]
     }

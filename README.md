@@ -16,7 +16,12 @@ error numbers), same editor, resources and banks.
 ```sh
 cargo run --release -p amos-app                           # the AMOS Pro editor
 cargo run --release -p amos-app -- path/to/program.AMOS   # run a program
+cargo run --release -p amos-app -- --overscan             # show the whole overscan display
 ```
+
+The editor window shows only the editor screen; `--overscan` shows the whole
+PAL overscan area around it (useful for programs that move their screens or
+use overscan).
 
 Text programs (`.txt`/`.Asc`) are tokenised on load. The AMOS distribution
 folders are mounted as the usual volumes (`AMOSPro_System:`,
