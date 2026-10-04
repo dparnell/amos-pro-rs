@@ -1,0 +1,3 @@
+# The AMOS distribution files are used byte for byte (the help .Map
+# files hold offsets into the .Txt files): no line ending conversion.
+AMOS-Professional-365/AMOS/** -text

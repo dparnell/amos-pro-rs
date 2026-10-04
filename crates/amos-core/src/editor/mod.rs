@@ -118,6 +118,9 @@ pub struct Editor {
     slider_drag: Option<usize>,
     /// Document that was run.
     running_doc: usize,
+    /// The program running is an accessory called by an editor function
+    /// (the Help): the programs being edited are left as they are.
+    accessory: bool,
     /// Quit was chosen (the platform closes the window).
     pub quit_requested: bool,
     /// Program screens hidden while the editor is shown.
@@ -180,6 +183,7 @@ impl Editor {
             mouse_prev: 0,
             slider_drag: None,
             running_doc: 0,
+            accessory: false,
             quit_requested: false,
             hidden_screens: Vec::new(),
         };
@@ -397,6 +401,9 @@ impl Editor {
     /// The program stopped: back to the editor, or the Direct / Editor
     /// choice line (`Ed_ErrRun`).
     fn program_stopped(&mut self, m: &mut Machine, info: StopInfo) {
+        if self.accessory {
+            return self.accessory_stopped(m, info);
+        }
         // Banks belong to the program (saved with it).
         let banks: Vec<_> = m.hw.banks.banks.values().filter(|b| b.data_bank).cloned().collect();
         if let Some(d) = self.docs.get_mut(self.running_doc) {
@@ -429,6 +436,60 @@ impl Editor {
             StopReasonOrError::Error(n) => self.cfg.run_message(*n),
             StopReasonOrError::Message(s) => s.clone(),
             StopReasonOrError::Test(n) => self.cfg.test_message(*n),
+        }
+    }
+
+    /// `Ed_PrgCommand` for an accessory (`.Hidden`): runs program `name`
+    /// with `cmd` as its `Command Line$` (None: the current line from the
+    /// word at the cursor), then comes back to the editor when it ends.
+    fn run_accessory(&mut self, m: &mut Machine, name: &str, cmd: Option<Vec<u8>>) {
+        if let Err(e) = self.doc_mut().commit() {
+            return self.edit_error(e);
+        }
+        let cmd = cmd.unwrap_or_else(|| {
+            let d = self.doc();
+            let text = d.current_text();
+            let word = |c: u8| c.is_ascii_alphanumeric() || c == b'_' || c == b'$' || c == b'#';
+            let mut x = d.x.min(text.len());
+            while x > 0 && word(text[x - 1]) {
+                x -= 1;
+            }
+            text[x..].to_vec()
+        });
+        let prg = match m.hw.files.read(name).ok().map(|d| load_program_data(&d)) {
+            Some(Ok(p)) => p,
+            Some(Err(e)) => return self.alert(e.unwrap_or_else(|| self.cfg.message(207))),
+            None => return self.alert(format!("{}{name}", self.cfg.message(184))),
+        };
+        self.hide(m);
+        match m.run_program(&prg) {
+            Ok(()) => {
+                m.hw.command_line = cmd;
+                self.accessory = true;
+                self.mode = Mode::Running;
+            }
+            Err(e) => {
+                self.show(m);
+                self.alert(format!("{name}: {}", self.cfg.test_message(e.code)));
+            }
+        }
+    }
+
+    /// End of an accessory: back to the editor as it was, with the error
+    /// if the accessory stopped on one.
+    fn accessory_stopped(&mut self, m: &mut Machine, info: StopInfo) {
+        self.accessory = false;
+        m.hw.menus = Default::default();
+        m.hw.log.clear();
+        let error = match &info.reason {
+            StopReasonOrError::Stop(_) => None,
+            _ => Some(self.stop_message(&info)),
+        };
+        self.mode = Mode::Edit;
+        self.show(m);
+        m.hw.input.clear_keys();
+        if let Some(e) = error {
+            self.alert(e);
         }
     }
 
@@ -759,7 +820,14 @@ impl Editor {
                 self.dialog(m, dialogs::label::SET_TAB, &[(2, DVal::Int(t))], Then::SetTab);
                 Ok(())
             }
-            27 | 152..=167 | 183 => Err(self.message_alert(13)),
+            // Help (Help key, F5 and the Help menu): the Help accessory.
+            27 | 152..=167 | 183 => {
+                match self.cfg.accessory(if f == 183 { 27 } else { f }) {
+                    Some((name, cmd)) => self.run_accessory(m, &name, cmd),
+                    None => self.alert_message(13),
+                }
+                Ok(())
+            }
             28 => {
                 self.enter_direct(m);
                 Ok(())

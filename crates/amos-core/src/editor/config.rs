@@ -58,6 +58,12 @@ pub struct EdConfig {
     pub test_messages: Vec<Vec<u8>>,
     /// Run-time messages, starting at error 0.
     pub run_messages: Vec<Vec<u8>>,
+    /// Programs called by editor functions (`Ed_AutoLoad`): for each
+    /// function (index = number - 1), flags (bit 0: run as an accessory,
+    /// keeping the current program), the program (message number in
+    /// `autoload`, 0 = none) and its command line (message number, 0 = the
+    /// current line from the cursor).
+    pub autoload_table: Vec<[u8; 3]>,
     pub autoload: Vec<Vec<u8>>,
     pub user_menu: Vec<Vec<u8>>,
     /// Menu tree definitions: 8 byte records (see `menu.rs`).
@@ -116,6 +122,7 @@ impl EdConfig {
             cur.push((k, c.get(p + 1).copied().unwrap_or(0)));
             p += 2;
         }
+        let autoload_table = c.get(92..92 + 184 * 3).map_or_else(Vec::new, |t| t.as_chunks::<3>().0.to_vec());
         let mut sections = Vec::new();
         let mut p = 4 + len;
         for _ in 0..8 {
@@ -150,6 +157,7 @@ impl EdConfig {
             messages: strings(sections[2]),
             test_messages: strings(sections[3]),
             run_messages: strings(sections[4]),
+            autoload_table,
             autoload: strings(sections[5]),
             user_menu: strings(sections[6]),
             menu_defs,
@@ -187,6 +195,18 @@ impl EdConfig {
             Some(m) if !m.is_empty() => crate::detok::latin1_to_string(m),
             _ => crate::errors::message(n).to_string(),
         }
+    }
+
+    /// `Ed_AutoLoad`: the program run by function `f` and its command line
+    /// (None: the current line), if `f` runs an accessory.
+    pub fn accessory(&self, f: u16) -> Option<(String, Option<Vec<u8>>)> {
+        let &[flags, prg, cmd] = self.autoload_table.get((f as usize).checked_sub(1)?)?;
+        if flags & 1 == 0 || prg == 0 {
+            return None;
+        }
+        let name = crate::detok::latin1_to_string(self.autoload.get(prg as usize - 1)?);
+        let cmd = (cmd != 0).then(|| self.autoload.get(cmd as usize - 1).cloned().unwrap_or_default());
+        Some((name, cmd))
     }
 
     /// `Ed_Ky2Fonc` (+Edit.s:1690): the editor function assigned to a key,
@@ -289,5 +309,15 @@ mod tests {
         assert_eq!(c.function_for_key(&k(0x44, 13, 0)), Some(19)); // Return
         assert_eq!(c.function_for_key(&k(0x20, b'a', 0)), None);
         assert_eq!(c.key_name(77).as_deref(), Some("F1"));
+    }
+
+    #[test]
+    fn help_accessory() {
+        let c = EdConfig::defaults();
+        let help = "AMOSPro_Accessories:AMOSPro_Help/AMOSPro_Help.AMOS".to_string();
+        assert_eq!(c.accessory(27), Some((help.clone(), None)));
+        assert_eq!(c.accessory(152), Some((help.clone(), Some(b"HelpMenu".to_vec()))));
+        assert_eq!(c.accessory(167), Some((help, Some(b"HelpInfo".to_vec()))));
+        assert_eq!(c.accessory(77), None);
     }
 }

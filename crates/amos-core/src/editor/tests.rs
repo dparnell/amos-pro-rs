@@ -558,3 +558,28 @@ fn build_application_saves_first() {
     frames(&mut ed, &mut m, 25);
     assert!(matches!(ed.modal, Some(dialogs::Modal::Fsel(Then::BuildFolder))), "{:?}", ed.modal);
 }
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn help_key_runs_help_accessory() {
+    let amos = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../AMOS-Professional-365/AMOS");
+    let mut m = Machine::new();
+    m.hw.files.set_native_root(&amos);
+    let mut ed = Editor::new(&mut m);
+    type_text(&mut ed, &mut m, "Print");
+    ed.doc_mut().x = 2;
+    ed.function(&mut m, 27);
+    assert_eq!(ed.mode, Mode::Running);
+    assert!(m.hw.command_line.starts_with(b"Print"));
+    frames(&mut ed, &mut m, 150);
+    assert_eq!(ed.mode, Mode::Running, "{:?}", m.hw.log);
+    // The page of the instruction is in the work bank shown by the dialog.
+    let page = m.hw.banks.peek_bytes(m.hw.banks.bank_or_address(10).unwrap(), 400);
+    assert!(latin1_to_string(&page).contains("PRINT"), "{}", latin1_to_string(&page));
+    // Esc closes the help: back to the program, unchanged.
+    key(&mut m, raw::ESC, Some('\x1b'));
+    frames(&mut ed, &mut m, 30);
+    assert_eq!(ed.mode, Mode::Edit, "{:?}", m.hw.log);
+    assert_eq!(ed.current_alert(), None);
+    assert!(listing(&ed).contains("Print"));
+}
